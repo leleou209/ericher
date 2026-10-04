@@ -4,6 +4,7 @@
 
 基于 Cloudflare Agents SDK + Durable Objects + React 构建，支持 PWA 与移动端访问。
 
+本项目基于vibe coding且为初创开源项目，代码技术和版本管理经验多有残缺，且请见谅并感谢您提供指导
 ## 功能一览
 
 - **门禁与会话**：口令登录（无内置默认值，未配置直接 503），HMAC 签名的 HttpOnly Cookie 会话票
