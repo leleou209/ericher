@@ -19,6 +19,13 @@ export interface SessionMeta {
   visibility: SessionVisibility;
   created: string;
   lastActive: string;
+  /**
+   * 置顶的时刻（ISO）；空串 = 没置顶。
+   *
+   * 为什么记时刻而不是记一个 0/1：置顶区要按「置顶的先后」排 ——
+   * 先顶上的一直在前，后顶上的排它后面。0/1 分不出先后，就只能按别的东西排了。
+   */
+  pinned: string;
   msgCount: number;
   /** 这场是否已经有过上下文压缩（前端用来标一句「更早的已压缩」） */
   hasDigest: boolean;
@@ -64,6 +71,7 @@ interface SessionRow {
   visibility: string;
   created: string;
   last_active: string;
+  pinned: string;
   n: number;
   digest: string;
   archived: number;
@@ -81,6 +89,7 @@ export function ensureSessionSchema(db: SqlTag): void {
     visibility text not null default 'private',
     created text not null,
     last_active text not null,
+    pinned text not null default '',
     digest text not null default '',
     digest_upto text not null default '',
     archived integer not null default 0,
@@ -156,6 +165,12 @@ export function ensureSessionSchema(db: SqlTag): void {
   } catch {
     // 列已存在
   }
+  // 置顶时刻。老会话一律空串 = 没置顶，升上来之后列表回到按创建时间排的老样子
+  try {
+    db`alter table sessions add column pinned text not null default ''`;
+  } catch {
+    // 列已存在
+  }
 }
 
 /**
@@ -179,6 +194,7 @@ const toMeta = (r: SessionRow): SessionMeta => ({
   visibility: r.visibility === "public" ? "public" : "private",
   created: r.created,
   lastActive: r.last_active,
+  pinned: r.pinned || "",
   msgCount: r.n,
   hasDigest: !!r.digest,
   archived: !!r.archived,
@@ -188,29 +204,37 @@ const toMeta = (r: SessionRow): SessionMeta => ({
   home: r.home || "",
 });
 
+/**
+ * 会话列表：按**创建时间**倒序，新开的在前、旧的往后 —— 顺序一旦定下就不再变。
+ *
+ * 从前按 last_active 排，谁刚说过话谁往上浮：一场聊到一半去回另一场，
+ * 列表就整个换一次位，找那一场得重扫一遍。位置是要能记住的，
+ * 所以「最近聊过」不再参与排序，只留在 lastActive 里供显示与回想调度用。
+ * 想常常够着的几场，用置顶 —— 置顶区按置顶的先后排，见前端。
+ */
 export function listSessions(db: SqlTag): SessionMeta[] {
   const rows = db<SessionRow>`
-    select s.id, s.title, s.visibility, s.created, s.last_active, s.digest, s.archived, s.named, s.unread, s.recap_at, s.home,
+    select s.id, s.title, s.visibility, s.created, s.last_active, s.pinned, s.digest, s.archived, s.named, s.unread, s.recap_at, s.home,
       (select count(*) from session_messages m where m.session_id = s.id) as n
     from sessions s
-    order by s.last_active desc`;
+    order by s.created desc, s.id desc`;
   return rows.map(toMeta);
 }
 
 /** 来客看到的公开会话。归档过的从公开列表里收起 —— 主人都收起来了，还摆在外面给人读不合常理。 */
 export function listPublicSessions(db: SqlTag): SessionMeta[] {
   const rows = db<SessionRow>`
-    select s.id, s.title, s.visibility, s.created, s.last_active, s.digest, s.archived, s.named, s.unread, s.recap_at, s.home,
+    select s.id, s.title, s.visibility, s.created, s.last_active, s.pinned, s.digest, s.archived, s.named, s.unread, s.recap_at, s.home,
       (select count(*) from session_messages m where m.session_id = s.id) as n
     from sessions s
     where s.visibility = 'public' and s.archived = 0
-    order by s.last_active desc`;
+    order by s.created desc, s.id desc`;
   return rows.map(toMeta);
 }
 
 export function getSession(db: SqlTag, id: string): SessionMeta | null {
   const rows = db<SessionRow>`
-    select s.id, s.title, s.visibility, s.created, s.last_active, s.digest, s.archived, s.named, s.unread, s.recap_at, s.home,
+    select s.id, s.title, s.visibility, s.created, s.last_active, s.pinned, s.digest, s.archived, s.named, s.unread, s.recap_at, s.home,
       (select count(*) from session_messages m where m.session_id = s.id) as n
     from sessions s
     where s.id = ${id}`;
@@ -357,6 +381,20 @@ export function setSessionArchived(
   return !!getSession(db, id);
 }
 
+/**
+ * 置顶 / 取消置顶。置顶区按这个时刻升序排 —— 先顶上的一直在前，
+ * 所以「取消再顶」= 排到置顶区末尾，符合「最后动的那一场靠后」的直觉。
+ * 置顶不是归档的反面：两者互不干涉，收起来的场照样可以置着顶（只是先收在归档里）。
+ */
+export function setSessionPinned(
+  db: SqlTag,
+  id: string,
+  pinned: boolean,
+): boolean {
+  db`update sessions set pinned = ${pinned ? new Date().toISOString() : ""} where id = ${id}`;
+  return !!getSession(db, id);
+}
+
 /** 我自己开了一场、他还没看过。闪和角标都以这个记号为据。 */
 export function markSessionUnread(db: SqlTag, id: string): void {
   db`update sessions set unread = 1 where id = ${id}`;
@@ -419,8 +457,9 @@ function sortKeys(value: unknown): unknown {
  * 读回来逐条比对（读不占写入额度），一样的一个字都不写；会话变短时才删尾巴。
  *
  * 返回「这一趟有没有真动过」。调用方拿它当「这场有新内容」的判据：
- * 光翻列表、点开一场旧的，内容一个字没变，那就连 last_active 都不该动 ——
- * 否则仅仅因为点了一下，那一场就会跳到列表最前面。
+ * 光翻列表、点开一场旧的，内容一个字没变，那就不该报成「有新内容」——
+ * last_active 只该由真的说过来往记，不能因为点了一下就当成聊过
+ * （它现在还管着回想调度：谁停够了、之后又添过新话）。
  */
 export function saveSessionMessages(
   db: SqlTag,

@@ -825,10 +825,34 @@ function Shell({
   }, []);
 
   /**
+   * 把攥在手里的「第一句话」还给输入框。
+   *
+   * 换场等不下去（保险丝烧断、人自己换去别处）时用。以前这里只是把它丢掉再提一句
+   * 「再说一次就行」—— 等于让人白打一遍字，长句和附言都白费。至少把话放回原处：
+   * 人按一下回车就重试，不用重打。
+   * 输入框里已经有人自己打的新内容就不动它（合并两份文字比丢掉一份更糟）。
+   */
+  const restoreQueued = useCallback(
+    (why: string) => {
+      const q = queuedSend.current;
+      if (!q) return;
+      queuedSend.current = null;
+      const text =
+        typeof q === "string" ? q : ((q as { text?: string })?.text ?? "");
+      if (text) setInput((cur) => (cur ? cur : text));
+      if (why) flash(why);
+    },
+    [flash],
+  );
+
+  /**
    * 掀开换场遮罩，并压一根保险丝：新屋一直不回话（网断了、屋起不来）时
    * 也得把遮罩撤掉 —— 把人锁在一层毛玻璃后面，比慢本身更糟。
-   * 保险丝烧断时如果手上还攥着等着补发的第一句话，那句话就是没发出去，
-   * 得说一声：默默吞掉比慢严重。
+   *
+   * 保险丝的时限跟着「新屋要冷启动」这件事定：一间没开过的场屋连上来要建库、跑迁移，
+   * 起步还得跨间去人屋取人设与偏好 —— 刚部署完（所有屋都是冷的）这条链更慢。
+   * 15 秒太紧，实测就会在「话还攥在手里」时烧断，等于把人的第一句话吃了。
+   * 保险丝烧断时不再丢掉它：还给输入框（见 restoreQueued），让人一键重试。
    */
   const beginSwitch = useCallback(
     (id: string, title: string, mode: "new" | "switch") => {
@@ -836,13 +860,10 @@ function Shell({
       window.clearTimeout(switchFuse.current);
       switchFuse.current = window.setTimeout(() => {
         setSwitching(null);
-        if (queuedSend.current) {
-          queuedSend.current = null;
-          flash("新会话没接上，那句话我没发出去 —— 再说一次就行");
-        }
-      }, 15000);
+        restoreQueued("新会话没接上，那句话给你放回输入框了 —— 按回车再发一次");
+      }, 30000);
     },
-    [flash],
+    [restoreQueued],
   );
 
   const endSwitch = useCallback(() => {
@@ -980,11 +1001,17 @@ function Shell({
   // 新屋把状态推回来了：activeSession 落到目标上，就是「到了」，撤遮罩。
   // 连接也认出来了才算数 —— 否则刚换连接、旧屋的 state 还挂在那儿时会被误判成到位。
   //
+  // 三道都要过：identified（socket 认过身份了）、agent.name 就是我们要去的屋
+  // （旧屋的 state 可能还没散，光看 activeSession 会被它骗过去），
+  // 以及 activeSession 落到目标场。agent.name 是服务端报回来的实例名，
+  // 它一对上就说明这条 socket 真挂在目标屋上了 —— 比只等 state 到的更快也更准。
+  //
   // 补发也在这儿：等着的「第一句话」必须等屋真连上再发 —— 提前发就落到上一间屋里去了
   // （换连接不是同步的，手上的 socket 还是旧的那条）。
   useEffect(() => {
     if (!switching) return;
-    if (!(agent.identified && state.activeSession === switching.id)) return;
+    if (!agent.identified || agent.name !== activeRoom) return;
+    if (state.activeSession !== switching.id) return;
     endSwitch();
     const q = queuedSend.current;
     if (!q) return;
@@ -994,6 +1021,8 @@ function Shell({
     switching,
     state.activeSession,
     agent.identified,
+    agent.name,
+    activeRoom,
     endSwitch,
     sendMessage,
   ]);
@@ -1360,10 +1389,9 @@ function Shell({
       setPending([]); // 攒着还没发的附件属于上一场的话题，别跟着搬过去
       // 新对话 = 新开一间场屋。后端当场把场 id 和屋名算好（home），人屋本尊一动不动。
       //
-      // 但这里**不换连接**：一间场屋就是一个完整的 DO 实例，连上去就要冷启动、
-      // 建库、跑迁移。「点了新建、一个字没说就走」会留下一间侧栏里看不见、
-      // 界面上也删不掉的屋 —— 所以屋先不开，等这一场的第一句话要说出口了再开
-      // （见 pendingRoom 与 send 里那一段）。拿 id 建 stub 不会实例化 DO，这一步不花钱。
+      // 但这里**不换连接**：屋此刻还不建（建 stub 不会实例化 DO），等这一场的第一句话
+      // 要说出口了才换（见 pendingRoom 与 send 里那一段）—— 那句话正好落进新屋的第一轮。
+      // 没人说过话的场，就不会留下一间看不见也删不掉的空屋。
       const meta = await api.createSession();
       if (meta?.home) {
         setActiveSession(meta.id);
@@ -1421,9 +1449,11 @@ function Shell({
       if (busy) halt(); // 同上：切走之前先收干净，别让回答串场
       setPending([]); // 待发的附件跟人走，不跟着会话走
       const from = activeSession;
-      // 走开就等于把这间没开出来的屋作废 —— 它还没建，作废不掉任何东西
+      // 走开就等于把这间还没开出来的屋作废 —— 它还没建，作废不掉任何东西。
+      // 若那句话还攥在手上（屋没接上人就换走），还给输入框：这里不另发提示，
+      // 紧接着的「已切换」提示会把它盖掉，说也白说
       if (pendingRoom) {
-        queuedSend.current = null;
+        restoreQueued("");
         setPendingRoom(null);
       }
       // 先把侧栏跳到这一场、把遮罩盖上，再去谈连接和搬运 ——
@@ -1462,6 +1492,7 @@ function Shell({
       halt,
       loadSessions,
       pendingRoom,
+      restoreQueued,
       sessions,
     ],
   );
@@ -1547,6 +1578,25 @@ function Shell({
     [flash, loadSessions],
   );
 
+  /**
+   * 置顶 / 取消置顶。只把这一场挪进或挪出置顶区，内容一个字不动。
+   * 置顶区按「置顶的先后」排：先顶上的一直在前，后顶上的顺次往后 ——
+   * 所以取消再顶，等于排到置顶区末尾。
+   */
+  const togglePin = useCallback(
+    async (s: SessionMeta) => {
+      const next = !s.pinned;
+      try {
+        await api.setSessionPinned(s.id, next);
+        await loadSessions();
+        flash(next ? "已置顶，排在置顶区末尾" : "已取消置顶");
+      } catch (e) {
+        flash((e as Error).message);
+      }
+    },
+    [flash, loadSessions],
+  );
+
   const organize = useCallback(async () => {
     if (!isAdmin) return;
     // 同款连点门闩：整理已在跑就别再提交一次，否则等于白烧两轮 LLM
@@ -1623,6 +1673,7 @@ function Shell({
             onDelete={deleteSession}
             onToggleVisibility={toggleVisibility}
             onToggleArchive={toggleArchive}
+            onTogglePin={togglePin}
             onNew={newSession}
             view={view}
             onNav={nav}
@@ -2098,6 +2149,7 @@ function Shell({
             onDeleteSession={deleteSession}
             onToggleVisibility={toggleVisibility}
             onToggleArchive={toggleArchive}
+            onTogglePin={togglePin}
             onLogout={logout}
             online={online}
             motion={motion}

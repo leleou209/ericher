@@ -20,7 +20,9 @@ import type { SqlTag } from "../src/agent/state";
 // 这两个包的底层拖着 cloudflare: 协议模块，vitest 的 ESM loader 加载不了。
 // 这些方法只用假 this 上的家当，不碰基类 —— 空壳替掉就行
 vi.mock("@cloudflare/ai-chat", () => ({ AIChatAgent: class {} }));
-vi.mock("agents", () => ({ getCurrentAgent: () => ({ agent: undefined }) }));
+vi.mock("agents", () => ({
+  getCurrentAgent: () => ({ agent: undefined }),
+}));
 
 /** 只认 sessions / session_messages 相关语句的假库 */
 function makeDb() {

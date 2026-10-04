@@ -1314,6 +1314,7 @@ export function SessionSection({
   onDelete,
   onToggleVisibility,
   onToggleArchive,
+  onTogglePin,
   summaries,
 }: {
   list: SessionMeta[];
@@ -1323,9 +1324,25 @@ export function SessionSection({
   onDelete: (s: SessionMeta) => void;
   onToggleVisibility: (s: SessionMeta) => void;
   onToggleArchive: (s: SessionMeta) => void;
+  onTogglePin: (s: SessionMeta) => void;
   summaries: Summary[];
 }) {
-  const live = list.filter((s) => !s.archived);
+  // 置顶的排前面（按置顶的先后），其余照旧按创建时间倒序（后端已排好）
+  const live = list
+    .filter((s) => !s.archived)
+    .sort((a, b) =>
+      a.pinned && b.pinned
+        ? a.pinned < b.pinned
+          ? -1
+          : a.pinned > b.pinned
+            ? 1
+            : 0
+        : a.pinned
+          ? -1
+          : b.pinned
+            ? 1
+            : 0,
+    );
   const shelved = list.filter((s) => s.archived);
   return (
     <div className="panel-body">
@@ -1344,6 +1361,7 @@ export function SessionSection({
               >
                 {s.visibility === "public" ? "公开" : "私有"}
               </span>
+              {s.pinned && <span className="tag">置顶</span>}
               {s.id === active && <span className="tag">当前</span>}
               {s.hasDigest && (
                 <span
@@ -1363,6 +1381,13 @@ export function SessionSection({
                 onClick={() => onSwitch(s.id, s.title)}
               >
                 切过去
+              </button>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => onTogglePin(s)}
+                title={s.pinned ? "取消置顶" : "置顶，排到置顶区末尾"}
+              >
+                {s.pinned ? "取消置顶" : "置顶"}
               </button>
               <button
                 className="btn btn-ghost btn-sm"

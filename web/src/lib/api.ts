@@ -335,6 +335,9 @@ export const api = {
       "/api/sessions/archive",
       json("POST", { id, archived }),
     ),
+  /** 置顶 / 取消置顶：只影响侧栏摆在哪一段，不动内容与公开状态 */
+  setSessionPinned: (id: string, pinned: boolean) =>
+    req<SessionMeta | null>("/api/sessions/pin", json("POST", { id, pinned })),
   deleteSession: (id: string) =>
     req<{ removed: boolean; active: string }>(
       "/api/sessions/delete",

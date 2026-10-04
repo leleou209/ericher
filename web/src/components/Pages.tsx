@@ -351,6 +351,7 @@ export function ChatSidebar({
   onDelete,
   onToggleVisibility,
   onToggleArchive,
+  onTogglePin,
   onNew,
   view,
   onNav,
@@ -371,6 +372,7 @@ export function ChatSidebar({
   onDelete: (s: SessionMeta) => void;
   onToggleVisibility: (s: SessionMeta) => void;
   onToggleArchive: (s: SessionMeta) => void;
+  onTogglePin: (s: SessionMeta) => void;
   onNew: () => void;
   view: ViewKey;
   onNav: (v: ViewKey) => void;
@@ -392,7 +394,13 @@ export function ChatSidebar({
   // 谁都只看自己那几场 —— 后端按登录身份把请求落到各自的屋子，
   // 来客拿到的就是他自己的对话，不再是别人公开出来的那一批
   // 归档的收进折叠分组：列表长了以后，真正在聊的几场不该被旧对话淹没
-  const list = sessions.filter((s) => !s.archived);
+  // 置顶的另立一段，排在主列表之上：这一段按「置顶的先后」升序 ——
+  // 先顶上的一直在前，后顶上的顺次往后（取消再顶 = 排到这一段末尾）
+  const pinned = sessions
+    .filter((s) => s.pinned && !s.archived)
+    .sort((a, b) => (a.pinned < b.pinned ? -1 : a.pinned > b.pinned ? 1 : 0));
+  // 主列表按创建时间倒序（后端已排好，这里不再动）：发消息、点开都不换位
+  const list = sessions.filter((s) => !s.archived && !s.pinned);
   const archived = sessions.filter((s) => s.archived);
   const [showArchived, setShowArchived] = useState(false);
 
@@ -443,6 +451,94 @@ export function ChatSidebar({
     }, 280);
     return () => clearTimeout(t);
   }, [q, isAdmin]);
+
+  /**
+   * 一行会话。置顶区与主列表用的是同一行渲染 —— 两处的行必须长得一模一样，
+   * 各写一份迟早会有一边漏掉某个按钮（同一扇门对齐）。
+   */
+  const renderRow = (s: SessionMeta) => (
+    <div
+      key={s.id}
+      className={`history-item ${s.id === active ? "on" : ""} ${fresh.includes(s.id) ? "flash" : ""}`}
+    >
+      <button
+        className="history-open"
+        onClick={() => {
+          onSwitch(s.id, s.title);
+          onClose();
+        }}
+      >
+        <Icon name="message" size={16} />
+        <span className="history-title">{s.title}</span>
+        {/* 他开的那一场：闪过去之后，这个点就是「这里还有一件没看的事」 */}
+        {s.unread && (
+          <span className="history-dot" title="ericher 另开的一场，你还没看" />
+        )}
+        {isAdmin && s.visibility === "public" && (
+          <span className="history-badge">公开</span>
+        )}
+      </button>
+      {isAdmin && (
+        <span className="history-tools">
+          <button
+            className={`history-edit${s.pinned ? " on" : ""}`}
+            title={s.pinned ? "取消置顶" : "置顶，排到置顶区末尾"}
+            onClick={(e) => {
+              e.stopPropagation();
+              onTogglePin(s);
+            }}
+          >
+            <Icon name="pin" size={13} />
+          </button>
+          <button
+            className="history-edit"
+            title={
+              s.visibility === "public" ? "收回为私有" : "设为公开，来客可读"
+            }
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleVisibility(s);
+            }}
+          >
+            <Icon
+              name={s.visibility === "public" ? "book-open" : "bookmark"}
+              size={13}
+            />
+          </button>
+          <button
+            className="history-edit"
+            title="重命名"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRename(s);
+            }}
+          >
+            <Icon name="edit" size={13} />
+          </button>
+          <button
+            className="history-edit"
+            title="收起（不删，内容都还在）"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleArchive(s);
+            }}
+          >
+            <Icon name="archive" size={13} />
+          </button>
+          <button
+            className="history-edit danger"
+            title="删除"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(s);
+            }}
+          >
+            <Icon name="trash" size={13} />
+          </button>
+        </span>
+      )}
+    </div>
+  );
 
   return (
     <aside className={`chat-sidebar ${open ? "open" : ""}`}>
@@ -536,91 +632,20 @@ export function ChatSidebar({
           </nav>
         ) : (
           <>
+            {/* 置顶区：另立一段摆在最上面，区内按置顶的先后排。
+                没有置顶的场时整段不出现 —— 不留一个空标题占位 */}
+            {!!pinned.length && (
+              <>
+                <div className="history-label">置顶</div>
+                <nav className="chat-history">{pinned.map(renderRow)}</nav>
+              </>
+            )}
             <div className="history-label">
               {isAdmin ? "我的会话" : "我的对话"}
             </div>
             <nav className="chat-history">
-              {list.map((s) => (
-                <div
-                  key={s.id}
-                  className={`history-item ${s.id === active ? "on" : ""} ${fresh.includes(s.id) ? "flash" : ""}`}
-                >
-                  <button
-                    className="history-open"
-                    onClick={() => {
-                      onSwitch(s.id, s.title);
-                      onClose();
-                    }}
-                  >
-                    <Icon name="message" size={16} />
-                    <span className="history-title">{s.title}</span>
-                    {/* 他开的那一场：闪过去之后，这个点就是「这里还有一件没看的事」 */}
-                    {s.unread && (
-                      <span
-                        className="history-dot"
-                        title="ericher 另开的一场，你还没看"
-                      />
-                    )}
-                    {isAdmin && s.visibility === "public" && (
-                      <span className="history-badge">公开</span>
-                    )}
-                  </button>
-                  {isAdmin && (
-                    <span className="history-tools">
-                      <button
-                        className="history-edit"
-                        title={
-                          s.visibility === "public"
-                            ? "收回为私有"
-                            : "设为公开，来客可读"
-                        }
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onToggleVisibility(s);
-                        }}
-                      >
-                        <Icon
-                          name={
-                            s.visibility === "public" ? "book-open" : "bookmark"
-                          }
-                          size={13}
-                        />
-                      </button>
-                      <button
-                        className="history-edit"
-                        title="重命名"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onRename(s);
-                        }}
-                      >
-                        <Icon name="edit" size={13} />
-                      </button>
-                      <button
-                        className="history-edit"
-                        title="收起（不删，内容都还在）"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onToggleArchive(s);
-                        }}
-                      >
-                        <Icon name="archive" size={13} />
-                      </button>
-                      <button
-                        className="history-edit danger"
-                        title="删除"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onDelete(s);
-                        }}
-                      >
-                        <Icon name="trash" size={13} />
-                      </button>
-                    </span>
-                  )}
-                </div>
-              ))}
-              {!list.length && (
+              {list.map(renderRow)}
+              {!list.length && !pinned.length && (
                 <p className="empty-sm">
                   {archived.length
                     ? "这几场都收起来了，展开「已归档」就能看到"
@@ -1138,6 +1163,7 @@ export function SettingsPage({
   onDeleteSession,
   onToggleVisibility,
   onToggleArchive,
+  onTogglePin,
   onLogout,
   online,
   motion,
@@ -1172,6 +1198,7 @@ export function SettingsPage({
   onDeleteSession: (s: SessionMeta) => void;
   onToggleVisibility: (s: SessionMeta) => void;
   onToggleArchive: (s: SessionMeta) => void;
+  onTogglePin: (s: SessionMeta) => void;
   onLogout: () => void;
   online: boolean;
   motion: boolean;
@@ -1483,6 +1510,7 @@ export function SettingsPage({
                   onDelete={onDeleteSession}
                   onToggleVisibility={onToggleVisibility}
                   onToggleArchive={onToggleArchive}
+                  onTogglePin={onTogglePin}
                   summaries={state.summaries ?? []}
                 />
               </div>

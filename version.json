@@ -1,6 +1,6 @@
 {
-  "version": "0.1.3",
-  "hash": "e11dea7",
-  "message": "fix: 更新检查改读 raw 的 version.json，不再打 api.github.com",
-  "date": "2026-10-03T09:44:54.031Z"
+  "version": "0.1.4",
+  "hash": "26e57a0",
+  "message": "feat: 会话列表改创建序 + 置顶区，空屋由构造消除，记忆读路口径统一（v0.1.4）",
+  "date": "2026-10-04T20:44:42.715Z"
 }

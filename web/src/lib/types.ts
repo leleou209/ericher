@@ -356,6 +356,11 @@ export interface SessionMeta {
   visibility: "private" | "public";
   created: string;
   lastActive: string;
+  /**
+   * 置顶时刻（ISO）；空串 = 没置顶。侧栏用它分出置顶区，
+   * 区内按这个时刻升序 —— 先顶上的一直在前，后顶上的顺次往后。
+   */
+  pinned: string;
   msgCount: number;
   /** 这场更早的部分已经被压缩成摘要（原文还在，只是不再整段发给我） */
   hasDigest: boolean;

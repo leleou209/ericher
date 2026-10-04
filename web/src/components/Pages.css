@@ -416,6 +416,11 @@
   color: var(--yuzhe-danger);
 }
 
+/* 已置顶的那一枚：常亮，一眼看出这场在置顶区里 */
+.history-edit.on {
+  color: var(--yuzhe-ink);
+}
+
 /* 已归档分组：一条发丝线隔开的折叠头 */
 .history-group {
   display: flex;

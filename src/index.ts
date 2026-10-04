@@ -1641,6 +1641,19 @@ async function handleApi(
       return fail(e);
     }
   }
+  if (p === "/api/sessions/pin" && m === "POST") {
+    try {
+      const { id, pinned } = (await req.json()) as {
+        id?: string;
+        pinned?: boolean;
+      };
+      if (!id)
+        return Response.json({ ok: false, error: "缺少 id" }, { status: 400 });
+      return writeState(Promise.resolve(agent.setSessionPinned(id, !!pinned)));
+    } catch (e) {
+      return fail(e);
+    }
+  }
   if (p === "/api/sessions/delete" && m === "POST") {
     try {
       const { id } = (await req.json()) as { id?: string };

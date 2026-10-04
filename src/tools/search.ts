@@ -607,7 +607,14 @@ export async function runSearch(
           return `${i + 1}. ${r.title || "无标题"}${when}\n${(r.content || "").slice(0, 600)}\n🔗 ${r.url || ""}`;
         });
         const head = data.answer ? `💡 摘要：${data.answer}\n\n` : "";
-        return head + lines.join("\n\n");
+        // 成功了也要留名字：不然「返回里没有通道标记」这件事本身会被读成
+        // 「主通道没接上」，而它其实只是成功得没吭声。Brave 与免费通道都报了名，
+        // 就这条不报，反推出错的可能恰恰最大
+        return (
+          "（Tavily 检索，只有摘要与网页片段；要细节就 read_url 打开其中一条）\n\n" +
+          head +
+          lines.join("\n\n")
+        );
       }
       fallbackWhy = "（备注：Tavily 通了但一条结果都没给，本次走免费通道）";
     } catch {

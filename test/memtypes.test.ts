@@ -15,7 +15,12 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { insertMemory, scoreMemory, type NewMemory } from "../src/agent/memory";
+import {
+  insertMemory,
+  scoreMemory,
+  type MemoryStats,
+  type NewMemory,
+} from "../src/agent/memory";
 import { memoryTools } from "../src/tools/memory";
 import type { ToolCtx } from "../src/tools/types";
 import type { MemEntry, SqlTag } from "../src/agent/state";
@@ -78,6 +83,13 @@ function makeDb(seed: Record<string, unknown>[] = []) {
       return rows
         .filter((r) => r.dedupe_key === values[0])
         .map((r) => ({ ...r })) as never;
+    }
+
+    // listMemories 按书架列：只认这一条（过滤 + 限流），够测「退回本地」那条路
+    if (q.startsWith("SELECT * FROM memories WHERE shelf")) {
+      return rows
+        .filter((r) => r.shelf === values[0] && r.superseded_by === "")
+        .slice(0, values[1] as number) as never;
     }
 
     throw new Error(`假的 sql 没认出这条语句：${q}`);
@@ -370,5 +382,102 @@ describe("memory 工具：幂等重跑不再喂向量", () => {
     await run(ctx, "普通一条");
     expect(db.rows).toHaveLength(1);
     expect(vectors).toHaveLength(1);
+  });
+});
+
+describe("memory 工具：stats / list 走跨间合并入口（场屋不再误报空）", () => {
+  // 场屋的本地表只装这一场写过的，光看本地必然报「空」，而 search 明明查得到。
+  // 这条测试钉住那个口径：stub 一个「一碰就炸」的本地表，证明 stats/list 真走了合并入口。
+  const boom = (() => {
+    throw new Error("stats/list 不该再碰本地表这条读路");
+  }) as unknown as SqlTag;
+
+  const fieldStats: MemoryStats = {
+    total: 12,
+    gone: 1,
+    shelves: [
+      { shelf: "identity", n: 5 },
+      { shelf: "projects", n: 6 },
+    ],
+    due: 2,
+    unsettled: 0,
+  };
+  const fieldList: MemEntry[] = [
+    entryOf({
+      id: "m-identity",
+      shelf: "identity",
+      type: "fact",
+      content: "他叫 ericher",
+    }),
+  ];
+
+  const ctx = {
+    sql: boom,
+    env: {},
+    state: {},
+    statsMemories: async () => fieldStats,
+    listMemoriesMerged: async (shelf: string | undefined) =>
+      shelf === "identity" ? fieldList : [],
+  } as unknown as ToolCtx;
+
+  const exec = memoryTools(ctx).memory as unknown as {
+    execute: (input: unknown) => Promise<string>;
+  };
+
+  it("stats：用合并后的全局盘点，说得清每个书架各有多少", async () => {
+    const out = await exec.execute({ action: "stats" });
+    expect(out).not.toContain("记忆库为空");
+    expect(out).toContain("还算数的 11 条");
+    expect(out).toContain("[identity] 5 条");
+    expect(out).toContain("[projects] 6 条");
+  });
+
+  it("list：按书架取合并结果，本地那本空账不影响", async () => {
+    const out = await exec.execute({ action: "list", shelf: "identity" });
+    expect(out).toContain("[identity] 1 条");
+    expect(out).toContain("m-identity");
+  });
+
+  it("ctx 没配合并入口：退回本地直读（场外房间与测试仍走得通）", async () => {
+    // 假表存的是「列已落库」的形状：tags 是逗号串、bool 是 0/1，不是 MemEntry 的数组
+    const local = makeDb([
+      {
+        id: "m-local",
+        date: "2026-09-22",
+        type: "insight",
+        tags: "insight",
+        weight: 0.5,
+        shelf: "knowledge",
+        person: "",
+        visibility: "private",
+        content: "本地一条",
+        accessed: 0,
+        learned: "2026-09-22T00:00:00.000Z",
+        superseded_by: "",
+        volatility: "stable",
+        verified: "",
+        valid_at: "",
+        invalid_at: "",
+        conflicts_with: "",
+        title: "",
+        file_key: "",
+        session_id: "",
+        sentiment: "",
+        sensitivity: "normal",
+        score: 0,
+        visibility_hold: 0,
+      },
+    ]);
+    const plain = {
+      sql: local.sql,
+      env: {},
+      state: {},
+    } as unknown as ToolCtx;
+    const plainExec = memoryTools(plain).memory as unknown as {
+      execute: (input: unknown) => Promise<string>;
+    };
+    await expect(
+      plainExec.execute({ action: "list", shelf: "knowledge" }),
+    ).resolves.toContain("本地一条");
   });
 });

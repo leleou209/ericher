@@ -5,9 +5,6 @@ import { z } from "zod";
 import {
   ageLabel,
   confirmMemory,
-  countConflicted,
-  countMemories,
-  countSuperseded,
   deleteMemory,
   deleteVector,
   findConflicts,
@@ -19,6 +16,7 @@ import {
   listMemoriesByPerson,
   listPersons,
   listSuperseded,
+  memoryStats,
   getMemoryByDedupeKey,
   needsReview,
   restoreMemory,
@@ -199,21 +197,19 @@ export function memoryTools(ctx: ToolCtx) {
           ctx.recallCache?.clear();
 
         if (a.action === "stats") {
-          const total = countMemories(sql);
-          const gone = countSuperseded(sql);
-          const rows = sql<{ shelf: string; n: number }>`
-            SELECT shelf, COUNT(*) AS n FROM memories WHERE superseded_by = '' GROUP BY shelf ORDER BY n DESC`;
-          if (!total) return "记忆库为空。";
-          const due = listDueForReview(sql, 200).length;
-          const unsettled = countConflicted(sql);
+          // 统一入口：场屋本地盘加主屋盘（ctx 没配就本地直盘）
+          const s = ctx.statsMemories
+            ? await ctx.statsMemories()
+            : memoryStats(sql);
+          if (!s.total) return "记忆库为空。";
           return (
-            `📚 还算数的 ${total - gone} 条${gone ? `（另有 ${gone} 条已被新说法作废，可 history 回看）` : ""}：\n` +
-            rows.map((r) => `[${r.shelf}] ${r.n} 条`).join("\n") +
-            (due
-              ? `\n🕰 其中 ${due} 条是关于现状、又有一阵没核对的，due_for_review 可以看是哪些。`
+            `📚 还算数的 ${s.total - s.gone} 条${s.gone ? `（另有 ${s.gone} 条已被新说法作废，可 history 回看）` : ""}：\n` +
+            s.shelves.map((r) => `[${r.shelf}] ${r.n} 条`).join("\n") +
+            (s.due
+              ? `\n🕰 其中 ${s.due} 条是关于现状、又有一阵没核对的，due_for_review 可以看是哪些。`
               : "") +
-            (unsettled
-              ? `\n❓ 还有 ${unsettled} 条和别的说法对不上，conflicts 可以看是哪些。`
+            (s.unsettled
+              ? `\n❓ 还有 ${s.unsettled} 条和别的说法对不上，conflicts 可以看是哪些。`
               : "")
           );
         }
@@ -306,12 +302,18 @@ export function memoryTools(ctx: ToolCtx) {
         }
 
         if (a.action === "list") {
-          const items = listMemories(sql, a.shelf, 50, {
-            includeSuperseded: a.includeSuperseded,
-          });
-          if (!items.length) return `书架「${a.shelf}」是空的。`;
+          // 统一入口：场屋本地列加主屋列合并（ctx 没配就本地直列）
+          const shelf = a.shelf;
+          const items = ctx.listMemoriesMerged
+            ? await ctx.listMemoriesMerged(shelf, 50, {
+                includeSuperseded: a.includeSuperseded,
+              })
+            : listMemories(sql, shelf, 50, {
+                includeSuperseded: a.includeSuperseded,
+              });
+          if (!items.length) return `书架「${shelf}」是空的。`;
           return (
-            `📚 [${a.shelf}] ${items.length} 条：\n` +
+            `📚 [${shelf}] ${items.length} 条：\n` +
             items.map((e) => `• ${line(e)}`).join("\n")
           );
         }

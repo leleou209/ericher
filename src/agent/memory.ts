@@ -730,6 +730,38 @@ export function countSuperseded(sql: SqlTag): number {
   return rows[0]?.n ?? 0;
 }
 
+/** 记忆库的一次性盘点。stats 工具要的那几项全在这儿算齐。 */
+export interface MemoryStats {
+  /** 表里一共多少条（含已作废的） */
+  total: number;
+  /** 已被新说法作废的条数 */
+  gone: number;
+  /** 还算数的，按书架分组，多的在前 */
+  shelves: Array<{ shelf: string; n: number }>;
+  /** 该复核的条数（说的是现状、又有一阵没确认） */
+  due: number;
+  /** 和别的说法对不上的条数 */
+  unsettled: number;
+}
+
+/**
+ * 盘一次记忆库。
+ *
+ * 抽出来是为了让「本地盘」和「跨间盘」共用同一把尺子 —— 场屋要把主屋的数并进来时，
+ * 两边各算一份最容易悄悄漂开（一侧加了新指标、另一侧忘了跟）。
+ */
+export function memoryStats(sql: SqlTag): MemoryStats {
+  const shelves = sql<{ shelf: string; n: number }>`
+    SELECT shelf, COUNT(*) AS n FROM memories WHERE superseded_by = '' GROUP BY shelf ORDER BY n DESC`;
+  return {
+    total: countMemories(sql),
+    gone: countSuperseded(sql),
+    shelves,
+    due: listDueForReview(sql, 200).length,
+    unsettled: countConflicted(sql),
+  };
+}
+
 export function getMemory(sql: SqlTag, id: string): MemEntry | null {
   const rows = sql<MemRow>`SELECT * FROM memories WHERE id = ${id}`;
   return rows[0] ? rowToEntry(rows[0]) : null;

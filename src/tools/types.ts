@@ -7,6 +7,7 @@ import type { Reminder } from "../agent/reminderStore";
 import type { SearchConfig } from "../agent/searchConfigs";
 import type { RecallHit, SessionMeta } from "../agent/sessionStore";
 import type { ChatState, MemEntry, SqlTag } from "../agent/state";
+import type { MemoryStats } from "../agent/memory";
 
 export interface ToolCtx {
   env: Env;
@@ -94,6 +95,21 @@ export interface ToolCtx {
    */
   searchMemories?: (
     q: string,
+    limit: number,
+    opts?: { includeSuperseded?: boolean },
+  ) => Promise<MemEntry[]>;
+  /**
+   * 记忆盘点：本地盘 +（场屋）主屋盘。统计口径必须和 searchMemories 对齐 ——
+   * 场屋的本地表只装这一场写过的，光看本地会报「记忆库为空」，而检索却明明查得到。
+   * 不填就本地直盘（memoryStats(sql)）。
+   */
+  statsMemories?: () => Promise<MemoryStats>;
+  /**
+   * 记忆按书架浏览：本地 +（场屋）主屋按 id 合并去重（主屋优先）。
+   * 不填就本地直列（listMemories(sql, ...)）。
+   */
+  listMemoriesMerged?: (
+    shelf: string | undefined,
     limit: number,
     opts?: { includeSuperseded?: boolean },
   ) => Promise<MemEntry[]>;

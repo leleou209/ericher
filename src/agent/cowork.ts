@@ -82,6 +82,7 @@ import {
   listSuperseded,
   listTagAccess,
   memoryHitLines,
+  memoryStats,
   restoreMemory,
   searchMemories,
   sessionMemoryCounts,
@@ -95,6 +96,7 @@ import {
   tagStats,
   upsertMemorySnapshot,
   upsertVector,
+  type MemoryStats,
   type SessionMemoryQuery,
   type TagGate,
   type TagStat,
@@ -121,6 +123,7 @@ import {
   searchRecallIndex,
   setSessionArchived,
   setSessionDigest,
+  setSessionPinned,
   setSessionVisibility,
   touchSession,
   type RecallHit,
@@ -1633,6 +1636,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     this.ensureSessions();
     const id = newSessionId();
     const home = sessionRoom(this.name, id);
+    // 屋此刻不建，只把 id 和屋名算好（建 stub 不会实例化 DO，这一步不花钱）：
+    // 等人真把第一句话发出来、前端换连接过去时它才冷起一次，
+    // 而那句话正好落进那间新屋的第一轮里。没人说过话的场，就不会有屋。
     const now = new Date().toISOString();
     const wanted = (title || "").trim();
     const finalVisibility: SessionVisibility =
@@ -1654,6 +1660,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       visibility: finalVisibility,
       created: now,
       lastActive: now,
+      pinned: "",
       msgCount: 0,
       hasDigest: false,
       archived: false,
@@ -1835,6 +1842,57 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return merged;
   }
 
+  /**
+   * 记忆盘点统一入口：本地盘 +（场屋身份）主屋远端盘。
+   *
+   * 主屋是汇聚点（各场写下的都寄回一份），所以场屋里「全局盘点」就等于主屋那份。
+   * 拿不到主屋时退回本地盘 —— 报得少一点，也强过把有记忆的屋说成空的。
+   * 主屋本尊和来客房都只盘本地：前者的本地就是全局，后者的门另有 public 关着。
+   */
+  private async statsMemoriesMerged(): Promise<MemoryStats> {
+    const local = memoryStats(this.db);
+    if (ownerRoomOf(this.name) !== OWNER_AGENT) return local;
+    try {
+      const owner = this.env.COWORK_AGENT.get(
+        this.env.COWORK_AGENT.idFromName(OWNER_AGENT),
+      );
+      const remote = await owner.memoryStatsFor();
+      return remote && (remote.total || !local.total) ? remote : local;
+    } catch {
+      return local;
+    }
+  }
+
+  /**
+   * 记忆书架浏览统一入口：本地列 +（场屋身份）主屋远端列，按 id 合并去重（主屋优先）。
+   * 合并规则与 searchMemoriesMerged 一致 —— 三条读路（search/list/stats）口径对齐，
+   * 才不会出现「搜得到、却说你没有」这种自相矛盾。
+   */
+  private async listMemoriesMerged(
+    shelf: string | undefined,
+    limit: number,
+    opts?: { includeSuperseded?: boolean },
+  ): Promise<MemEntry[]> {
+    const local = listMemories(this.db, shelf, limit, opts ?? {});
+    if (ownerRoomOf(this.name) !== OWNER_AGENT) return local;
+    let remote: MemEntry[] = [];
+    try {
+      const owner = this.env.COWORK_AGENT.get(
+        this.env.COWORK_AGENT.idFromName(OWNER_AGENT),
+      );
+      remote =
+        (await owner
+          .listMemoriesFor(shelf, limit, !!opts?.includeSuperseded)
+          .catch(() => [])) || [];
+    } catch {
+      // 主屋没醒：本地那份照用
+    }
+    const byId = new Map<string, MemEntry>();
+    for (const e of remote) if (e?.id) byId.set(e.id, e);
+    for (const e of local) if (e?.id && !byId.has(e.id)) byId.set(e.id, e);
+    return [...byId.values()].slice(0, limit);
+  }
+
   setSessionVisibility(
     id: string,
     visibility: SessionVisibility,
@@ -1851,6 +1909,16 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   setSessionArchived(id: string, archived: boolean): SessionMeta | null {
     this.ensureSessions();
     if (!setSessionArchived(this.db, id, archived)) return null;
+    return getSession(this.db, id);
+  }
+
+  /**
+   * 置顶 / 取消置顶。它只影响侧栏摆在哪一段，与归档、公开都无关 ——
+   * 所以这里同样不需要任何连带处理，置上去就是排到置顶区末尾（按置顶时刻）。
+   */
+  setSessionPinned(id: string, pinned: boolean): SessionMeta | null {
+    this.ensureSessions();
+    if (!setSessionPinned(this.db, id, pinned)) return null;
     return getSession(this.db, id);
   }
 
@@ -2398,6 +2466,10 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       syncMemories: (ids, deletedIds) => agent.queueMemorySync(ids, deletedIds),
       searchMemories: (q, limit, opts) =>
         agent.searchMemoriesMerged(q, limit, opts),
+      // 盘点和按书架浏览也走同一套合并口径 —— 三条读路对得上，才不会「搜得到却说没有」
+      statsMemories: () => agent.statsMemoriesMerged(),
+      listMemoriesMerged: (shelf, limit, opts) =>
+        agent.listMemoriesMerged(shelf, limit, opts),
       // 笔记本这一组：我从工具那边动笔时，updated_by 记「assistant」——
       // 谁改的字要分得开，他下一眼才知道哪几处是我动的
       listNotes: (opts) => agent.listNotes(opts?.q, opts?.tag),
@@ -2441,7 +2513,17 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     const resolved = await resolveModel(this.env, () =>
       this.fetchActiveCatalog(deepThink),
     );
-    if (!resolved) return new Response("API_KEY 未配置", { status: 500 });
+    if (!resolved) {
+      // 500 要说真话：目录链挂在哪一环（_catalogDiag 有），还是这台机器
+      // 两条链都没钥匙。只回「API_KEY 未配置」，人只会去查旧链 —— 查错方向
+      const diag = this._catalogDiag;
+      return new Response(
+        diag
+          ? `模型没配置好：${diag}；旧链 API_KEY 也未配置，聊天没法开口`
+          : "API_KEY 未配置：模型目录没取到，旧链 API_KEY 也没配",
+        { status: 500 },
+      );
+    }
     this._resolved = resolved;
 
     // 上一轮可能中途断了、统计没来得及写回，这里补一次（没攒下东西就一个字都不写）
@@ -3803,6 +3885,26 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
+   * 场屋来盘：主屋记忆库的全局盘点（含各场寄回的）。
+   * 判「本尊」用严格名字 —— isOwnerRoom 对场屋也为真，拿它当门槛会让场屋读自己的空表。
+   */
+  async memoryStatsFor(): Promise<MemoryStats> {
+    if (this.name !== OWNER_AGENT)
+      return { total: 0, gone: 0, shelves: [], due: 0, unsettled: 0 };
+    return memoryStats(this.db);
+  }
+
+  /** 场屋来列：主屋记忆库按书架的那一页（含各场寄回的） */
+  async listMemoriesFor(
+    shelf?: string,
+    limit = 200,
+    includeSuperseded = false,
+  ): Promise<MemEntry[]> {
+    if (this.name !== OWNER_AGENT) return [];
+    return listMemories(this.db, shelf, limit, { includeSuperseded });
+  }
+
+  /**
    * 场屋来翻旧账：主屋这边能翻到的是老场（本屋自己的消息）
    * 加各场屋寄回的原话索引，一起搜。
    */
@@ -4297,9 +4399,11 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return resolveDrawTiers(this.db);
   }
 
-  /** 来客那间取主人房的绘图配置：跨间一趟，取不到回落内置默认（画图照常） */
+  /** 场屋/来客那间取主人房的绘图配置：跨间一趟，取不到回落内置默认（画图照常） */
   private async fetchDrawTiers(): Promise<DrawTierConfigs> {
-    if (this.isOwnerRoom) return this.getDrawTiers();
+    // 门槛用「主屋本尊」而不是 isOwnerRoom：场屋也是主人级，但配置表只在主屋库里，
+    // 场屋自己那张是空表 —— 走本尊分支会悄悄回落内置默认，管理员配的档全被绕过
+    if (this.name === OWNER_AGENT) return this.getDrawTiers();
     try {
       const owner = this.env.COWORK_AGENT.get(
         this.env.COWORK_AGENT.idFromName(OWNER_AGENT),
@@ -4373,9 +4477,11 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return updateSearchConfig(this.db, patch);
   }
 
-  /** 来客那间取主人房的搜索配置：跨间一趟，取不到回落内置默认（免费通道照常） */
+  /** 场屋/来客那间取主人房的搜索配置：跨间一趟，取不到回落内置默认（免费通道照常） */
   private async fetchSearchConfig(): Promise<SearchConfig> {
-    if (this.isOwnerRoom) return this.getSearchConfig();
+    // 门槛用「主屋本尊」而不是 isOwnerRoom：场屋也是主人级，但配置表只在主屋库里，
+    // 场屋自己那张是空表 —— 走本尊分支会悄悄回落免费通道，管理员配的 Tavily/Brave 被绕过
+    if (this.name === OWNER_AGENT) return this.getSearchConfig();
     try {
       const owner = this.env.COWORK_AGENT.get(
         this.env.COWORK_AGENT.idFromName(OWNER_AGENT),
@@ -4415,44 +4521,80 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
    * 主线条目若把深度思考指向了另一个条目，就用那组（连供应商/key 都可以换一家）；
    * 那组供应商的 key 没配进这台机器，就退回主线，深度思考降档但不掉线。
    *
-   * 主人那间直接查自己的表；来客那间隔着 DO 去主人房取，取回来缓存 30 秒 ——
-   * 每句话都跑一趟跨间调用太贵，而目录是「改一次用很久」的东西，
+   * 只有主屋本尊直接查自己的表；场屋（default--sXxx）和来客那间都隔着 DO 去主人房取，
+   * 取回来缓存 30 秒 —— 每句话都跑一趟跨间调用太贵，而目录是「改一次用很久」的东西，
    * 改完最多等半分钟生效，面板上说明这一点比每句对话多一跳往返划算。
-   * 主人房没醒 / 出错都当没配置过，回落旧链，聊天不能因此断。
+   * 门槛必须是「主屋本尊」而不能是 isOwnerRoom：场屋也是主人级（isOwnerRoom 为真），
+   * 但目录只活在主屋的库里 —— 场屋自己的表是空的（老场屋有老表迁移留下的存货，
+   * 那是历史遗留不是保障），照着 isOwnerRoom 抄近路就会读到一张空表，新场屋句句 500。
+   * 跨间调用挂了会重试一次，再挂就回落旧链；挂在哪一环都记进 _catalogDiag，
+   * 让最终的失败文案说得出真话（见 onChatMessage 的 500）。
    */
   private _activeCatalog = new Map<
     boolean,
     { at: number; cat: ActiveCatalog | null }
   >();
+  /**
+   * 最近一次取目录的结局说明（空串 = 没毛病）。只服务一件事：
+   * resolveModel 整体失败时，500 的文案能说出真话 —— 是跨间调用挂了、
+   * 主屋目录真空、还是供应商点名的钥匙没配进这台机器，别让人对着
+   * 一句「API_KEY 未配置」去查旧链的 key（那台机器多半根本不走旧链）。
+   */
+  private _catalogDiag = "";
   private async fetchActiveCatalog(
     deep = false,
   ): Promise<ActiveCatalog | null> {
-    if (this.isOwnerRoom)
-      return deep ? this.deepCatalog() : this.activeCatalog();
+    this._catalogDiag = "";
+    const diagKeyMissing = (cat: ActiveCatalog) => {
+      const key = (this.env as unknown as Record<string, unknown>)[
+        cat.provider.keySecret
+      ];
+      if (typeof key !== "string" || !key)
+        this._catalogDiag = `供应商「${cat.provider.name}」点名的 ${cat.provider.keySecret} 没配进这台机器`;
+    };
+    if (this.name === OWNER_AGENT) {
+      const cat = deep ? await this.deepCatalog() : await this.activeCatalog();
+      if (cat) diagKeyMissing(cat);
+      else this._catalogDiag = "模型目录为空或没有生效的模型条目";
+      return cat;
+    }
     const c = this._activeCatalog.get(deep);
     if (c && Date.now() - c.at < ACTIVE_CONFIG_CACHE_MS) return c.cat;
-    try {
-      const owner = this.env.COWORK_AGENT.get(
-        this.env.COWORK_AGENT.idFromName(OWNER_AGENT),
-      );
-      let cat: ActiveCatalog | null =
-        (await (deep ? owner.deepCatalog() : owner.activeCatalog())) || null;
-      // 深度那组的 key 没配：退回主线，别一头栽进 secrets 旧链
-      if (deep && cat) {
-        const key = (this.env as unknown as Record<string, unknown>)[
-          cat.provider.keySecret
-        ];
-        if (typeof key !== "string" || !key)
-          cat = await this.fetchActiveCatalog(false);
+    // 跨间调用偶发抖动时重试一次：目录是聊天的命根子 —— 抖一下就回落旧链，
+    // 而这台机器旧链多半没配 key，等于一句话都发不出去；多等一跳比哑火强。
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const owner = this.env.COWORK_AGENT.get(
+          this.env.COWORK_AGENT.idFromName(OWNER_AGENT),
+        );
+        let cat: ActiveCatalog | null =
+          (await (deep ? owner.deepCatalog() : owner.activeCatalog())) || null;
+        // 深度那组的 key 没配：退回主线，别一头栽进 secrets 旧链
+        if (deep && cat) {
+          const key = (this.env as unknown as Record<string, unknown>)[
+            cat.provider.keySecret
+          ];
+          if (typeof key !== "string" || !key)
+            return await this.fetchActiveCatalog(false);
+        }
+        // 只缓存拿到的目录：取不到的轮次不设 30 秒死窗 ——
+        // 缓存一个 null，后面 30 秒里每句话都会白跑一趟还照样失败
+        if (cat) {
+          diagKeyMissing(cat);
+          this._activeCatalog.set(deep, { at: Date.now(), cat });
+        } else {
+          this._catalogDiag = "主屋目录为空或没有生效的模型条目";
+        }
+        return cat;
+      } catch (e) {
+        const msg = (e as Error)?.message || String(e);
+        console.error(`[catalog] 取主屋目录失败（第 ${attempt} 次）：`, e);
+        this._catalogDiag = `跨间取目录失败：${msg}`;
+        if (attempt === 1) continue;
+        return null;
       }
-      this._activeCatalog.set(deep, { at: Date.now(), cat });
-      return cat;
-    } catch (e) {
-      // 这里吞掉，上游只会翻成一句「API_KEY 未配置」—— 人会去查错方向。
-      // 真实原因留在日志里，排障时一眼看得见是跨间调用挂了
-      console.error("[catalog] 取主屋目录失败，回落旧链：", e);
-      return null;
     }
+    return null;
   }
 
   /**
