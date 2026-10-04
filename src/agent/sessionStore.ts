@@ -328,11 +328,6 @@ export function countSessionMessages(db: SqlTag, id: string): number {
   return rows.length ? rows[0].n : 0;
 }
 
-export function countSessions(db: SqlTag): number {
-  const rows = db<{ n: number }>`select count(*) as n from sessions`;
-  return rows.length ? rows[0].n : 0;
-}
-
 export function insertSession(
   db: SqlTag,
   input: {

@@ -14,7 +14,7 @@ export type VoteValue = 1 | -1;
 /** 评论作者：ai = ericher 自己，其余是登录角色（admin / user） */
 export const AI_AUTHOR = "ai";
 
-export interface VoteRow {
+interface VoteRow {
   messageId: string;
   voter: string;
   value: number;
@@ -30,7 +30,7 @@ export interface CommentRow {
 }
 
 /** 单条消息的赞踩汇总（AI 的 signal 与提示词信号都用它） */
-export interface VoteTotal {
+interface VoteTotal {
   messageId: string;
   score: number;
   up: number;

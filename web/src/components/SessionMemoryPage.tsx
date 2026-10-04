@@ -24,9 +24,9 @@ import "./NoteMemo.css";
 const INTENT_MARK = "【这段怎么聊的】";
 
 /** 时间三档 + 全部。用本地零点而不是 UTC —— 问「今天」的是他，不是服务器 */
-export type TimeBand = "all" | "today" | "week" | "older";
+type TimeBand = "all" | "today" | "week" | "older";
 
-export const TIME_LABEL: Record<TimeBand, string> = {
+const TIME_LABEL: Record<TimeBand, string> = {
   all: "全部",
   today: "今天",
   week: "这周",
@@ -34,7 +34,7 @@ export const TIME_LABEL: Record<TimeBand, string> = {
 };
 
 /** 一档时间换算成查询区间。older 是「更早」，所以要 to 而不是 from */
-export function bandRange(band: TimeBand): { from?: string; to?: string } {
+function bandRange(band: TimeBand): { from?: string; to?: string } {
   const day = 24 * 60 * 60 * 1000;
   const start = new Date();
   start.setHours(0, 0, 0, 0);
@@ -59,7 +59,7 @@ export function when(iso: string): string {
 }
 
 /** 正文和「这段怎么聊的」在库里是一段，显示时分开 —— 后者是注解，不该混在叙述里 */
-export function splitMemo(content: string): { body: string; intent: string } {
+function splitMemo(content: string): { body: string; intent: string } {
   const i = content.indexOf(INTENT_MARK);
   if (i < 0) return { body: content, intent: "" };
   return {
@@ -68,7 +68,7 @@ export function splitMemo(content: string): { body: string; intent: string } {
   };
 }
 
-export function sentimentLabel(v: string): string {
+function sentimentLabel(v: string): string {
   return SENTIMENT_LABEL[v as Sentiment] || "";
 }
 

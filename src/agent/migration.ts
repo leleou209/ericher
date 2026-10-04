@@ -53,7 +53,7 @@ function writeFlag(sql: SqlTag, name: string, value: string): void {
      ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated = excluded.updated`;
 }
 
-export function migrationFlags(sql: SqlTag): Record<string, string> {
+function migrationFlags(sql: SqlTag): Record<string, string> {
   const rows = sql<{
     name: string;
     value: string;

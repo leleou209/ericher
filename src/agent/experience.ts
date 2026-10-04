@@ -95,7 +95,7 @@ function bigrams(s: string): Set<string> {
 }
 
 /** Dice 相似度：2×交集 / 总数。对同义改写（多加几个字、换个说法）比包含判断灵敏得多。 */
-export function similarity(a: string, b: string): number {
+function similarity(a: string, b: string): number {
   if (!a.length || !b.length) return 0;
   const ga = bigrams(a);
   const gb = bigrams(b);

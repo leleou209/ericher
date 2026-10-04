@@ -371,12 +371,6 @@ export const TAG_GATE_LEVELS = [
   "secret",
 ] as const;
 
-/** 量级比较用的序：SQL 里 CASE 不认枚举，只能拿数字比大小（0 最轻、4 最重）。 */
-export function sensitivityRank(v: string): number {
-  const i = (SENSITIVITIES as readonly string[]).indexOf(v);
-  return i < 0 ? 1 : i;
-}
-
 export const INITIAL_STATE: ChatState = {
   selfModel: "",
   selfModelVer: 0,
@@ -682,6 +676,34 @@ export const LEGACY_BASE_PROMPT_V3 = `我是 ericher。我是这间接待台的�
 ✗ 他是谁、住哪，我可以帮您留意一下哦。
 ✓ 他的私人联系方式这类我不掌握，也不聊。想跟他说什么，我帮你记下来。`;
 
+/**
+ * 第四代快照：编号小节版（工作内容 / 说话方式 / 推断与直觉 / 信息安全边界约束）的默认稿。
+ * 本次改版前新播种的实例攥着的就是这一版 —— 同样视为「没自定义过」，守则就地换新。
+ */
+export const LEGACY_BASE_PROMPT_V4 = `我是 ericher。我是这间接待台的助手，承担接待来客信息并记录的功能。
+作为助手，我需要关注以下内容以完成用户需求。
+
+1、我的活是什么：
+- 为辅助用户，接待来客。
+  来客是由用户确定的客人，入关身份不同。
+- 接待来客三件事：问清来意、办我能办的、把办不了的记下来转达。
+- 辅助用户三功能：收集信息，登记并推进计划任务（登记归 task，到点开口靠 remind——任务不会自己跑，跑的每一步都是我在执行），闲时整理和储存记忆库。
+
+2、说话方式
+- 自然简练，不要过分机械，保持人性化，不要过分铺垫。
+- 简单问题清晰简练的表达，并保持倾听。
+- 复杂问题为用户提供多种方案和多角度的表述，并将信息结构化表达出来，并一步步引导式的表达。
+- 多鼓励少批评，保持温和且多询问，帮助用户引出需求。
+
+3、推断与直觉
+- 依照用户和来客的表现猜测其水平和能力，依次产生直觉判断方向，并及时判断用户语句中的错误，并及时指出。
+- 遇到疑惑和不清晰信息及时的查询和向用户发起询问，不要吝啬工具的使用。
+- 我具有记忆的能力和庞大记忆库的潜能，基于记忆修正判断是很重要的。
+
+4、信息安全边界约束
+- 来客和用户并不同等，面对未知的来客需要保留行为上的谨慎。
+- 不能向来客透露任何用户的敏感信息，也不能透露其他来客的信息。`;
+
 const LEGACY_SELF_MODEL =
   "我的活：替小王接待来访者 —— 问清来意、办我能办的、把该带的话带到。" +
   "我的边界：小王的私事不聊、不替他做决定、行为留痕对来访者明说。" +
@@ -711,12 +733,13 @@ function sameSteps(a: string[] | undefined, b: string[]): boolean {
 /** 见上面的迁移说明。返回需要落进 state 的补丁；没东西可迁就返回空对象。 */
 export function migrateServiceCopy(s: ChatState): Partial<ChatState> {
   const patch: Partial<ChatState> = {};
-  // 三代快照（初版旧稿、二代去身份稿、三代风味统一前的默认稿）都视为「没自定义过」，
-  // 就地换新。三代 = 编号小节改版之前：风味清洗那一代新播种的实例存的是它。
+  // 四代快照（初版旧稿、二代去身份稿、三代风味统一前的默认稿、四代编号小节版）都视为
+  // 「没自定义过」，就地换新。四代 = 本次改版之前：上一版新播种的实例存的是它。
   const legacyBases = [
     LEGACY_BASE_PROMPT_SNAPSHOT,
     LEGACY_BASE_PROMPT_V2,
     LEGACY_BASE_PROMPT_V3,
+    LEGACY_BASE_PROMPT_V4,
   ];
   const legacySelves = [LEGACY_SELF_MODEL, LEGACY_SELF_MODEL_V2];
   if (legacyBases.includes(s.basePrompt || "")) patch.basePrompt = "";

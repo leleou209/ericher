@@ -140,7 +140,7 @@ const SIDE_NAV: Array<{
  * 在线卡是两回事。点击弹出身份弹层 —— 称呼、类型档、临时还是长期、领卡时写的目的；
  * 长期身份在弹层里能解卡退出，临时身份能就地升级成长期（当前房间整体升级，历史不搬）。
  */
-export function IdentityCard({
+function IdentityCard({
   isAdmin,
   guestName,
   typeName,

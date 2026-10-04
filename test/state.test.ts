@@ -18,6 +18,7 @@ import {
   LEGACY_BASE_PROMPT_SNAPSHOT,
   LEGACY_BASE_PROMPT_V2,
   LEGACY_BASE_PROMPT_V3,
+  LEGACY_BASE_PROMPT_V4,
   SEED_SELF_MODEL,
   migrateServiceCopy,
 } from "../src/agent/state";
@@ -191,6 +192,30 @@ describe("服务向改版的存量迁移", () => {
     s.basePrompt = LEGACY_BASE_PROMPT_V3;
     s.selfModel = SEED_SELF_MODEL; // 三代的自我认知与现稿一致，不必动
     // 技能配方在上一轮迁移里已经换成现代版，这一代不该再动
+    s.skills = {
+      接待来意: [
+        "先复述对方的来意，确认没理解错",
+        "能办的直接办（search / read_url / memory）",
+        "办不了的说明是哪一档：我这边没有 / 得管理员定",
+      ],
+      带话转交: [
+        "memory add 记下来意与原话，person 填来客称呼",
+        "当面说「我记下了，会转达给管理员」；转达走同步，可能失败，不打包票他一定看到",
+      ],
+    };
+    const patch = migrateServiceCopy(s);
+    expect(patch.basePrompt).toBe("");
+    expect(patch.selfModel).toBeUndefined();
+    expect(patch.selfModelVer).toBeUndefined();
+    expect(patch.skills).toBeUndefined();
+  });
+
+  it("第四代快照（编号小节版，本次改版前的默认稿）同样视为未自定义，守则就地换新", () => {
+    const s = legacyState();
+    s.selfModelVer = 2; // 与现稿同代，不必动
+    s.basePrompt = LEGACY_BASE_PROMPT_V4;
+    s.selfModel = SEED_SELF_MODEL;
+    // 技能配方在前几轮迁移里已经换成现代版，这一代不该再动
     s.skills = {
       接待来意: [
         "先复述对方的来意，确认没理解错",

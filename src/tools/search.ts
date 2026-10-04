@@ -91,7 +91,7 @@ function textOf(html: string): string {
  * 没有的话退一步只用 <p> 段落——这两步能覆盖绝大多数内容站，
  * 剩下的交给「标签转换行」把结构保住。
  */
-export function extractMain(html: string): string {
+function extractMain(html: string): string {
   let body = html
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(
@@ -239,7 +239,7 @@ export function braveFreshness(
 }
 
 /** 跑一次 Brave 网页搜索，收成和 Tavily 同形的条目列表（title/url/content） */
-export async function braveSearch(
+async function braveSearch(
   query: string,
   key: string,
   maxResults: number,
@@ -559,7 +559,7 @@ function filterHits(
  * 通道由 cfg 决定（search_config 表）：Tavily / Brave 配了钥匙就走；
  * 通道挂了或没配钥匙，静默退到免费通道，别让一次搜索失败打断整轮对话。
  */
-export async function runSearch(
+async function runSearch(
   env: Env,
   a: {
     query: string;

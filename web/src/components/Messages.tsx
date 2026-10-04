@@ -569,7 +569,7 @@ type ArtSeg =
 // 按「一段非空白」收就够，顺带把来客名字之类的中文屋名也一起兜住。
 const ARTIFACT_RE = /\[artifact\s+(\S+)\s+([^\]\n]+?)\s*\]/g;
 
-export function splitArtifacts(text: string): ArtSeg[] {
+function splitArtifacts(text: string): ArtSeg[] {
   const segs: ArtSeg[] = [];
   let last = 0;
   ARTIFACT_RE.lastIndex = 0;

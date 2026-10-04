@@ -16,7 +16,7 @@
  * 一轮最多翻几句（这是维护模型上的花费闸）。
  */
 
-export type ThinkerDeps = {
+type ThinkerDeps = {
   /** 叫维护模型翻一句。翻不出来（超时、报错、没配模型）返回空串就行 */
   ask: (system: string, user: string) => Promise<string>;
   /** 有一句新的了，推给这个房间所有连着的人 */
@@ -32,7 +32,7 @@ export const MOST_LINES = 6;
 /** 一轮最多看几次表。空转（她已经在说话）也算一次，长回答才不至于跑到天荒地老 */
 export const MOST_TICKS = 12;
 /** 喂给维护模型的内心独白取最近这一段 */
-export const THINK_KEEP = 1_600;
+const THINK_KEEP = 1_600;
 
 /** 在跑的那一步用「…」记，跑完的用「✓」——维护模型靠它知道她这一刻忙到哪了 */
 type Step = { name: string; done: boolean };
@@ -54,7 +54,7 @@ export function cleanLine(raw: string): string {
   return bare.length > 40 ? bare.slice(0, 40) + "…" : bare;
 }
 
-export const THINK_SYSTEM =
+const THINK_SYSTEM =
   "你是 ericher。此刻你正在回答一句话，还没开口，屏幕那头的人只看到一个转圈的空气泡，" +
   "等得有点心里没底。以下是你这一轮真实的内心活动和已经做过的事。\n" +
   "用一句不超过 20 个字的中文、第一人称，说出你此刻正在做什么，像自言自语那样自然。\n" +

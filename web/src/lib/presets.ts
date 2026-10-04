@@ -6,7 +6,7 @@
 
 import type { ModelFormat, TtsProtocol } from "./types";
 
-export interface VendorPreset {
+interface VendorPreset {
   key: string;
   label: string;
   /** 默认线格式（下拉里的初始值） */

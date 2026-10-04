@@ -13,7 +13,7 @@ import type { SqlTag } from "./state";
 /** 三种读音协议，对应 tts.ts 里三条合成路径 */
 export type TtsProtocol = "mimo-chat" | "doubao" | "glm-speech";
 
-export const TTS_PROTOCOLS: TtsProtocol[] = [
+const TTS_PROTOCOLS: TtsProtocol[] = [
   "mimo-chat",
   "doubao",
   "glm-speech",

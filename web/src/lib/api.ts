@@ -126,7 +126,7 @@ function bizOk<T>(body: unknown, fallback: string): T {
 export type Role = "admin" | "user";
 
 /** 登录结果：角色 + 该连哪个 DO 实例（一个实例只有一份对话，见后端 auth.ts 注释） */
-export interface Identity {
+interface Identity {
   ok: true;
   role: Role;
   agent: string;

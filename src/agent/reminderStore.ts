@@ -9,7 +9,7 @@
 
 import type { SqlTag } from "./state";
 
-export type ReminderStatus = "pending" | "done" | "cancelled";
+type ReminderStatus = "pending" | "done" | "cancelled";
 
 /**
  * 「每天 09:00」「每周三 21:30」（北京时间）→ 等价的 UTC cron。
@@ -191,13 +191,6 @@ export function listPendingReminders(sql: SqlTag): Reminder[] {
   return rows.map(toReminder);
 }
 
-/** 全部提醒（含已触发/已取消），给设置面板看历史 */
-export function listAllReminders(sql: SqlTag, limit = 200): Reminder[] {
-  const rows = sql<Row>`SELECT id, session_id, what, at, every, schedule_id, status, created, fired_at, urgent, mode, title
-       FROM reminders ORDER BY at DESC LIMIT ${limit}`;
-  return rows.map(toReminder);
-}
-
 export function countPendingReminders(sql: SqlTag): number {
   const rows = sql<{
     n: number;
@@ -239,18 +232,4 @@ export function cancelReminderRow(sql: SqlTag, id: string): Reminder | null {
   return r;
 }
 
-export function removeReminderRow(sql: SqlTag, id: string): boolean {
-  const r = getReminder(sql, id);
-  if (!r) return false;
-  sql`DELETE FROM reminders WHERE id = ${id}`;
-  return true;
-}
 
-/** 把一条提醒写成纯文本行，工具与面板共用同一套措辞 */
-export function describeReminder(r: Reminder): string {
-  const when = r.every ? `${r.at} 起，每 ${r.every}` : r.at;
-  // 到点在哪儿说话，是他看这一行时最需要知道的：回到原来那一场，还是另开一场
-  const where =
-    r.mode === "new" ? `｜另有新会话${r.title ? `「${r.title}」` : ""}` : "";
-  return `${when}｜${r.what}${where}${r.urgent ? "｜必须叫醒" : ""}`;
-}

@@ -13,7 +13,7 @@ import type { SqlTag } from "./state";
 /** 两种搜索协议，对应 search.ts 里的调用路径 */
 export type SearchFormat = "tavily" | "brave";
 
-export const SEARCH_FORMATS: SearchFormat[] = ["tavily", "brave"];
+const SEARCH_FORMATS: SearchFormat[] = ["tavily", "brave"];
 
 export interface SearchConfig {
   format: SearchFormat;

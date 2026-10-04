@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, setUnauthorizedHandler, type Role } from "../lib/api";
 import "./Gate.css";
 
-export type GateState = "checking" | "locked" | "open";
+type GateState = "checking" | "locked" | "open";
 
 export function useGate(): {
   gate: GateState;

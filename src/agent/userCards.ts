@@ -18,7 +18,7 @@ import type { SqlTag } from "./state";
 /** 内置通用档在卡表里的档位 id：走前台口令进来的卡都归这档（权益全开） */
 export const COMMON_TYPE_ID = "common";
 
-export interface UserCardRow {
+interface UserCardRow {
   id: string;
   /** 全局唯一昵称（登卡的钥匙之一） */
   name: string;
@@ -65,7 +65,7 @@ function rowToCard(r: CardRow): UserCardRow {
   };
 }
 
-export function ensureUserCardsSchema(sql: SqlTag): void {
+function ensureUserCardsSchema(sql: SqlTag): void {
   sql`CREATE TABLE IF NOT EXISTS user_cards (
        id            TEXT PRIMARY KEY,
        name          TEXT NOT NULL UNIQUE,

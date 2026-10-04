@@ -25,7 +25,7 @@ const MODELS = ["glm-4.6v", "glm-4v-flash", "glm-4v-plus", "glm-4v"];
  * base64 之后还要再涨三分之一，而端点那边单图到 5MB 就直接回错 ——
  * 3.5MB 原图刚好落在安全区里（attach.ts 内联那处用的是同一条线）。
  */
-export const MAX_INLINE_IMAGE = 3_500_000;
+const MAX_INLINE_IMAGE = 3_500_000;
 
 /** 转述用的提示词只此一处：写两份的话，改一处就会有一边悄悄落后 */
 const DESCRIBE_PROMPT =
@@ -63,7 +63,7 @@ function toBase64(buf: ArrayBuffer): string {
   return btoa(chunks.join(""));
 }
 
-export type LoadedImage =
+type LoadedImage =
   { ok: true; data: string; mediaType: string } | { ok: false; why: string };
 
 /**
@@ -105,7 +105,7 @@ export async function loadImage(env: Env, key: string): Promise<LoadedImage> {
   return { ok: true, data: toBase64(await obj.arrayBuffer()), mediaType };
 }
 
-export type VisionResult =
+type VisionResult =
   { ok: true; text: string; model: string } | { ok: false; error: string };
 
 /**

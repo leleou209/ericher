@@ -21,7 +21,7 @@ const DEFAULT_WINDOW_MS = 120;
 /** 攒够这么多字就发一次。防的是「窗口没到但已经攒了一大段」 */
 const DEFAULT_MAX_CHARS = 400;
 
-export interface CoalesceOpts {
+interface CoalesceOpts {
   windowMs?: number;
   maxChars?: number;
   /** 连 tool-input-delta 也合并（默认关） */

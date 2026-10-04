@@ -12,7 +12,7 @@ import type { SqlTag } from "./state";
 const HEARTBEAT_SECONDS = 3600;
 const NIGHTLY_CRON = "0 4 * * *";
 /** 单个 CPU 块的时间预算，留出余量 */
-export const CHUNK_BUDGET_MS = 25_000;
+const CHUNK_BUDGET_MS = 25_000;
 /** memories 表超过这个条数就开始裁剪最不重要的 */
 const MEMORY_SOFT_CAP = 800;
 /**
@@ -152,7 +152,7 @@ export function registerChunkedTask(
   registry.set(taskKey(agent, id), step);
 }
 
-export function readCursor(sql: SqlTag, taskId: string): number {
+function readCursor(sql: SqlTag, taskId: string): number {
   const rows = sql<{
     cursor: number;
   }>`SELECT cursor FROM task_cursor WHERE id = ${taskId}`;
@@ -164,7 +164,7 @@ function writeCursor(sql: SqlTag, taskId: string, cursor: number): void {
      ON CONFLICT(id) DO UPDATE SET cursor = excluded.cursor, updated = excluded.updated`;
 }
 
-export function clearCursor(sql: SqlTag, taskId: string): void {
+function clearCursor(sql: SqlTag, taskId: string): void {
   sql`DELETE FROM task_cursor WHERE id = ${taskId}`;
 }
 

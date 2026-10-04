@@ -20,7 +20,7 @@ export const COMPACT_TRIGGER = 8;
 /** 摘要长度上限。它是「提个醒」用的，不是第二份对话记录。 */
 export const DIGEST_MAX = 900;
 
-export interface ContextPlan {
+interface ContextPlan {
   /** 这轮真正发给模型的消息（压掉的部分不含在内） */
   tail: UIMessage[];
   /** 不压缩时该发的消息（摘要已覆盖的部分仍然不含在内）——摘要生成失败时回退到它 */

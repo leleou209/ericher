@@ -18,7 +18,7 @@ import type { SqlTag } from "./state";
 /** 三种出图协议，对应 draw.ts 里的调用路径 */
 export type DrawFormat = "workers-ai" | "siliconflow" | "zhipu";
 
-export const DRAW_FORMATS: DrawFormat[] = [
+const DRAW_FORMATS: DrawFormat[] = [
   "workers-ai",
   "siliconflow",
   "zhipu",
@@ -27,7 +27,7 @@ export const DRAW_FORMATS: DrawFormat[] = [
 /** 绘图的三个档位。tier 就是配置的主键 —— 每档同时只有一条在生效 */
 export type DrawTier = "fast" | "high" | "fallback";
 
-export const DRAW_TIERS: DrawTier[] = ["fast", "high", "fallback"];
+const DRAW_TIERS: DrawTier[] = ["fast", "high", "fallback"];
 
 /** 一档的完整配置。降级时 models 按顺序逐个试，谁出图用谁 */
 export interface DrawConfig {

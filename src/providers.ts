@@ -20,7 +20,7 @@ import {
   type ModelFormat,
 } from "./agent/modelConfigs";
 
-export const DEFAULT_MODEL = "claude-sonnet-4-20250514";
+const DEFAULT_MODEL = "claude-sonnet-4-20250514";
 
 function provider(env: Env, apiKey: string) {
   // 走 AI Gateway 时用网关地址，并开启 1 小时结果缓存省 token
@@ -46,7 +46,7 @@ export function maintenanceModel(env: Env): LanguageModel | null {
 }
 
 /** 起会话标题用的模型；不填就用小米的 MiMo V2.5 Pro */
-export const DEFAULT_TITLE_MODEL = "mimo-v2.5-pro";
+const DEFAULT_TITLE_MODEL = "mimo-v2.5-pro";
 
 /**
  * 起标题的模型：小米 MiMo，走它自己的 Anthropic 兼容端点（见 src/mimo.ts）。

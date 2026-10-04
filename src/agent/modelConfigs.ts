@@ -19,7 +19,7 @@ import type { SqlTag } from "./state";
 /** 三种接口格式，对应 providers.ts 里三条建模路径 */
 export type ModelFormat = "anthropic" | "openai-chat" | "openai-responses";
 
-export const MODEL_FORMATS: ModelFormat[] = [
+const MODEL_FORMATS: ModelFormat[] = [
   "anthropic",
   "openai-chat",
   "openai-responses",
@@ -255,11 +255,6 @@ function providerById(sql: SqlTag, id: string): ModelProvider | null {
   return rows.length ? rowToProvider(rows[0]) : null;
 }
 
-export function getProviderById(sql: SqlTag, id: string): ModelProvider | null {
-  ensureModelCatalogSchema(sql);
-  return providerById(sql, id);
-}
-
 /** 全部供应商，旧的在前（created 序） */
 export function listModelProviders(sql: SqlTag): ModelProvider[] {
   ensureModelCatalogSchema(sql);
@@ -384,11 +379,6 @@ function entryById(sql: SqlTag, id: string): ModelEntry | null {
     SELECT id, provider_id, model, max_output, context_window, active, created
     FROM model_entries WHERE id = ${id}`;
   return rows.length ? rowToEntry(rows[0]) : null;
-}
-
-export function getModelEntryById(sql: SqlTag, id: string): ModelEntry | null {
-  ensureModelCatalogSchema(sql);
-  return entryById(sql, id);
 }
 
 /** 全部模型条目，旧的在前。归属哪家看 providerId */

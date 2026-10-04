@@ -176,7 +176,7 @@ export async function verifyToken(
   return (await verifyTokenInfo(env, token))?.role ?? null;
 }
 
-export function readCookie(req: Request, name = COOKIE_NAME): string | null {
+function readCookie(req: Request, name = COOKIE_NAME): string | null {
   const raw = req.headers.get("Cookie");
   if (!raw) return null;
   for (const part of raw.split(";")) {
@@ -249,10 +249,6 @@ export function renewToken(
   info: { role: Role; type?: string; card?: string },
 ): Promise<string> {
   return issueToken(env, info.role, SESSION_TTL_SEC, info.type, info.card);
-}
-
-export async function isAuthed(req: Request, env: Env): Promise<boolean> {
-  return (await authRole(req, env)) !== null;
 }
 
 /** 主人住的那一间屋子（DO 实例名） */

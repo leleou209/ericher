@@ -24,7 +24,7 @@ const DOUBAO_TTS_URL =
  * 智谱硬上限是 1024 字符，这里留出余量：超了整句会被平台拒掉，
  * 而分段是前端按句切的，切点太长说明那段本身就不该一口气念。
  */
-export const TTS_CHUNK_MAX = 900;
+const TTS_CHUNK_MAX = 900;
 
 export interface VoiceOption {
   /** tts_config 的 id；点名合成时就传它 */
@@ -40,7 +40,7 @@ export interface VoiceOption {
   why: string;
 }
 
-export interface SynthResult {
+interface SynthResult {
   bytes: ArrayBuffer;
   mime: string;
 }
@@ -53,7 +53,7 @@ export interface SynthResult {
  * 都是「云端没出声」。用户只会一直听到浏览器那个难听的嗓子，
  * 却拿不到任何线索指向真正的原因，只能靠猜。
  */
-export type SynthOutcome =
+type SynthOutcome =
   ({ ok: true } & SynthResult) | { ok: false; why: string };
 
 /** 从 env 里按变量名取 key；不是字符串一律当没配 */

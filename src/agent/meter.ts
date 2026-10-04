@@ -11,8 +11,8 @@
 //   - 读取：记的是「返回了多少行」。真实口径是「扫描了多少行」，
 //     所以这个数只会偏小 —— 偏小是安全的，宁可低估也不虚报。
 
-export const DAILY_WRITE_CAP = 100_000;
-export const DAILY_READ_CAP = 5_000_000;
+const DAILY_WRITE_CAP = 100_000;
+const DAILY_READ_CAP = 5_000_000;
 
 /**
  * 攒够这么多行就先落一次账。太小会让记账本身变成开销，太大又容易丢。
@@ -103,7 +103,7 @@ export function isDdl(text: string): boolean {
 }
 
 /** 账本里存的 key 长这样：「动作:表名」。这条是不是结构变更。 */
-export function isDdlKey(key: string): boolean {
+function isDdlKey(key: string): boolean {
   const op = key.split(":", 1)[0] || "";
   return DDL_RE.test(op);
 }

@@ -31,6 +31,22 @@ export interface ToolCtx {
   state: ChatState;
   /** 合并写入 state（内部会 setState 完整对象） */
   patchState(patch: Partial<ChatState>): void;
+  /**
+   * 内核与自我要求的统一读口径。这两块由主屋收着：主屋本尊读自己的 state，
+   * 场屋读主屋那份的缓存 —— 场屋本地那份不算数（换一场就看不到）。
+   */
+  readSelf(): {
+    core: string;
+    coreVer: number;
+    coreLog: string[];
+    demand: string;
+    demandVer: number;
+    demandLog: string[];
+  };
+  /** 写内核（content 空 = 清除）。版本与日志按主屋那份算；场屋会自动转交主屋。返回新版本号 */
+  writeSelfCore(content: string): Promise<number>;
+  /** 写自我要求（content 空 = 清除）。同上 */
+  writeSelfDemand(content: string): Promise<number>;
   /** 向所有连接广播一条非聊天提示；无连接时静默 */
   notify(text: string): void;
   /** 把记忆送进 Vectorize（经 queue 重试，失败不阻塞对话） */
@@ -143,5 +159,3 @@ export interface ToolCtx {
   recallCache?: Map<string, MemEntry[]>;
 }
 
-/** 统一的工具返回：字符串直接作为 tool result 交给模型 */
-export type ToolResult = string;

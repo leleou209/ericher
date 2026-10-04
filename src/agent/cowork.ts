@@ -576,10 +576,26 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
    * 只有主屋本尊把这两样存在自己 state 里（设置页能改守则，自我要求由我用 self 工具写）；
    * 其余的屋 —— 来客屋、主人的场屋 —— 都不存，每次连上来时去主屋取一份，取不到就用出厂默认。
    * 不共用的话，管理员一改守则、我自己一改要求，别的屋还是老样子 —— 等于养出多个 ericher。
-   * 取的只有这两样：主人的记忆和内核从来不跨房间。
+   * 取的只有这几样人格件：守则、自我要求、内核。记忆另走一套（跨间合并与并账）。
    */
   private personaCache = "";
   private demandCache = "";
+  /**
+   * 内核与自我要求的完整缓存（场屋读主屋那份；主屋本尊不读它，直接读自己的 state）。
+   *
+   * 为什么内核也要走这条路：一个会话一间场屋之后，管理员聊天是在场屋里。
+   * 内核原先只写在「当前这间屋」的 state 上 —— 场屋里改完，下一场（另一间屋）
+   * 或设置页（读主屋）看到的还是旧的，表现就是「说保存了，回来又没了」。
+   * 内核和守则、自我要求一样，是「同一个 ericher」的一部分，得由主屋收着。
+   */
+  private selfCache = {
+    core: "",
+    coreVer: 0,
+    coreLog: [] as string[],
+    demand: "",
+    demandVer: 0,
+    demandLog: [] as string[],
+  };
   private async refreshPersona(): Promise<void> {
     if (!ownerRoomOf(this.name)) return; // 主屋本尊：人设在自己 state 里
     try {
@@ -591,6 +607,15 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
         typeof cfg?.basePrompt === "string" ? cfg.basePrompt : "";
       this.demandCache =
         typeof cfg?.selfDemand === "string" ? cfg.selfDemand : "";
+      this.selfCache = {
+        core: typeof cfg?.selfModel === "string" ? cfg.selfModel : "",
+        coreVer: typeof cfg?.selfModelVer === "number" ? cfg.selfModelVer : 0,
+        coreLog: Array.isArray(cfg?.selfLog) ? cfg.selfLog : [],
+        demand: typeof cfg?.selfDemand === "string" ? cfg.selfDemand : "",
+        demandVer:
+          typeof cfg?.selfDemandVer === "number" ? cfg.selfDemandVer : 0,
+        demandLog: Array.isArray(cfg?.selfDemandLog) ? cfg.selfDemandLog : [],
+      };
     } catch {
       // 主屋没醒 / 调用出错都留空：buildBasePrompt 会回落到出厂人设，聊天照常
     }
@@ -606,6 +631,89 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return ownerRoomOf(this.name)
       ? this.demandCache
       : this.state.selfDemand || "";
+  }
+
+  /** 这一轮该用哪份内核。同上：内核也是同一个 ericher 的一部分。 */
+  private coreForPrompt(): string {
+    return ownerRoomOf(this.name) ? this.selfCache.core : this.state.selfModel;
+  }
+
+  /**
+   * 内核与自我要求的统一读口径：主屋本尊读自己的 state，场屋读主屋那份缓存。
+   * reflect 和写入都要读它 —— 读错了，模型会以为内核是空的，越改越糟。
+   */
+  readSelf(): {
+    core: string;
+    coreVer: number;
+    coreLog: string[];
+    demand: string;
+    demandVer: number;
+    demandLog: string[];
+  } {
+    if (!ownerRoomOf(this.name)) {
+      return {
+        core: this.state.selfModel,
+        coreVer: this.state.selfModelVer || 0,
+        coreLog: this.state.selfLog || [],
+        demand: this.state.selfDemand || "",
+        demandVer: this.state.selfDemandVer || 0,
+        demandLog: this.state.selfDemandLog || [],
+      };
+    }
+    return { ...this.selfCache };
+  }
+
+  /**
+   * 落一次内核/自我要求的写入。
+   * 主屋本尊就地写；场屋转交主屋 —— 主屋那份才是标准件，写在场屋等于下一场就丢。
+   * 写完同步本地缓存，同一轮里的 reflect 立刻读得到，不必等重连。
+   */
+  private async commitSelf(patch: Partial<ChatState>): Promise<ChatState> {
+    if (!ownerRoomOf(this.name)) {
+      this.patchState(patch);
+      return this.state;
+    }
+    const owner = this.env.COWORK_AGENT.get(
+      this.env.COWORK_AGENT.idFromName(OWNER_AGENT),
+    );
+    const next = await owner.patchConfig(patch);
+    this.selfCache = {
+      core: next.selfModel || "",
+      coreVer: next.selfModelVer || 0,
+      coreLog: next.selfLog || [],
+      demand: next.selfDemand || "",
+      demandVer: next.selfDemandVer || 0,
+      demandLog: next.selfDemandLog || [],
+    };
+    return next;
+  }
+
+  /** self 工具写内核（content 空 = 清除）。版本与日志按主屋那份算，返回新版本号。 */
+  async writeSelfCore(content: string): Promise<number> {
+    const now = new Date().toISOString().slice(0, 10);
+    const cur = this.readSelf();
+    const ver = cur.coreVer + 1;
+    const log = content ? `${now}: ${content.slice(0, 300)}` : `${now}: 已清除`;
+    await this.commitSelf({
+      selfModel: content ? content.slice(0, 1000) : "",
+      selfModelVer: ver,
+      selfLog: [...cur.coreLog, log].slice(-20),
+    });
+    return ver;
+  }
+
+  /** self 工具写自我要求（content 空 = 清除）。同上。 */
+  async writeSelfDemand(content: string): Promise<number> {
+    const now = new Date().toISOString().slice(0, 10);
+    const cur = this.readSelf();
+    const ver = cur.demandVer + 1;
+    const log = content ? `${now}: ${content.slice(0, 300)}` : `${now}: 已清除`;
+    await this.commitSelf({
+      selfDemand: content ? content.slice(0, 1000) : "",
+      selfDemandVer: ver,
+      selfDemandLog: [...cur.demandLog, log].slice(-20),
+    });
+    return ver;
   }
 
   /**
@@ -2447,6 +2555,10 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
         return agent.state;
       },
       patchState: (patch) => agent.patchState(patch),
+      // 内核/自我要求的统一读写口：主屋本尊就地读写，场屋读主屋缓存、写转交主屋
+      readSelf: () => agent.readSelf(),
+      writeSelfCore: (content) => agent.writeSelfCore(content),
+      writeSelfDemand: (content) => agent.writeSelfDemand(content),
       notify: (text) => agent.notify(text),
       enqueueVector: (entry) => agent.enqueueVector(entry),
       maintenance: (system, user) => agent.maintenance(system, user),
@@ -2637,8 +2749,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
           ? guestEnabledTools(this.state.guestType?.tools)
           : undefined,
       }) +
-      (this.state.selfModel
-        ? "\n\n## 我的内核（会随对话更新）\n" + this.state.selfModel
+      (this.coreForPrompt()
+        ? "\n\n## 我的内核（会随对话更新）\n" + this.coreForPrompt()
         : "");
     // 时间参照统一放 system 尾部：remind/openSession 的完整定义是隐藏的（渐进式），
     // 模型算「明天」「下周」时得有个公认的现在。它在缓存断点之后，不伤稳定段缓存

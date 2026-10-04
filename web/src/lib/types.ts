@@ -326,7 +326,7 @@ export interface R2File {
 }
 
 /** 单条消息的赞踩汇总。mine: 1 = 我赞过，-1 = 我踩过，0 = 没投 */
-export interface MsgVote {
+interface MsgVote {
   up: number;
   down: number;
   mine: number;
@@ -461,7 +461,7 @@ export interface UsageReport {
 export type ViewKey = "chat" | "note" | "memory-session" | "settings";
 
 /** 谁写的。user = 管理员，assistant = ericher 的笔迹；共用一个本子，但笔迹分得开 */
-export type NoteAuthor = "user" | "assistant";
+type NoteAuthor = "user" | "assistant";
 
 export interface Note {
   id: string;
@@ -604,7 +604,7 @@ export interface PublicPost {
 // 出厂稿与当前自定义。不写死在前端 —— 名册只有后端一份，写死两份必定对不上。
 
 /** 工具语义组 */
-export type ToolGroupId =
+type ToolGroupId =
   "read" | "visual" | "memory" | "todo" | "session" | "system";
 
 export interface ToolGroupDef {

@@ -78,7 +78,7 @@ export const SAY_DEBOUNCE_MS = 90_000;
 /** 落库的主动消息保留多久。留一个月，是为了「今天说了几次」数得出来。 */
 const SAY_KEEP_DAYS = 30;
 
-export interface PendingSay {
+interface PendingSay {
   id: string;
   sessionId: string;
   line: string;
@@ -86,7 +86,7 @@ export interface PendingSay {
 }
 
 /** 合并后要说的一句话：属于哪一场、说什么、由哪几行攒出来的。 */
-export interface MergedSay {
+interface MergedSay {
   sessionId: string;
   line: string;
   ids: string[];

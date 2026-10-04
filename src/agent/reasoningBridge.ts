@@ -35,7 +35,7 @@ const REASONING_ID = "reasoning_content";
 
 /** 每次调用现场建 provider：fetch 是 provider 级配置（AI SDK 6 的调用选项里没有它） */
 
-export interface OpenAIModelConfig {
+interface OpenAIModelConfig {
   apiKey: string;
   baseURL: string;
   format: Extract<ModelFormat, "openai-chat" | "openai-responses">;

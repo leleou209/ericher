@@ -170,7 +170,7 @@ const SENTENCE_END = /(?<=[。！？!?；;…])/;
  * 一次只发一小段，是为了让声音早点出来 ——
  * 等整篇合成完再开口，长回答要静默好几秒，那几秒人会以为卡住了。
  */
-export function splitForSpeech(text: string): string[] {
+function splitForSpeech(text: string): string[] {
   const say = stripForSpeech(text);
   if (!say) return [];
   const sentences = say
@@ -393,7 +393,7 @@ function speakBrowser(text: string, onEnd?: () => void): boolean {
 type CloudTry = { why?: string };
 
 /** 这一次到底是谁念的。不是云端时，why 说明云端为什么没接上 */
-export type Spoken =
+type Spoken =
   | { by: "cloud" }
   | { by: "browser"; why: string }
   | { by: "none"; why: string };

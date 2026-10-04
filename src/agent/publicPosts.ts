@@ -38,7 +38,7 @@ function rowToPost(r: PostRow): PublicPost {
   };
 }
 
-export function ensurePublicPostsSchema(sql: SqlTag): void {
+function ensurePublicPostsSchema(sql: SqlTag): void {
   sql`CREATE TABLE IF NOT EXISTS public_posts (
        id      TEXT PRIMARY KEY,
        card_id TEXT NOT NULL,

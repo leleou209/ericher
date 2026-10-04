@@ -138,7 +138,3 @@ export function buildTools(ctx: ToolCtx): ToolSet {
   };
 }
 
-/** 工具名列表，用于统计与调试 */
-export function toolNames(ctx: ToolCtx): string[] {
-  return Object.keys(buildTools(ctx));
-}

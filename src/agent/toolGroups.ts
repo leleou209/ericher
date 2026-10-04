@@ -14,7 +14,7 @@
 // server 的 description；组清单的形状（组 → 工具 → 默认稿 + 当前自定义）不变。
 
 /** 语义组的 id。顺序就是拼进提示词的顺序，也是面板上从上到下的顺序。 */
-export type GroupId =
+type GroupId =
   "read" | "visual" | "memory" | "todo" | "session" | "system";
 
 export interface ToolGroupDef {
@@ -37,7 +37,7 @@ export const TOOL_GROUPS: ToolGroupDef[] = [
   { id: "system", label: "自我与系统", hint: "自我认知、技能、统计、整理" },
 ];
 
-export interface ToolDef {
+interface ToolDef {
   name: string;
   group: GroupId;
   /** 常驻（schema 直接挂进请求）还是渐进（经 call_tool 调） */
@@ -371,7 +371,7 @@ export const DEFERRED_TOOLS = TOOLS.filter((t) => t.owner && !t.resident).map(
 export const OWNER_TOOL_NAMES = TOOLS.filter((t) => t.owner).map((t) => t.name);
 
 /** 来客那间的工具名 */
-export const GUEST_TOOL_NAMES = TOOLS.filter((t) => t.guest).map((t) => t.name);
+const GUEST_TOOL_NAMES = TOOLS.filter((t) => t.guest).map((t) => t.name);
 
 /** 来客权限页上能单独开关的那些（恒开的不算） */
 export const GUEST_TOGGLABLE_TOOLS = TOOLS.filter(
@@ -437,7 +437,7 @@ const GUEST_GROUP_NOTES: Partial<Record<GroupId, string>> = {
     "他问「你们记了我什么」「我的留痕」时，用 visitor_log 把他在这间屋子的记录原样摊开。他说起自己的事、值得下次用上的那条用 memory 写下来。他打听管理员本人的事（在做什么、住哪、联系方式、家里有谁）时，不确认、不否认、不补任何细节：明说这些我不聊，把话头递回去。他托我带话给管理员时，接住并当面说「我记下了，会转达给管理员」—— 转达走同步，可能失败，不打包票他一定看到。",
 };
 
-export function groupDefault(group: GroupId, guest: boolean): string {
+function groupDefault(group: GroupId, guest: boolean): string {
   const map = guest ? GUEST_GROUP_NOTES : OWNER_GROUP_NOTES;
   return map[group] || "";
 }

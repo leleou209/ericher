@@ -29,9 +29,10 @@ export function adminTools(ctx: ToolCtx) {
       }),
       execute: async (a) => {
         if (a.action === "reflect") {
-          const log = ctx.state.selfLog.slice(-5).join("\n") || "（空）";
-          const demandLog =
-            (ctx.state.selfDemandLog || []).slice(-5).join("\n") || "（空）";
+          // 读的是主屋那份（场屋本地那份不算数）—— 见 ToolCtx.readSelf
+          const self = ctx.readSelf();
+          const log = self.coreLog.slice(-5).join("\n") || "（空）";
+          const demandLog = self.demandLog.slice(-5).join("\n") || "（空）";
           return (
             "以下是你最近的对话与历史记录。请基于这些内容反思并决定是否需要更新。\n\n" +
             "--- 最近对话 ---\n" +
@@ -41,7 +42,7 @@ export function adminTools(ctx: ToolCtx) {
             log +
             "\n\n" +
             "--- 我现在对自己的要求 ---\n" +
-            (ctx.state.selfDemand || "（还没写过）") +
+            (self.demand || "（还没写过）") +
             "\n\n" +
             "--- 历史记录（自我要求） ---\n" +
             demandLog +
@@ -56,47 +57,14 @@ export function adminTools(ctx: ToolCtx) {
         const content = (a.content || "").trim();
 
         if (a.target === "demand") {
-          const ver = (ctx.state.selfDemandVer || 0) + 1;
-          if (!content) {
-            ctx.patchState({
-              selfDemand: "",
-              selfDemandVer: ver,
-              selfDemandLog: [
-                ...(ctx.state.selfDemandLog || []),
-                `${now}: 已清除`,
-              ].slice(-20),
-            });
-            return `自我要求已清除（${now}）`;
-          }
-          ctx.patchState({
-            selfDemand: content.slice(0, 1000),
-            selfDemandVer: ver,
-            selfDemandLog: [
-              ...(ctx.state.selfDemandLog || []),
-              `${now}: ${content.slice(0, 300)}`,
-            ].slice(-20),
-          });
+          const ver = await ctx.writeSelfDemand(content);
+          if (!content) return `自我要求已清除（${now}）`;
           ctx.notify("自我要求已更新");
           return `自我要求已更新 v${ver}（${now}）`;
         }
 
-        const ver = ctx.state.selfModelVer + 1;
-        if (!content) {
-          ctx.patchState({
-            selfModel: "",
-            selfModelVer: ver,
-            selfLog: [...ctx.state.selfLog, `${now}: 已清除`].slice(-20),
-          });
-          return `内核已清除（${now}）`;
-        }
-        ctx.patchState({
-          selfModel: content.slice(0, 1000),
-          selfModelVer: ver,
-          selfLog: [
-            ...ctx.state.selfLog,
-            `${now}: ${content.slice(0, 300)}`,
-          ].slice(-20),
-        });
+        const ver = await ctx.writeSelfCore(content);
+        if (!content) return `内核已清除（${now}）`;
         ctx.notify("自我认知已更新");
         return `内核已更新 v${ver}（${now}）`;
       },

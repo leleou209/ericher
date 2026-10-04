@@ -15,8 +15,8 @@
 /** bge-m3 官方单价：1075 neurons / 百万输入 token ≈ 1.075 / token */
 export const NEURONS_PER_TOKEN = 1.075;
 /** flux-2-klein-4b 官方单价：输出 26.05 / 512² tile，输入 5.37 / 512² tile */
-export const FLUX_OUT_PER_TILE = 26.05;
-export const FLUX_IN_PER_TILE = 5.37;
+const FLUX_OUT_PER_TILE = 26.05;
+const FLUX_IN_PER_TILE = 5.37;
 /** bge-m3 的向量维度（Vectorize 按维度计量） */
 export const EMBED_DIMS = 1024;
 

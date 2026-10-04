@@ -7,12 +7,12 @@ import type { MemEntry, Sensitivity, SqlTag } from "./state";
 import { normalizeSentiment, SENSITIVITIES, TAG_GATE_LEVELS } from "./state";
 import { usage } from "./usage";
 
-export const EMBED_MODEL = "@cf/baai/bge-m3";
+const EMBED_MODEL = "@cf/baai/bge-m3";
 /** 单次检索时最多加载的记忆条数，防止表无限增长后拖慢一轮对话 */
 const SCAN_LIMIT = 1000;
 
 /** 只声明用到的部分，避免依赖生成的 Vectorize 类型细节 */
-export interface VectorIndex {
+interface VectorIndex {
   upsert(
     vectors: Array<{
       id: string;
@@ -62,7 +62,7 @@ interface MemRow {
 }
 
 /** 只作废、不指向替代者的哨兵值（id 都以 m 开头，不会撞上）。 */
-export const RETIRED = "retired";
+const RETIRED = "retired";
 
 /**
  * 会变的记忆隔多久没复核就该提醒一次。
@@ -75,21 +75,21 @@ export const REVIEW_DAYS = 30;
  * 一个疑问反复出现在每一轮里，很快就不再是疑问，而变成背景噪音 ——
  * 那样我下次真的撞上冲突时也不会当回事。账本不清，面板上照样看得见。
  */
-export const CONFLICT_TTL_DAYS = 7;
+const CONFLICT_TTL_DAYS = 7;
 
 /** 措辞几乎一样（字符二元组重合度）——「同一句话改了个细节」这种。 */
-export const CONFLICT_DICE = 0.5;
+const CONFLICT_DICE = 0.5;
 /** 同一个人身上，尺子放松一点：他身上的两句话像，更值得多看一眼。 */
-export const CONFLICT_DICE_SAME_PERSON = 0.35;
+const CONFLICT_DICE_SAME_PERSON = 0.35;
 /** 换了说法但意思贴着（向量余弦）。 */
-export const CONFLICT_VECTOR = 0.72;
+const CONFLICT_VECTOR = 0.72;
 
 /**
  * 检索向量路的最低相关门槛（余弦）。
  * bge-m3 的余弦 0.35 以下基本是「同一个领域但不相干」—— 那种命中不配占名额。
  * 和 CONFLICT_VECTOR 是两把不同的尺子：那边问「是不是在说同一件事」，这边问「相不相关」。
  */
-export const RECALL_MIN_VECTOR = 0.35;
+const RECALL_MIN_VECTOR = 0.35;
 
 /** 这条说的是「他是谁 / 什么一直成立」，还是「他现在怎么样」。 */
 export type Volatility = "stable" | "volatile";
@@ -448,7 +448,7 @@ export function countMemories(sql: SqlTag): number {
  * 被作废的那些不会消失（历史可查），但不参与检索、不参与人脉计数 ——
  * 因为一条已经被推翻的话，还留在检索池里，就等于我下次可能又把它当事实讲出去。
  */
-export interface MemQuery {
+interface MemQuery {
   includeSuperseded?: boolean;
   /** 只要公开的。来客那间问「管理员公开过什么」时用 —— 别的一律不出这间屋子。 */
   onlyPublic?: boolean;
@@ -723,7 +723,7 @@ export function listPersons(sql: SqlTag): Array<{ person: string; n: number }> {
     WHERE person <> '' AND superseded_by = '' GROUP BY person ORDER BY n DESC, person ASC`;
 }
 
-export function countSuperseded(sql: SqlTag): number {
+function countSuperseded(sql: SqlTag): number {
   const rows = sql<{
     n: number;
   }>`SELECT COUNT(*) AS n FROM memories WHERE superseded_by <> ''`;
@@ -1037,7 +1037,7 @@ export function listConflicted(sql: SqlTag, limit = 100): MemEntry[] {
   return rows.map(rowToEntry);
 }
 
-export function countConflicted(sql: SqlTag): number {
+function countConflicted(sql: SqlTag): number {
   const rows = sql<{
     n: number;
   }>`SELECT COUNT(*) AS n FROM memories WHERE conflicts_with <> '' AND superseded_by = ''`;
@@ -1071,7 +1071,7 @@ export function textOverlap(a: string, b: string): number {
   return (2 * hit) / (A.size + B.size);
 }
 
-export interface ConflictCandidate {
+interface ConflictCandidate {
   entry: MemEntry;
   /** 为什么觉得像：给模型看的理由，也让我自己知道该不该信 */
   why: string;

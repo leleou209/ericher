@@ -14,7 +14,7 @@ import type { SqlTag } from "./state";
 import { ageLabel } from "./memory";
 
 /** 谁写的。user = 管理员，assistant = ericher。两人共用一个本子，但笔迹要分得开 */
-export type Author = "user" | "assistant";
+type Author = "user" | "assistant";
 
 export interface Note {
   id: string;
@@ -89,11 +89,11 @@ interface Row {
 }
 
 /** 标签沿用 memories 的约定：逗号分隔存在一个字段里，不做第二张表 */
-export function parseTags(s: string): string[] {
+function parseTags(s: string): string[] {
   return s ? s.split(",").filter(Boolean) : [];
 }
 
-export function joinTags(a: string[]): string {
+function joinTags(a: string[]): string {
   return [...new Set(a.map((t) => t.trim()).filter(Boolean))].join(",");
 }
 
@@ -174,7 +174,7 @@ export function deriveTitle(body: string): string {
   return first ? first.slice(0, 40) : "未命名";
 }
 
-export function countNotes(sql: SqlTag): number {
+function countNotes(sql: SqlTag): number {
   const rows = sql<{ n: number }>`SELECT COUNT(*) AS n FROM notes`;
   return rows[0]?.n ?? 0;
 }
