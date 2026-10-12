@@ -196,6 +196,15 @@ export interface ChatState {
   recapPrompt: string;
   skills: Record<string, string[]>;
   tasks: Task[];
+  /**
+   * 本场计划（目标 + 步骤）改过几次。
+   *
+   * 内容不在这里 —— 目标挂在 sessions.goal 上、步骤在 session_tasks 表里，
+   * 都按 session_id 存。为什么不直接放进 state：一间屋能装好几场
+   * （老场都住在人屋），屋子级的 state 装不下「这是哪一场的」。
+   * 这里只留一个计数器当信号：它一变，前端就重拉一次本场的计划。
+   */
+  planRev: number;
   /** 还摆在他眼前、没被回答的问题（答完即删）。见 AskEntry */
   asks: AskEntry[];
   thinkMode: "normal" | "deep";
@@ -273,6 +282,52 @@ export interface ChatState {
    * 换了场就不显示别场的账。可选：老 state 与没聊过的场都没有这一格。
    */
   lastUsage?: LastUsage;
+  /**
+   * 异常中断的死因账（onChatResponse 轮尾回写，见 cowork.ts 的 describeTurn）。
+   * 界面上按 messageId 挂在那一轮的回答下面，红色明说为什么断、怎么排 ——
+   * 以前这些真相只躺在 console 里，人只看到「结果没回来」。
+   * 可选：老 state 没有这一格，缺省按空处理；滚动保留最近若干条。
+   */
+  turnErrors?: TurnError[];
+  /**
+   * 他上一次看的是哪一间屋（人屋名或场屋名）。
+   * 只在人屋有意义：多端登录时人屋先连上，靠它把新开的设备送回「最后那一间」，
+   * 否则每台设备刷新都回到人屋默认场，AB 两端各看各的。空串 = 从没记过。
+   */
+  lastRoom: string;
+  /**
+   * 上一次看的是哪一场对话（sessions 表主键）。和人屋的 activeSession 不是一格：
+   * 那一格只认宿在人屋里的场，这一格认「我眼前正开着的场，无论它在哪间屋」。
+   */
+  lastSession: string;
+  /**
+   * 上面那一笔是什么时候记下的（毫秒时间戳）。多端各自都会写回，
+   * 人屋只留最晚的那笔 —— 旧设备内存里的时刻、乱序迟到的请求都顶不掉新记录。
+   * 0 = 从没记过。
+   */
+  lastViewAt: number;
+}
+
+/**
+ * 一次异常中断的死因。
+ *
+ * 为什么单开一格而不是塞进消息 parts：parts 会进下一轮的 convertToModelMessages，
+ * 加一个非标准 part 等于往模型入参里塞杂物。挂在 state 上则只进界面、不碰模型，
+ * 又能借 setState 的落库 + 同步通道同时做到「持久」与「实时」。
+ */
+export interface TurnError {
+  /** 绑定的助手消息 id；断在还没吐出任何内容、消息没落库时为空串 */
+  messageId: string;
+  /** 断在哪一场 */
+  sessionId: string;
+  reason: "stream-error" | "aborted" | "output-limit";
+  /** 人话原因，如「上游把请求拒了」 */
+  title: string;
+  /** 一句解释 + 建议动作 */
+  detail: string;
+  /** 面向开发者的原始死因（status/url/body 摘要），管理员可展开 */
+  raw?: string;
+  at: number;
 }
 
 /** 一轮对话烧掉多少上下文（onChatMessage 轮尾回写，见 cowork.ts） */
@@ -388,6 +443,7 @@ export const INITIAL_STATE: ChatState = {
   recapPrompt: "",
   skills: {},
   tasks: [],
+  planRev: 0,
   asks: [],
   // 思考默认开：这是台干活的机器，多数来话都值得走一遍推理再开口；
   // 嫌吵的房间自己切回 normal（设置页 / 来客的 /think）
@@ -408,6 +464,10 @@ export const INITIAL_STATE: ChatState = {
   adminBio: "",
   noteFocus: "",
   guestTypeId: "",
+  turnErrors: [],
+  lastRoom: "",
+  lastSession: "",
+  lastViewAt: 0,
 };
 
 /**
@@ -468,6 +528,16 @@ export const RUNTIME_ONLY: Record<string, string> = {
     "来客在哪一档由登录票决定，连接鉴权时写入；前端改它等于自己挑档位",
   guestType:
     "来客类型的快照由连接鉴权从主人那间取来（见 guestTypes.ts）；前端改它等于伪造自己的来客类型",
+  turnErrors:
+    "异常中断的死因账由后端在轮尾写入（见 cowork.ts 的 onChatResponse）；前端改它等于伪造死因",
+  lastRoom:
+    "「最后看的哪间屋」由前端切场时经 /api/active-room 写回人屋；走 /api/config 改它等于自己挑屋",
+  lastSession:
+    "「最后看的那一场」同上，只由 /api/active-room 写回；前端直接 patch 等于凭空宣称在看一场没开的对话",
+  lastViewAt:
+    "「上面那笔记于何时」是排序依据，由前端在动作发生的那一刻打戳、经 /api/active-room 送来；前端改它等于自称有一笔更晚的记录",
+  planRev:
+    "本场计划的改动计数，由后端在 plan 工具或 /api/session-plan 落库时递增；前端改它等于凭空宣称计划变过，只会白拉一次",
 };
 
 /**

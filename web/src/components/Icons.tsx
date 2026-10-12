@@ -1,7 +1,9 @@
 // 线性图标集，50 枚。1.75px 线宽，用 currentColor 上色：颜色由父级 color 决定。
 // 画法统一：24 网格 / 圆头圆角。手改请保持这个规格。
+// 主题可以给任意一枚换皮（iconOverrides，图盖住字形），见 lib/theme.ts。
 
 import type { ReactNode, SVGProps } from "react";
+import { iconOverride, useTheme } from "../lib/theme";
 
 interface IconDef {
   /** 中文含义，便于检索 */
@@ -589,8 +591,26 @@ export type IconName = keyof typeof ICONS;
 export function Icon({
   name,
   size = 18,
+  className,
+  style,
   ...rest
 }: { name: IconName; size?: number } & Omit<SVGProps<SVGSVGElement>, "name">) {
+  // 主题给这枚图标签了皮：整枚换成图，字形不上场
+  const { theme } = useTheme();
+  const override = iconOverride(theme, name);
+  if (override) {
+    return (
+      <img
+        src={override}
+        width={size}
+        height={size}
+        alt=""
+        aria-hidden="true"
+        className={className}
+        style={{ display: "block", objectFit: "contain", ...style }}
+      />
+    );
+  }
   const def = ICONS[name];
   if (!def) return null;
   return (
@@ -604,7 +624,11 @@ export function Icon({
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
-      style={def.rotate ? { transform: "rotate(180deg)" } : undefined}
+      className={className}
+      style={{
+        ...(def.rotate ? { transform: "rotate(180deg)" } : undefined),
+        ...style,
+      }}
       {...rest}
     >
       {def.jsx}

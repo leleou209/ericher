@@ -18,6 +18,7 @@ import type { TtsConfig, TtsProtocol } from "../agent/ttsConfigs";
 const ZHIPU_TTS_URL = "https://open.bigmodel.cn/api/paas/v4/audio/speech";
 const DOUBAO_TTS_URL =
   "https://openspeech.bytedance.com/api/v3/tts/unidirectional";
+const MINIMAX_TTS_URL = "https://api.minimax.cn/v1/t2a_v2";
 
 /**
  * 单次请求的文本上限。
@@ -75,6 +76,12 @@ function configReady(env: Env, cfg: TtsConfig): boolean {
 let ttsCache: { at: number; configs: TtsConfig[] } | null = null;
 const TTS_CACHE_MS = 30_000;
 
+// 配置写入后立刻失效缓存——不然「读音配置」里刚存的条目，
+// 要等 30 秒才会出现在「朗读嗓音」的清单里。
+export function invalidateTtsCache(): void {
+  ttsCache = null;
+}
+
 async function loadTtsConfigs(env: Env): Promise<TtsConfig[]> {
   if (ttsCache && Date.now() - ttsCache.at < TTS_CACHE_MS)
     return ttsCache.configs;
@@ -106,6 +113,7 @@ export async function ttsOptions(env: Env): Promise<VoiceOption[]> {
       id: c.id,
       label: c.name,
       provider: c.protocol,
+      voice: c.voice || "",
       desc: c.voice ? `音色 ${c.voice}` : "默认音色",
       available: ok,
       why: ok ? "" : `这台机器没配 ${c.keySecret}`,
@@ -140,6 +148,7 @@ function voiceFor(env: Env, cfg: TtsConfig): string {
   // 豆包允许多配一副默认嗓子（DOUBAO_TTS_SPEAKER），再没有就交给服务端默认
   if (cfg.protocol === "doubao") return (env.DOUBAO_TTS_SPEAKER || "").trim();
   if (cfg.protocol === "glm-speech") return "tongtong";
+  if (cfg.protocol === "minimax") return "female-shaonv";
   return "冰糖";
 }
 
@@ -183,7 +192,9 @@ export async function synthesize(
         ? await synthMimo(env, cfg, say)
         : cfg.protocol === "doubao"
           ? await synthDoubao(env, cfg, say)
-          : await synthZhipu(env, cfg, say);
+          : cfg.protocol === "minimax"
+            ? await synthMinimax(env, cfg, say)
+            : await synthZhipu(env, cfg, say);
     return { ok: true, ...r };
   } catch (e) {
     // 这里抛出来的信息已经是人话了（见 upstream），直接带给调用方
@@ -295,6 +306,62 @@ async function synthZhipu(
   return { bytes, mime: "audio/wav" };
 }
 
+// ── MiniMax 语音（minimax）────────────────────────────
+
+/**
+ * MiniMax 的 t2a_v2：一次把文本发过去，音频以 hex 编码塞在 JSON 里回来
+ * （output_format 固定要 hex —— url 形式 24 小时就过期，而我们拿到字节
+ * 是当场就交给前端的，没必要多一跳下载）。
+ *
+ * model / voice 都来自配置，空了退到官方默认（speech-2.8-hd / 少女音）。
+ * 注意这家 HTTP 200 也可能带业务错误，得看 base_resp.status_code。
+ */
+async function synthMinimax(
+  env: Env,
+  cfg: TtsConfig,
+  text: string,
+): Promise<SynthResult> {
+  const r = await fetch(cfg.baseUrl.trim() || MINIMAX_TTS_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Bearer " + envKey(env, cfg.keySecret),
+    },
+    body: JSON.stringify({
+      model: cfg.model.trim() || "speech-2.8-hd",
+      text,
+      stream: false,
+      voice_setting: {
+        voice_id: voiceFor(env, cfg),
+        speed: 1,
+        vol: 1,
+        pitch: 0,
+      },
+      audio_setting: {
+        sample_rate: 32000,
+        bitrate: 128000,
+        format: "mp3",
+        channel: 1,
+      },
+      output_format: "hex",
+    }),
+  });
+  if (!r.ok) throw await upstream("MiniMax", r);
+
+  const j = (await r.json()) as {
+    data?: { audio?: unknown };
+    base_resp?: { status_code?: unknown; status_msg?: unknown };
+  };
+  const code = j.base_resp?.status_code;
+  if (typeof code === "number" && code !== 0)
+    throw new Error(
+      `MiniMax 回了 ${code}：${String(j.base_resp?.status_msg || "").slice(0, 200)}`,
+    );
+  const hex = j.data?.audio;
+  if (typeof hex !== "string" || !hex) throw new Error("MiniMax 没回音频数据");
+  return { bytes: hexToBytes(hex).buffer as ArrayBuffer, mime: "audio/mpeg" };
+}
+
 // ── 豆包 Seed-TTS 2.0（doubao）────────────────────────
 
 function uuid(): string {
@@ -379,5 +446,13 @@ function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** hex 编码的音频（MiniMax 的 data.audio）还原成字节 */
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length >> 1);
+  for (let i = 0; i < out.length; i++)
+    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   return out;
 }

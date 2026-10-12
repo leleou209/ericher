@@ -897,6 +897,1191 @@ span.status {
   opacity: 0.4;
 }
 
+/* ── 网页矩阵（工作台的管理面）── */
+.matrix-tree {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 嵌套的一层：缩进加一条竖线，把同一个前缀下的页面圈在一起 */
+.matrix-tree .matrix-tree {
+  margin: 4px 0 0 9px;
+  padding-left: 13px;
+  border-left: 1px solid var(--yuzhe-line-soft);
+}
+
+.matrix-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--yuzhe-bg-hover);
+}
+
+/* 中间层那一行：不铺底，只当一个路标 —— 有内容的是页面行 */
+.matrix-node.folder {
+  background: transparent;
+}
+
+/* 折叠箭头：折起来时转 -90°，展开收起之间不跳 */
+.matrix-fold {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  padding: 0;
+  border: none;
+  border-radius: var(--yuzhe-r-s);
+  background: transparent;
+  color: var(--yuzhe-ink-faint);
+  cursor: pointer;
+}
+
+.matrix-fold > svg {
+  transition: transform 0.15s;
+}
+
+.matrix-fold.on > svg {
+  transform: rotate(-90deg);
+}
+
+button.matrix-fold:hover {
+  background: var(--yuzhe-bg);
+  color: var(--yuzhe-ink-strong);
+}
+
+.matrix-folder {
+  font-weight: 600;
+  color: var(--yuzhe-ink-strong);
+}
+
+.matrix-title {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--yuzhe-ink-strong);
+  cursor: pointer;
+}
+
+.matrix-title:hover {
+  text-decoration: underline;
+}
+
+.matrix-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+/* ── 全景图：页面是节点、通路是有向边。可拖拽连线、可断线（React Flow）── */
+.mx-flow {
+  /* React Flow 必须有显式高度，否则渲染成 0 高、什么都不显示 */
+  height: 460px;
+  margin-top: 10px;
+  border: 1px solid var(--yuzhe-line-soft);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-surface);
+  overflow: hidden;
+}
+
+/* 库自带的默认配色换成这套皮的灰阶 */
+.mx-flow .react-flow__edge-path {
+  stroke: var(--yuzhe-line);
+  stroke-width: 1.2;
+}
+
+.mx-flow .react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--yuzhe-ink-strong);
+  stroke-width: 2;
+}
+
+.mx-flow .react-flow__connection-path {
+  stroke: var(--yuzhe-ink-strong);
+  stroke-width: 1.4;
+}
+
+.mx-flow .react-flow__controls-button {
+  border-bottom: 1px solid var(--yuzhe-line-soft);
+  background: var(--yuzhe-surface);
+  fill: var(--yuzhe-ink-dim);
+}
+
+.mx-flow .react-flow__controls-button:hover {
+  background: var(--yuzhe-bg-hover);
+}
+
+.mx-flow .react-flow__attribution {
+  background: transparent;
+  color: var(--yuzhe-ink-faint);
+}
+
+/* 节点：白卡片 + 发丝线；入口页实心黑 —— 和面板里「公开」同一个签名用法 */
+.mx-node {
+  width: 168px;
+  padding: 8px 10px;
+  border: 1px solid var(--yuzhe-line-strong);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-surface);
+  color: var(--yuzhe-ink-strong);
+  font-size: 12px;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+.mx-node.entry {
+  background: var(--yuzhe-black);
+  border-color: var(--yuzhe-black);
+  color: var(--yuzhe-on-black);
+}
+
+.mx-node.admin {
+  border-style: dashed;
+}
+
+.mx-node.types {
+  border-style: dotted;
+}
+
+.mx-node.ext {
+  background: var(--yuzhe-bg-soft);
+  border-style: dashed;
+}
+
+.mx-node.sel {
+  border-color: var(--yuzhe-ink-strong);
+  box-shadow: 0 0 0 2px var(--yuzhe-bg-hover);
+}
+
+.mx-node-title {
+  font-weight: 600;
+  overflow-wrap: break-word;
+}
+
+.mx-node-path,
+.mx-node-deg {
+  color: var(--yuzhe-ink-faint);
+  font-size: 10px;
+}
+
+.mx-node.entry .mx-node-path,
+.mx-node.entry .mx-node-deg {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.mx-node-ext {
+  margin-left: 4px;
+  color: var(--yuzhe-ink-dim);
+}
+
+/* 拖拽把手：连线全靠它，得看得见 —— 浅灰底 + 稍重的边，悬停到节点上再深一档 */
+.mx-handle {
+  width: 9px;
+  height: 9px;
+  background: var(--yuzhe-bg-soft);
+  border: 1.5px solid var(--yuzhe-line-strong);
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+
+.react-flow__node:hover .mx-handle,
+.mx-handle.connectingfrom,
+.mx-handle.connectionindicator {
+  background: var(--yuzhe-surface);
+  border-color: var(--yuzhe-ink-strong);
+}
+
+/* 边上的按钮文字，旁边挂一个断开用的 × */
+.mx-edge {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 4px;
+  border-radius: var(--yuzhe-r-s);
+  background: var(--yuzhe-surface);
+  font-size: 11px;
+  color: var(--yuzhe-ink-dim);
+  white-space: nowrap;
+}
+
+.mx-edge-label {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mx-edge-cut {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--yuzhe-ink-faint);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mx-edge:hover .mx-edge-cut,
+.mx-edge.sel .mx-edge-cut {
+  color: var(--yuzhe-danger);
+  background: rgba(201, 54, 44, 0.08);
+}
+
+/* 视图下面那行说明 */
+.mx-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+/* ── 房间视角：左预览（站在房里看四周的门）＋ 右调整器 ──
+   谁让路，看这里：房间是主角，flex-basis 就是它的地板（500px）。挤不下时不是
+   缩它，而是让侧表整块折到下一行 —— flex-wrap 比 min-width 稳，不会因为挤不下
+   把卡片撑出横向滚动条。 */
+.mr-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 14px;
+  margin-top: 10px;
+}
+
+.mr-stage {
+  /* 5 : 1 的贪婪比 —— 宽屏上富余的空间几乎全给房间 */
+  flex: 5 1 500px;
+  min-width: 0;
+}
+
+/* 走过的路：点前面的一截就跳回去 */
+.mr-trail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.mr-trail-item {
+  max-width: 170px;
+  padding: 1px 6px;
+  border: none;
+  border-radius: var(--yuzhe-r-s);
+  background: transparent;
+  color: var(--yuzhe-ink-dim);
+  font: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.mr-trail-item:hover:not(:disabled) {
+  background: var(--yuzhe-bg-hover);
+  color: var(--yuzhe-ink-strong);
+}
+
+.mr-trail-item.on {
+  color: var(--yuzhe-ink-strong);
+  font-weight: 600;
+  cursor: default;
+}
+
+.mr-trail-sep {
+  color: var(--yuzhe-ink-faint);
+}
+
+/* 房间：一张白纸，四周是门。viewBox 自己缩放，容器窄了也不会破 */
+.mr-room {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--yuzhe-line-soft);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-surface);
+}
+
+.mr-door-hit {
+  cursor: pointer;
+}
+
+/* 我出得去的门：实线；只能来、回不去的用虚线（等于说「这边还没开」） */
+.mr-link {
+  stroke: var(--yuzhe-ink-strong);
+  stroke-width: 1.4;
+}
+
+.mr-link.back {
+  stroke: var(--yuzhe-line-strong);
+  stroke-dasharray: 4 4;
+}
+
+/* 门卡片：灰阶、发丝线，白底 */
+.mr-door,
+.mr-card,
+.mr-ghost {
+  stroke: var(--yuzhe-line-strong);
+  stroke-width: 1;
+  fill: var(--yuzhe-surface);
+}
+
+.mr-door-hit:hover .mr-door {
+  stroke: var(--yuzhe-ink-strong);
+  fill: var(--yuzhe-bg-hover);
+}
+
+/* 只进不出：虚线边框 —— 这扇门的另一头没有回头路 */
+.mr-door.noreturn {
+  stroke-dasharray: 3 3;
+  fill: var(--yuzhe-bg-soft);
+}
+
+/* 入口页实心黑 —— 跟面板里「公开」同一个签名用法 */
+.mr-card.entry,
+.mr-door.entry {
+  fill: var(--yuzhe-black);
+  stroke: var(--yuzhe-black);
+}
+
+.mr-door-title,
+.mr-card-title {
+  fill: var(--yuzhe-ink-strong);
+  font-size: 11.5px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.mr-card-title {
+  font-size: 12px;
+}
+
+.mr-door-sub,
+.mr-card-sub {
+  fill: var(--yuzhe-ink-faint);
+  font-size: 9.5px;
+  pointer-events: none;
+}
+
+.mr-card.entry ~ .mr-card-title,
+.mr-door.entry ~ .mr-door-title {
+  fill: var(--yuzhe-on-black);
+}
+
+.mr-card.entry ~ .mr-card-sub,
+.mr-door.entry ~ .mr-door-sub {
+  fill: rgba(255, 255, 255, 0.6);
+}
+
+.mr-ghost {
+  stroke-dasharray: 4 4;
+  fill: transparent;
+}
+
+.mr-door-hit:hover .mr-ghost {
+  stroke: var(--yuzhe-ink-strong);
+  fill: var(--yuzhe-bg-hover);
+}
+
+.mr-ghost-text {
+  fill: var(--yuzhe-ink-faint);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.mr-door-hit:hover .mr-ghost-text {
+  fill: var(--yuzhe-ink-strong);
+}
+
+/* 调整器：四格抽屉。挂在右栏时 auto-fit 只排得下一列（竖着码），被挤到下一行时
+   同一套规则自动摊成 2–3 列 —— 一种写法管两种排法，不用再写视口断点。 */
+.mr-side {
+  flex: 1 1 280px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+}
+
+.mr-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--yuzhe-bg-soft);
+  border: 1px solid var(--yuzhe-line-soft);
+  border-radius: var(--yuzhe-r-m);
+}
+
+.mr-box-head {
+  color: var(--yuzhe-ink-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mr-here {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.mr-here-title {
+  color: var(--yuzhe-ink-strong);
+  font-weight: 600;
+}
+
+.mr-door-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mr-door-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mr-door-row .field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mr-door-to {
+  font-size: 11px;
+}
+
+/* 落点这一行：左边挑兜底栏/锚点，挑了锚点右边再长出一个名字框 */
+.mr-place {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.mr-place .field {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.mr-cut {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--yuzhe-line-soft);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--yuzhe-ink-faint);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mr-cut:hover:not(:disabled) {
+  border-color: var(--yuzhe-danger);
+  color: var(--yuzhe-danger);
+}
+
+.mr-add {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--yuzhe-line-soft);
+}
+
+.mr-back {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.mr-back-go {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--yuzhe-ink-strong);
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--yuzhe-line-strong);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.mr-back-go:hover {
+  text-decoration-color: var(--yuzhe-ink-strong);
+}
+
+.matrix-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 主色选择器：原生 color 控件自带一圈厚边框，这里只收一收尺寸 */
+.mx-color {
+  width: 44px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--yuzhe-line-soft);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.matrix-editor .field-label {
+  margin-top: 6px;
+}
+
+/* 本页 CSS 编辑区：等宽、不折行好对齐，和正文编辑器同一副骨架 */
+.mx-css {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre;
+  overflow: auto;
+  resize: vertical;
+}
+
+/* 矩阵包说明里的包体结构：等宽、能横向滚，别把卡片撑破 */
+.mx-pack-tree {
+  margin: 8px 0;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre;
+  overflow-x: auto;
+  border: 1px solid var(--yuzhe-line-soft);
+  border-radius: 8px;
+}
+
+/* 外站认定表的一行：域名 / 备注 / 免提示 / 删除；空间不够就换行落下来 */
+.matrix-site {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 0;
+  border-top: 1px solid var(--yuzhe-line-soft);
+}
+
+.matrix-site .field {
+  flex: 1 1 150px;
+  min-width: 0;
+}
+
+.matrix-site-skip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--yuzhe-ink-dim);
+  white-space: nowrap;
+}
+
+.matrix-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.matrix-toggles label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── 工作台的左导航 + 右侧舞台 ──
+   面板从设置抽屉里搬出来单开一页后，不再是一条长竖轴：左边一列固定在栏里，
+   右边舞台一次只摊开一面，整页宽度这才用得上。面板自己滚，外面 wb-main 只管锁高。 */
+.mx-shell {
+  /* 左栏宽度：预览里的小地图要照着它让位，所以拎出来成一个变量 */
+  --mx-rail-w: 208px;
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  /* 原来靠 .panel-body 兜着的字号，搬出来自己带上 */
+  font-size: 14px;
+}
+
+/* 搬离 .panel-body 后，键盘焦点环在这儿补上（原规则挂在 .panel-body 下） */
+.mx-shell button:focus-visible,
+.mx-shell a:focus-visible {
+  outline: 2px solid var(--yuzhe-ink-strong);
+  outline-offset: 2px;
+  border-radius: var(--yuzhe-r-s);
+}
+
+/* z-index 抬起来：预览那一面会把页面铺满整屏（z-index 0），左栏得浮在它上面 */
+.mx-rail {
+  position: relative;
+  z-index: 3;
+  flex: 0 0 var(--mx-rail-w);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 10px;
+  border-right: 1px solid var(--yuzhe-line);
+  background: var(--yuzhe-surface);
+  overflow: auto;
+}
+
+.mx-rail-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--yuzhe-r-m);
+  background: transparent;
+  color: var(--yuzhe-ink);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mx-rail-item:hover {
+  background: var(--yuzhe-bg-hover);
+}
+
+.mx-rail-item.on {
+  background: var(--yuzhe-bg-soft);
+  color: var(--yuzhe-ink-strong);
+  font-weight: 600;
+}
+
+.mx-rail-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--yuzhe-ink-faint);
+  font-weight: 400;
+}
+
+.mx-rail-foot {
+  margin-top: auto;
+  padding-top: 10px;
+}
+
+.mx-rail-collapse {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--yuzhe-r-m);
+  background: transparent;
+  color: var(--yuzhe-ink-faint);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mx-rail-collapse:hover {
+  background: var(--yuzhe-bg-hover);
+  color: var(--yuzhe-ink);
+}
+
+/* 左栏收起来后留的浮标：整页让给舞台，点它把栏叫回来。
+   钉在**左下**角 —— 左上角是预览那枚小地图的地盘，两枚都往上挤会叠在一起。
+   预览里它会多长出右半边（导航 | 编辑），所以它是个容器、两半各是一枚按钮。
+   整枚能拖：`touch-action: none` 把触屏的滚动/缩放手势让出来给拖拽 */
+.mx-fab {
+  position: fixed;
+  left: 14px;
+  bottom: 14px;
+  z-index: 70;
+  display: inline-flex;
+  align-items: stretch;
+  padding: 2px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: 999px;
+  background: var(--yuzhe-surface);
+  box-shadow: var(--yuzhe-shadow);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.mx-fab.dragging {
+  cursor: grabbing;
+}
+
+.mx-fab-half {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--yuzhe-ink-dim);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: inherit;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+
+.mx-fab-half:hover {
+  background: var(--yuzhe-bg-hover);
+  color: var(--yuzhe-ink-strong);
+}
+
+/* 编辑开着：实心黑块，跟 .chip.on 一个用法 —— 一眼看出这半边是「按下去了」 */
+.mx-fab-half.on {
+  background: var(--yuzhe-black);
+  color: var(--yuzhe-on-black);
+}
+
+.mx-fab-half.on:hover {
+  background: #26282c;
+  color: var(--yuzhe-on-black);
+}
+
+.mx-fab-sep {
+  width: 1px;
+  flex: none;
+  align-self: stretch;
+  margin: 4px 1px;
+  background: var(--yuzhe-line);
+}
+
+.mx-stage {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.mx-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 18px 22px;
+}
+
+/* 外观 / 外站这两面内容窄：给个上限，别把控件拉成一整行 */
+.mx-view.narrow {
+  max-width: 900px;
+}
+
+/* 预览那一面里装的是 fixed 铺满的预览层，自己不用撑版心也不用内边距 */
+.mx-view.bare {
+  padding: 0;
+  overflow: hidden;
+}
+
+/* 列表页：左挑页、右编辑，两列各自滚，互不带着跑 */
+.mx-view.mx-list {
+  display: flex;
+  gap: 14px;
+  overflow: hidden;
+}
+
+.mx-list-tree {
+  flex: 0 0 264px;
+  min-width: 0;
+  overflow: auto;
+}
+
+.mx-list-edit {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: auto;
+}
+
+/* 窄屏提醒：图谱 / 预览这两面在手机上摊不开，进去时先说一句。
+   一行浅底纸条，不挡住操作 —— 真想接着看，看就是了 */
+.mx-narrow-note {
+  margin: 12px 18px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: 10px;
+  background: var(--yuzhe-surface);
+  color: var(--yuzhe-ink-faint);
+  font-size: 12.5px;
+  line-height: 1.75;
+}
+
+/* 视图头：舞台上那条轻量标题行（只有列表 / 图谱有）。
+   它不在 .mx-view 里，所以自己带上左右内边距跟下面的内容对齐 */
+.mx-view-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 14px 18px 0;
+}
+
+.mx-view-title {
+  margin: 0;
+  font-size: 14px;
+  color: var(--yuzhe-ink-strong);
+}
+
+.mx-spacer {
+  flex: 1 1 auto;
+}
+
+/* 没挑页面时编辑列里那行居中提示 */
+.mx-empty {
+  padding: 48px 0;
+  text-align: center;
+}
+
+/* ── 正文编辑器：两层叠放的代码框（底下着色 <pre>，上面透明字 <textarea>）。
+   两层字体/行高/内边距/折行规则必须完全一致，差一点就整行错位 —— 所以不折行。 */
+.hx-editor {
+  position: relative;
+  border: 1px solid var(--yuzhe-line-soft);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-surface);
+  overflow: hidden;
+}
+
+.hx-pre,
+.hx-ta {
+  margin: 0;
+  padding: 10px 12px;
+  border: 0;
+  box-sizing: border-box;
+  font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre;
+  word-wrap: normal;
+  tab-size: 2;
+}
+
+.hx-pre {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  color: var(--yuzhe-ink);
+  pointer-events: none;
+}
+
+.hx-ta {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+  background: transparent;
+  /* 字是透明的：看得见的是底下那层着色文本，这里只留光标与选区 */
+  color: transparent;
+  caret-color: var(--yuzhe-ink-strong);
+  outline: none;
+  overflow: auto;
+}
+
+.hx-ta::selection {
+  background: rgba(11, 107, 203, 0.22);
+}
+
+.tok-comment,
+.tok-decl {
+  color: #8a8a8f;
+}
+
+.tok-tag {
+  color: #0b6bcb;
+}
+
+.tok-attr {
+  color: #7a3ea1;
+}
+
+.tok-str {
+  color: #1a7f4b;
+}
+
+[data-theme="dark"] .tok-comment,
+[data-theme="dark"] .tok-decl {
+  color: #7f8790;
+}
+
+[data-theme="dark"] .tok-tag {
+  color: #6cb6ff;
+}
+
+[data-theme="dark"] .tok-attr {
+  color: #c9a1ff;
+}
+
+[data-theme="dark"] .tok-str {
+  color: #7fd0a2;
+}
+
+/* 保存前的改动比对 */
+.hx-diff {
+  border: 1px solid var(--yuzhe-line-soft);
+  border-radius: var(--yuzhe-r-m);
+  overflow: hidden;
+}
+
+.hx-diff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--yuzhe-bg-soft);
+  border-bottom: 1px solid var(--yuzhe-line-soft);
+  font-size: 12px;
+}
+
+.hx-diff-add {
+  color: var(--yuzhe-ok);
+  font-weight: 600;
+}
+
+.hx-diff-del {
+  color: var(--yuzhe-danger);
+  font-weight: 600;
+}
+
+.hx-diff-body {
+  margin: 0;
+  max-height: 280px;
+  overflow: auto;
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.hx-line {
+  display: flex;
+  gap: 8px;
+  padding: 0 10px;
+  white-space: pre;
+}
+
+.hx-line.add {
+  background: rgba(46, 125, 79, 0.1);
+}
+
+.hx-line.del {
+  background: rgba(201, 54, 44, 0.09);
+}
+
+.hx-line.add .hx-sign {
+  color: var(--yuzhe-ok);
+}
+
+.hx-line.del .hx-sign {
+  color: var(--yuzhe-danger);
+}
+
+.hx-sign {
+  flex: none;
+  width: 10px;
+  color: var(--yuzhe-ink-faint);
+}
+
+/* ── 页面预览：整屏铺开的一页 ＋ 可拖的按钮手柄 ＋ 左上角小地图 ──
+   与房间视图同一套白纸黑字：页面是纸，手柄是浮在纸上的一枚发丝方块。
+   这一面分两层：页面在下层铺满视口，工作台的顶栏与左导航在上层盖着它。 */
+.mp-wrap {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--yuzhe-bg);
+  overflow: hidden;
+}
+
+.mp-spacer {
+  flex: 1 1 auto;
+}
+
+/* 舞台＝整屏：页面在里面等比铺满，塞不下就滚动，不把按钮缩成一粒沙 */
+.mp-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mp-viewport {
+  height: 100%;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+.mp-canvas {
+  position: relative;
+  flex: 0 0 auto;
+  margin: 0 auto;
+}
+
+.mp-frame {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border: 0;
+  transform-origin: top left;
+  background: #fff;
+}
+
+/* 手柄层：不跟着缩放，手柄大小恒定、好抓 */
+.mp-handles {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.mp-handle {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 160px;
+  padding: 3px 7px;
+  border: 1px dashed var(--yuzhe-line-strong);
+  border-radius: var(--yuzhe-r-s);
+  background: rgba(255, 255, 255, 0.84);
+  color: var(--yuzhe-ink-strong);
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.mp-handle:hover {
+  border-color: var(--yuzhe-ink-strong);
+  background: #fff;
+}
+
+.mp-handle.on {
+  border-style: solid;
+  border-color: var(--yuzhe-ink-strong);
+  background: #fff;
+  cursor: grabbing;
+}
+
+.mp-handle-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--yuzhe-ink-strong);
+}
+
+.mp-handle-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 左上角的小地图：房间环缩成一枚徽章。字太小会糊成一片，干脆只留形状。
+   它不只是摆件 —— 环上的每扇门都能点着走，所以缩得别太狠：再小一圈门就
+   只剩几像素高，鼠标也点不准。整枚能拖，光标给 grab */
+/* 上层没退场时（顶栏 + 左导航都还在），小地图得让开它们；收干净了才回到角上。
+   左栏宽度用同一个变量，省得两处各写一个数，改一处忘一处 */
+.mp-mini {
+  position: absolute;
+  left: calc(var(--mx-rail-w) + 16px);
+  top: 68px;
+  width: 180px;
+  padding: 5px 5px 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--yuzhe-line-strong);
+  border-radius: var(--yuzhe-r-s);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  text-align: center;
+}
+
+.mp-mini:hover {
+  border-color: var(--yuzhe-ink-strong);
+}
+
+.mp-mini.dragging {
+  cursor: grabbing;
+}
+
+.mp-mini-ring {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* 整枚统一是「抓」，别让环上的门把光标抢成小手指 —— 那会让人以为只能点、不能拖 */
+.mp-mini-ring .mr-door-hit {
+  cursor: inherit;
+}
+
+.mp-mini-ring .mr-door-title,
+.mp-mini-ring .mr-door-sub,
+.mp-mini-ring .mr-card-title,
+.mp-mini-ring .mr-card-sub {
+  display: none;
+}
+
+.mp-mini-tag {
+  font-size: 10px;
+  color: var(--yuzhe-ink-dim);
+}
+
+/* 导航收起来时上层整个退场：小地图回到角上，页面一丝不挂。
+   小地图这时候就是唯一的导航 —— 点环上的门就能连着往下跳。 */
+.wb-bare .mp-mini {
+  left: 8px;
+  top: 8px;
+}
+
+/* 铺满整屏后没处写说明，就做一枚浮在底边的小条（保存中 / 沙箱页提醒） */
+.mp-note {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--yuzhe-surface);
+  box-shadow: var(--yuzhe-shadow);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 /* ── 手机：单列、留白收一档，登记条贴边 ── */
 @media (max-width: 860px) {
   .panel-body {

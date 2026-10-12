@@ -1,7 +1,7 @@
 {
   "name": "hr-desk",
   "description": "ericher 接待台：跑在 Cloudflare Workers 上的单人 AI 接待台（Agents SDK + Durable Objects + React）",
-  "version": "0.1.4",
+  "version": "0.1.6",
   "private": true,
   "license": "MIT",
   "engines": {
@@ -23,8 +23,10 @@
     "@ai-sdk/react": "^3.0.289",
     "@cloudflare/ai-chat": "^0.6.2",
     "@cloudflare/puppeteer": "^1.4.0",
+    "@xyflow/react": "^12.12.0",
     "agents": "^0.12.4",
     "ai": "^6.0.182",
+    "fflate": "^0.8.3",
     "mermaid": "^12.0.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",

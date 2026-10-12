@@ -29,6 +29,8 @@ interface CoworkSecrets {
   ZHIPU_KEY?: string;
   /** 硅基流动（siliconflow.cn）的 API Key：画图的高质量档走这里，没配就退回默认那条便宜的 */
   SILICONFLOW_API_KEY?: string;
+  /** MiniMax（api.minimax.cn）的 API Key：聊天（M 系列）、语音（t2a_v2）、绘图（image_generation）共用这一把 */
+  MINIMAX_KEY?: string;
 
   // ── 朗读与起标题（见 src/audio/tts.ts、src/mimo.ts）──
   /** 小米 MiMo 的 API Key（platform.xiaomimimo.com）：朗读用它合成，起标题用它生成。sk- 是按量付费，tp- 是 Token Plan，地址自动分路 */
@@ -48,6 +50,14 @@ interface CoworkSecrets {
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
   REPLY_TO_EMAIL?: string;
+
+  // ── 网页矩阵（见 src/matrix/core.ts）──
+  /**
+   * 矩阵包推送令牌：配了之后，`POST /api/matrix/pack` 多认一种身份 ——
+   * `Authorization: Bearer <token>`。给「本地/自动化直接把一个包推上云」用；
+   * 不配则这条道整个关闭，推包只有工作台那一处。
+   */
+  MATRIX_PUSH_TOKEN?: string;
 
   // ── 官方用量校准（见 src/analytics.ts）──
   /** Cloudflare API Token（只要 Analytics:Read 权限）：查请求数和 DO 读写行的精确值。没配面板退回自计量 */

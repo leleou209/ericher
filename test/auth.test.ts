@@ -438,10 +438,14 @@ describe("滑动续期", () => {
   });
 
   it("正好卡在半程上不算该续：判定是「不足半程」，不是「不足等于」", () => {
+    // 把 now 钉死再算边界：不然测试里 Date.now() 和函数里那一下差上 1ms，
+    // 「正好卡半程」就被推成「不足半程」，红得毫无道理。
+    const now = Date.now();
     expect(
-      tokenNeedsRenewal({
-        exp: Date.now() + SESSION_RENEW_LEFT_SEC * 1000,
-      }),
+      tokenNeedsRenewal(
+        { exp: now + SESSION_RENEW_LEFT_SEC * 1000 },
+        now,
+      ),
     ).toBe(false);
   });
 

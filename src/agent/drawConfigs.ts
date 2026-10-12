@@ -15,13 +15,14 @@
 
 import type { SqlTag } from "./state";
 
-/** 三种出图协议，对应 draw.ts 里的调用路径 */
-export type DrawFormat = "workers-ai" | "siliconflow" | "zhipu";
+/** 四种出图协议，对应 draw.ts 里的调用路径 */
+export type DrawFormat = "workers-ai" | "siliconflow" | "zhipu" | "minimax";
 
 const DRAW_FORMATS: DrawFormat[] = [
   "workers-ai",
   "siliconflow",
   "zhipu",
+  "minimax",
 ];
 
 /** 绘图的三个档位。tier 就是配置的主键 —— 每档同时只有一条在生效 */
@@ -93,7 +94,7 @@ export interface DrawConfigPatch {
 function assertFormat(format: string): void {
   if (!DRAW_FORMATS.includes(format as DrawFormat))
     throw new Error(
-      `不认识这种出图协议：${format}（只支持 workers-ai / siliconflow / zhipu）`,
+      `不认识这种出图协议：${format}（只支持 workers-ai / siliconflow / zhipu / minimax）`,
     );
 }
 

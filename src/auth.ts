@@ -182,8 +182,15 @@ function readCookie(req: Request, name = COOKIE_NAME): string | null {
   for (const part of raw.split(";")) {
     const i = part.indexOf("=");
     if (i < 0) continue;
-    if (part.slice(0, i).trim() === name)
-      return decodeURIComponent(part.slice(i + 1).trim());
+    if (part.slice(0, i).trim() === name) {
+      // 单条坏 cookie（比如 `xm_session=%`）不该把整次请求 500 掉：
+      // decodeURIComponent 遇到非法转义会抛，兜住当作没这张票
+      try {
+        return decodeURIComponent(part.slice(i + 1).trim());
+      } catch {
+        return null;
+      }
+    }
   }
   return null;
 }

@@ -9,9 +9,12 @@
   box-shadow: var(--yuzhe-shadow);
   text-align: center;
   animation: rise-in 0.18s ease-out;
+  /* 壁纸层铺在卡底下（ThemeBackdrop absolute），卡得浮上来 */
+  position: relative;
+  z-index: 1;
 }
 
-/* 签名黑块：48px 圆角方块里一枚白色衬线「e」 */
+/* 签名黑块：48px 圆角方块里一枚白色衬线「e」；主题给了头像就换成头像 */
 .gate-mark {
   display: flex;
   align-items: center;
@@ -26,6 +29,13 @@
   font-size: 26px;
   font-weight: 600;
   line-height: 1;
+  overflow: hidden;
+}
+
+.gate-mark img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 /* h1 全局已是衬线，这里只管大小与节奏 */

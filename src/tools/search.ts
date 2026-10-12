@@ -282,11 +282,35 @@ async function jinaRead(target: string): Promise<string> {
   }
 }
 
+/**
+ * 逐跳校验的 fetch：入口地址与每一跳的落点都过 assertPublicUrl 才敢跟，最多 5 跳。
+ * 为什么不用 `redirect:"follow"`：那只校验了人给的那一个地址 —— 一个过了白名单的
+ * 公共站，302 到内网 / 云元数据端点，fetch 就照跳不误，这是经典 SSRF 走法。
+ * 所有出站抓取（正文、图片、页面）都该走这里。
+ */
+export async function publicFetch(
+  target: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  let url = assertPublicUrl(target).toString();
+  for (let hop = 0; hop < 5; hop++) {
+    const r = await fetch(url, { ...init, redirect: "manual" });
+    if (r.status >= 300 && r.status < 400) {
+      const loc = r.headers.get("location");
+      if (!loc) throw new Error(`HTTP ${r.status}（重定向没给目标地址）`);
+      // 相对地址按当前这一跳还原成绝对地址再校验
+      url = assertPublicUrl(new URL(loc, url).toString()).toString();
+      continue;
+    }
+    return r;
+  }
+  throw new Error("重定向次数过多");
+}
+
 /** 直连抓取。返回原始 HTML，抽取交给调用方（browse 还要用同一份 HTML 取链接）。 */
 async function directFetch(target: string): Promise<string> {
-  const r = await fetch(target, {
+  const r = await publicFetch(target, {
     headers: { "User-Agent": UA, Accept: "text/html,*/*" },
-    redirect: "follow",
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.text();

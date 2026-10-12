@@ -10,13 +10,14 @@
 
 import type { SqlTag } from "./state";
 
-/** 三种读音协议，对应 tts.ts 里三条合成路径 */
-export type TtsProtocol = "mimo-chat" | "doubao" | "glm-speech";
+/** 四种读音协议，对应 tts.ts 里四条合成路径 */
+export type TtsProtocol = "mimo-chat" | "doubao" | "glm-speech" | "minimax";
 
 const TTS_PROTOCOLS: TtsProtocol[] = [
   "mimo-chat",
   "doubao",
   "glm-speech",
+  "minimax",
 ];
 
 export interface TtsConfig {
@@ -100,7 +101,7 @@ function rowToConfig(r: TtsRow): TtsConfig {
 function assertProtocol(protocol: string): void {
   if (!TTS_PROTOCOLS.includes(protocol as TtsProtocol))
     throw new Error(
-      `不认识这种读音协议：${protocol}（只支持 mimo-chat / doubao / glm-speech）`,
+      `不认识这种读音协议：${protocol}（只支持 mimo-chat / doubao / glm-speech / minimax）`,
     );
 }
 

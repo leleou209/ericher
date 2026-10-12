@@ -4,7 +4,7 @@
  * 验的是这本目录靠不靠得住：
  * - 供应商与条目增删改查全路径，字段缺省不动；
  * - 必填与 format 三值校验：不对就拒，拒的话要听得懂；
- * - 生效唯一性：activate 先全清再置一，全库永远最多一条生效；
+ * - 生效唯一性：activate / update(active) 都是先全清再置一，全库永远最多一条生效；
  * - 删掉生效条目（或整家供应商）时，最新的另一条自动顶上 —— 目录不能空转；
  * - 首个条目自动生效（不然建完还得手动点一下，是段没人需要的死循环）；
  * - 老单表（model_configs）惰性迁移：一行拆成一家供应商 + 一条条目，
@@ -393,6 +393,21 @@ describe("模型条目增删改查", () => {
     expect(up?.model).toBe("m-1b");
     expect(up?.maxOutput).toBe(16384);
     expect(() => updateModelEntry(db, e.id, { model: "" })).toThrow(/模型名/);
+  });
+
+  it("改条目设为生效 = 先全清再置一：全库唯一，换得动（只改自己会弹回）", () => {
+    const { db } = fakeDb();
+    const { provider } = createModelProvider(db, { ...ok, firstModel: "m-1" });
+    const e2 = createModelEntry(db, { providerId: provider.id, model: "m-2" });
+    // m-1 先建、自动生效；把 m-2 设为生效后，生效的必须只剩 m-2 ——
+    // 两条都挂 active 的话 getActiveModelEntry 取最早那条，面板上就是「选了又弹回」
+    expect(updateModelEntry(db, e2.id, { active: true })?.active).toBe(true);
+    expect(getActiveModelEntry(db)?.id).toBe(e2.id);
+    expect(listModelEntries(db).filter((x) => x.active)).toHaveLength(1);
+    // 反向：取消生效后全库无生效，不留暗桩
+    updateModelEntry(db, e2.id, { active: false });
+    expect(getActiveModelEntry(db)).toBeNull();
+    expect(listModelEntries(db).filter((x) => x.active)).toHaveLength(0);
   });
 
   it("删普通条目：生效条目不受影响；删的是生效条目时最新的顶上", () => {

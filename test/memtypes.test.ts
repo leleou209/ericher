@@ -278,8 +278,13 @@ describe("scoreMemory：标题参与检索", () => {
   });
 
   it("老式的条目没有标题也照常打分，不炸", () => {
+    // now 显式钉在记录次日：这条量的是打分机制本身，不该随系统时间衰减而漂移
     expect(
-      scoreMemory(entryOf({ title: "", content: "提到装修" }), ["装修"]),
+      scoreMemory(
+        entryOf({ title: "", content: "提到装修" }),
+        ["装修"],
+        Date.parse("2026-09-23T00:00:00.000Z"),
+      ),
     ).toBeGreaterThan(0.5);
   });
 });

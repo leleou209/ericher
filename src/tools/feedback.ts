@@ -64,7 +64,12 @@ export function feedbackTools(ctx: ToolCtx) {
 
         if (a.action === "read") {
           if (!a.messageId) {
-            const counts = commentCounts(sql);
+            // 只列当前这一场里的消息：主屋那张表收着各场的评论，
+            // 不过滤就会把别场的评论摆到他眼前（串场）。
+            const recent = new Set(ctx.recentMessages(60).map((m) => m.id));
+            const counts = commentCounts(sql).filter((c) =>
+              recent.has(c.messageId),
+            );
             if (!counts.length) return "还没有任何评论。";
             return (
               "💬 有评论的消息：\n" +

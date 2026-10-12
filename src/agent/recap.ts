@@ -182,7 +182,8 @@ export async function runSessionRecap(
 
   // 回想走维护模型的口（与夜间整理同源）：它是后台记账，不值得动用主线那台
   // 按量计费的 —— 管理员给维护配了更便宜的，这里自动跟上；没配则回落主模型
-  const model = agent.maintModel();
+  // 闹钟轮是冷唤醒：要 resolveMaintModel 才会去模型目录读，不然目录配的模型白配
+  const model = await agent.resolveMaintModel();
   if (!model) return; // 一个模型都没配：什么都没发生，下次到点还有机会
 
   // 这一趟回想的幂等键：她写下的每条记忆都带着它。写回失败、游标没推进时，

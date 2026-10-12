@@ -528,7 +528,8 @@
    合着时收进画外并藏起来；拉开只推 transform，动画从合上那格算起。
    挂载动画关掉 —— 它只在进页面时白白播一遍。 */
 .note-drawer.drawer-left,
-.memo-drawer.drawer-left {
+.memo-drawer.drawer-left,
+.plan-drawer.drawer-left {
   animation: none;
   transform: translateX(-102%);
   visibility: hidden;
@@ -538,7 +539,8 @@
 }
 
 .note-drawer.drawer-left.open,
-.memo-drawer.drawer-left.open {
+.memo-drawer.drawer-left.open,
+.plan-drawer.drawer-left.open {
   transform: translateX(0);
   visibility: visible;
   transition: transform 0.2s ease-out;
@@ -863,4 +865,265 @@
   .nm-top-title {
     font-size: 16px;
   }
+}
+
+/* ─────────────────────────────────────────────────────────────
+   本场计划（SessionPlanBar / SessionPlanDrawer）
+   第三层：只管这一场、不设时间。类名统一 sp- 前缀。
+   和笔记本/回想一样只用灰阶变量与发丝线，不引入彩色。
+   ───────────────────────────────────────────────────────────── */
+
+/* 消息列表上方的常驻条：一眼扫得到这一场要干什么。 */
+.sp-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 18px;
+  border: none;
+  border-bottom: 1px solid var(--yuzhe-line);
+  background: var(--yuzhe-bg-soft);
+  color: var(--yuzhe-ink);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.sp-bar:hover {
+  background: var(--yuzhe-bg-hover);
+}
+
+.sp-bar > svg {
+  flex: none;
+  color: var(--yuzhe-ink-faint);
+}
+
+.sp-bar-goal {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--yuzhe-ink-strong);
+}
+
+.sp-bar-meta {
+  flex: none;
+  font-size: 12px;
+  color: var(--yuzhe-ink-faint);
+}
+
+/* ── 抽屉：目标那一段 ──
+   占上半：抽屉里上下对半 —— 目标在上，步骤沉到下半。
+   textarea 顺着撑满自己那一半，长目标在框内滚，不再顶出一小条窄窗。 */
+.sp-goal-wrap {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px 6px;
+}
+
+.sp-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--yuzhe-ink-faint);
+}
+
+.sp-label .nm-save {
+  margin-left: auto;
+}
+
+.sp-goal {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-m);
+  outline: none;
+  resize: none;
+  background: var(--yuzhe-surface);
+  color: var(--yuzhe-ink);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.sp-goal:focus {
+  border-color: var(--yuzhe-line-strong);
+}
+
+.sp-goal::placeholder {
+  color: var(--yuzhe-ink-faint);
+}
+
+/* ── 抽屉：步骤那一段 ──
+   沉下半：和目标段对半，表头正好落在页面中线往下。 */
+.sp-steps {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 14px 14px;
+}
+
+.sp-steps-head {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0 8px;
+  font-size: 12px;
+  color: var(--yuzhe-ink-faint);
+}
+
+.sp-steps-head b {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--yuzhe-ink-strong);
+}
+
+.sp-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sp-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 6px;
+  border-radius: var(--yuzhe-r-m);
+  transition: background 0.15s;
+}
+
+.sp-step:hover {
+  background: var(--yuzhe-bg-hover);
+}
+
+.sp-step-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--yuzhe-ink);
+  word-break: break-word;
+}
+
+.sp-step.done .sp-step-title {
+  color: var(--yuzhe-ink-faint);
+  text-decoration: line-through;
+}
+
+/* 状态圈：待办是空圈，进行中亮一档，完成翻成黑底白勾 —— 用深浅说话，不用彩色 */
+.sp-stat {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--yuzhe-ink-faint);
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background 0.15s,
+    color 0.15s;
+}
+
+.sp-stat.doing {
+  border-color: var(--yuzhe-line-strong);
+  color: var(--yuzhe-ink-strong);
+}
+
+.sp-stat.done {
+  border-color: var(--yuzhe-black);
+  background: var(--yuzhe-black);
+  color: var(--yuzhe-on-black);
+}
+
+.sp-del {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--yuzhe-r-s);
+  background: transparent;
+  color: var(--yuzhe-ink-faint);
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+
+.sp-del:hover {
+  background: var(--yuzhe-bg-hover);
+  color: var(--yuzhe-danger);
+}
+
+.sp-add {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  margin-top: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-surface);
+  color: var(--yuzhe-ink-faint);
+  transition: border-color 0.15s;
+}
+
+.sp-add:focus-within {
+  border-color: var(--yuzhe-line-strong);
+}
+
+.sp-add input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--yuzhe-ink);
+  font-size: 13px;
+}
+
+.sp-add input::placeholder {
+  color: var(--yuzhe-ink-faint);
+}
+
+.sp-add button {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--yuzhe-ink-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-add button:disabled {
+  color: var(--yuzhe-ink-faint);
+  cursor: default;
+}
+
+.plan-drawer .nm-err {
+  flex: none;
+  margin: 8px 14px 12px;
 }

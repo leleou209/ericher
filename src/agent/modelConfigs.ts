@@ -466,6 +466,10 @@ export function updateModelEntry(
         : toContextWindow(patch.contextWindow),
     active: patch.active === undefined ? cur.active : patch.active,
   };
+  // 「设为生效」是全库唯一的语义：先全清再置一，跟 activateModelEntry 一把尺。
+  // 只改自己那一行会留下两条生效，而 getActiveModelEntry 取的是最早那条 ——
+  // 面板上换个模型就弹回旧的，永远换不动。
+  if (patch.active === true) sql`UPDATE model_entries SET active = 0`;
   sql`UPDATE model_entries SET model = ${next.model},
         max_output = ${next.maxOutput}, context_window = ${next.contextWindow},
         active = ${next.active ? 1 : 0}

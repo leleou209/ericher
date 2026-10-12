@@ -17,6 +17,21 @@ body,
   height: 100%;
 }
 
+/* 界面各视图都是自己内部滚（.settings-scroll/.sheet/消息列表…），
+   文档本身不滚。锁死 html/body，免得边缘滑动/惯性甩动把滚动链穿透到
+   文档层，整个界面被滚走（上移+露白）。 */
+html,
+body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/* 内部滚动容器一律掐断滚动链：滚到头不许再带动外层，
+   也顺带压掉触屏橡皮筋/下拉刷新把页面拽走的那股劲。 */
+* {
+  overscroll-behavior: contain;
+}
+
 body {
   margin: 0;
   background: var(--yuzhe-bg);
@@ -469,11 +484,12 @@ select.field {
   display: flex;
   align-items: center;
   justify-content: center;
-  /* 先给不认 color-mix 的老浏览器一层实底，再往上叠半透明的 */
+  /* 先给不认 color-mix 的老浏览器一层实底，再往上叠半透明的。
+     这里不再叠 backdrop-filter 毛玻璃：它盖在整张消息列表上，是这条链上最贵的一笔
+     样式开销，弱设备上就是「卡、慢」，而动效开关也关不掉它（它不算 animation）。
+     底色调浓一点补回一点遮挡感，足够「看得出下面还在、只是还没换过来」。 */
   background: var(--yuzhe-bg);
-  background: color-mix(in srgb, var(--yuzhe-bg) 70%, transparent);
-  backdrop-filter: blur(14px) saturate(1.05);
-  -webkit-backdrop-filter: blur(14px) saturate(1.05);
+  background: color-mix(in srgb, var(--yuzhe-bg) 82%, transparent);
   animation: fade-in 0.18s ease;
 }
 
@@ -644,6 +660,13 @@ select.field {
   background: var(--yuzhe-bg-hover);
 }
 
+/* 答案正在送：这张卡上的按钮和输入框全部锁上，免得连点送出复数回答 */
+.ask-x:disabled {
+  opacity: 0.45;
+  cursor: default;
+  pointer-events: none;
+}
+
 .ask-text {
   margin-top: 8px;
   font-size: 14px;
@@ -722,6 +745,113 @@ select.field {
 
 .ask-inline-input::placeholder {
   color: var(--yuzhe-ink-faint);
+}
+
+.ask-inline-input:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 更早的消息条：窗口没放完的老消息从这儿再放一层（点一下，或向上滑到顶） */
+.older-btn {
+  display: block;
+  margin: 10px auto 14px;
+  padding: 5px 14px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: 999px;
+  background: var(--yuzhe-surface);
+  color: var(--yuzhe-ink-faint);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
+}
+
+.older-btn:hover {
+  color: var(--yuzhe-ink-strong);
+  border-color: var(--yuzhe-line-strong);
+}
+
+/* 一键滑到底：翻旧账翻远了才浮出来。sticky 把它钉在可视区下沿 —— 内容再长也不随滚走，
+   margin-left:auto 推到右边，和输入框那条尾巴对齐 */
+.jump-bottom {
+  position: sticky;
+  bottom: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--yuzhe-line);
+  background: var(--yuzhe-surface);
+  color: var(--yuzhe-ink-dim);
+  box-shadow: var(--yuzhe-shadow-pop);
+  cursor: pointer;
+  z-index: 5;
+  animation: rise-in 0.16s ease-out;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
+}
+
+.jump-bottom:hover {
+  color: var(--yuzhe-ink-strong);
+  border-color: var(--yuzhe-line-strong);
+}
+
+/* 停滞报告卡：流到一半静下来超过 5 秒就摆在消息区上方 */
+.stall-card {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 8px;
+  z-index: 50;
+  background: var(--yuzhe-surface);
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-m);
+  box-shadow: var(--yuzhe-shadow-pop);
+  padding: 10px 14px;
+  font-size: 13px;
+  animation: rise-in 0.18s ease-out;
+}
+
+.stall-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--yuzhe-ink-dim);
+}
+
+.stall-head > span {
+  flex: 1;
+}
+
+.stall-x {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--yuzhe-ink-faint);
+  padding: 2px;
+  border-radius: var(--yuzhe-r-s);
+}
+
+.stall-x:hover {
+  color: var(--yuzhe-ink);
+  background: var(--yuzhe-bg-hover);
+}
+
+.stall-body > p {
+  margin-top: 6px;
+  line-height: 1.6;
+  color: var(--yuzhe-ink-dim);
+}
+
+.stall-hint {
+  color: var(--yuzhe-ink-faint) !important;
+  font-size: 12px;
 }
 
 /* 「/」菜单：贴着输入框往上升 */
@@ -899,11 +1029,56 @@ select.field {
 /* ── 门禁底 ── */
 .gate {
   min-height: 100dvh;
+  /* body 锁滚后超高内容在这儿自己滚；safe center 保证超高时顶不被裁 */
+  max-height: 100dvh;
+  overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   align-items: center;
+  align-items: safe center;
   justify-content: center;
   padding: 24px;
   background: var(--yuzhe-bg);
+  /* 壁纸层（ThemeBackdrop，absolute）从这儿铺出来，卡浮在它上面 */
+  position: relative;
+}
+
+/* ── 主题壁纸让位 ──
+   html[data-wallpaper] 由 applyThemeToDocument 打标：哪些背景位铺上了壁纸
+   （自己的没铺、回落到全局的也算）。铺了的视图把自家纸底让出来，垫在
+   z-index:-1 的壁纸层才露得出来；一个都没铺时全不命中，界面照旧。 */
+html[data-wallpaper~="chat"] .chat-app,
+html[data-wallpaper~="notes"] .nm-page,
+html[data-wallpaper~="global"] .nm-page,
+html[data-wallpaper~="settings"] .settings-app {
+  background: transparent;
+}
+
+/* ── 壁纸上的设置页 ──
+   settings-app 让出纸底后，侧栏导航和页头文字就直接压在画上了。
+   侧栏垫一层高浓度纸底（同聊天页侧栏实底的路数，留一丝壁纸透气）；
+   页头垫成一块跟设置卡同族的小匾。都不上 backdrop-filter ——
+   全局毛玻璃是换场卡顿的老根（见 .chat-switching 的注）。 */
+html[data-wallpaper~="settings"] .settings-sidebar {
+  background: color-mix(in srgb, var(--yuzhe-bg) 90%, transparent);
+}
+
+html[data-wallpaper~="settings"] .page-header {
+  padding: 14px 18px;
+  background: color-mix(in srgb, var(--yuzhe-surface) 88%, transparent);
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-l);
+}
+
+/* ── 壁纸上的笔记本 ──
+   nm-page 让位后，顶栏和左列本就各自有实底，只有右边正文一列裸着。
+   正文列垫成一块半透明纸匾（编辑器自带内边距，匾不再另给），跟聊天
+   文段块、设置页头同族；空态（.nm-blank）在匾里，一并兜住。 */
+html[data-wallpaper~="notes"] .nm-main {
+  margin: 12px;
+  background: color-mix(in srgb, var(--yuzhe-surface) 88%, transparent);
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-l);
 }
 
 /* ── 通知条 ── */
@@ -923,6 +1098,8 @@ select.field {
   border-radius: var(--yuzhe-r-m);
   box-shadow: var(--yuzhe-shadow-pop);
   animation: rise-in 0.18s ease-out;
+  white-space: pre-wrap;
+  line-height: 1.6;
 }
 
 /* ── 动效 ── */

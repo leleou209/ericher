@@ -387,8 +387,15 @@ export function MemoryPanel() {
     }
   };
 
-  const del = async (id: string) => {
-    await api.memoryDelete(id).catch((e: Error) => setErr(e.message));
+  const del = async (m: MemEntry) => {
+    // 删除不是作废 —— 条目直接没了。先问一句，别让手滑把一条还作数的记忆永久抹掉
+    if (
+      !window.confirm(
+        `永久删除这条记忆？「${m.content.slice(0, 40)}${m.content.length > 40 ? "…" : ""}」删了就找不回来了。`,
+      )
+    )
+      return;
+    await api.memoryDelete(m.id).catch((e: Error) => setErr(e.message));
     await load();
   };
 
@@ -641,7 +648,7 @@ export function MemoryPanel() {
             m={m}
             showWeight
             gateLevelOf={gateLevelOf}
-            onDelete={() => del(m.id)}
+            onDelete={() => del(m)}
             onRetire={() => retire(m)}
             onConfirm={() => confirm(m)}
             onVolatility={(v) => setVol(m, v)}
@@ -1377,8 +1384,15 @@ export function ContactPanel() {
     }
   };
 
-  const del = async (id: string) => {
-    await api.memoryDelete(id).catch((e: Error) => setErr(e.message));
+  const del = async (m: MemEntry) => {
+    // 和记忆面板同一条规矩：删除是永久的，先问一句再动手
+    if (
+      !window.confirm(
+        `永久删除关于${who}的这条记忆？「${m.content.slice(0, 40)}${m.content.length > 40 ? "…" : ""}」删了就找不回来了。`,
+      )
+    )
+      return;
+    await api.memoryDelete(m.id).catch((e: Error) => setErr(e.message));
     if (who) await loadItems(who);
     await loadPeople();
   };
@@ -1415,7 +1429,7 @@ export function ContactPanel() {
             <MemRow
               key={m.id}
               m={m}
-              onDelete={() => del(m.id)}
+              onDelete={() => del(m)}
               onRetire={() => retire(m)}
               onConfirm={() => confirm(m)}
               onVolatility={(v) => setVol(m, v)}

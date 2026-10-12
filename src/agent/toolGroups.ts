@@ -15,7 +15,13 @@
 
 /** 语义组的 id。顺序就是拼进提示词的顺序，也是面板上从上到下的顺序。 */
 type GroupId =
-  "read" | "visual" | "memory" | "todo" | "session" | "system";
+  | "read"
+  | "visual"
+  | "memory"
+  | "todo"
+  | "session"
+  | "system"
+  | "matrix";
 
 export interface ToolGroupDef {
   id: GroupId;
@@ -35,6 +41,11 @@ export const TOOL_GROUPS: ToolGroupDef[] = [
   { id: "todo", label: "待办与提醒", hint: "任务清单与到点提醒" },
   { id: "session", label: "会话与提问", hint: "回头问他、另开一场" },
   { id: "system", label: "自我与系统", hint: "自我认知、技能、统计、整理" },
+  {
+    id: "matrix",
+    label: "网页矩阵",
+    hint: "建页、连通路、换外观",
+  },
 ];
 
 interface ToolDef {
@@ -226,7 +237,8 @@ new/write 必填 body。`,
     guestTogglable: false,
     ownerDefault: `云盘工具组：list/read/delete/clear/mkdir/move
 （我没有 write能力；read/delete/move 要写key，move 写 to位置，clear 写 prefix，mkdir 记得填入 path）；
-产物自动归档进 会话/<场id>/ 文件夹，需要时自行寻找。`,
+产物自动归档进 会话/<场id>/ 文件夹，需要时自行寻找。
+被网页矩阵页引用的文件不能删、不能搬（会被拦下）—— 要动它先换掉那一页的引用。`,
     guestDefault: "",
   },
   {
@@ -240,6 +252,20 @@ new/write 必填 body。`,
 update/delete 必填 index（先 list 看，从 0 起）；
 update 要 status（todo/doing/done）。
 任务没有自动执行的能力，我必须自己主动推行已有的计划和提醒用户。`,
+    guestDefault: "",
+  },
+  {
+    name: "plan",
+    group: "todo",
+    resident: true,
+    owner: true,
+    guest: false,
+    guestTogglable: false,
+    ownerDefault: `本场计划：这一场的目标与步骤，作用域只有当前这一场。
+show 看现状；set_goal 写或改目标（空串 = 清除）；
+add 必填 title；update/delete 必填 index（先 show 看，从 0 起）；update 要 status。
+它和「待办任务」（跨会话的全局清单）与「提醒」（到点响）是三件事，别混用；
+这一场要干什么就记这儿，别指望它自己会响。`,
     guestDefault: "",
   },
   {
@@ -339,6 +365,24 @@ openSession某种意义上可以作为子agent使用，虽然我们目前没有�
     guestTogglable: false,
     ownerDefault:
       "看他对我的赞踩与评论正文（action：signal/read/comment）；有评论用 feedback 读正文，只报条数等于漏掉。",
+    guestDefault: "",
+  },
+  {
+    name: "matrix",
+    group: "matrix",
+    resident: false,
+    owner: true,
+    guest: false,
+    guestTogglable: false,
+    ownerDefault: `网页矩阵（接待台对面那一排页面）：我能建页、改页、连通路、换全站外观。
+action：list 看现状；create 建页（path/title/html）；edit 改页（id 或 path 定位，可改 title/html/css/access/entry/sandbox/newPath）；
+bind 连一条通路（from + to，to 是站内路径或一条完整外站网址；place 写 auto / anchor:名字 / point:12,34）；
+style 改全站主色与按钮形态。
+守则（必须遵守）：
+1. 外站能不能去由「认定表」说话 —— 我不往表里加域名，只在已认定的范围内连线；表外的一律如实说明「访客会被门卫页拦下」，不假装能通。
+2. javascript: / data: / blob: 这类伪协议，任何动作都不放行。
+3. 沙箱页的正文与链接不改写（它的隔离由页面自己承担）。
+4. 我改的是访客看得到的公开页面：动手前先 list 看清现有路径，别撞已有路径、别把别人的页面覆盖掉。`,
     guestDefault: "",
   },
   {

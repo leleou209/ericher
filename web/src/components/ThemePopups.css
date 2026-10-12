@@ -1,0 +1,81 @@
+/* 触发式弹页：一层压暗 + 一张白纸卡，和门口/介绍页同一套纸感。
+   挂在最外层（z-index 300），盖在介绍页（200）之上 —— 到点就得让人看见。 */
+
+.theme-popup-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(31, 35, 41, 0.44);
+}
+
+.theme-popup {
+  width: min(100%, 420px);
+  max-height: min(80dvh, 640px);
+  overflow-y: auto;
+  padding: 26px 26px 22px;
+  background: var(--yuzhe-surface);
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-xl);
+  box-shadow: var(--yuzhe-shadow-pop);
+  animation: theme-popup-rise 0.18s ease-out;
+}
+
+@keyframes theme-popup-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.theme-popup-img {
+  display: block;
+  width: 100%;
+  max-height: 260px;
+  object-fit: cover;
+  margin-bottom: 14px;
+  border-radius: var(--yuzhe-r-m);
+  border: 1px solid var(--yuzhe-line);
+}
+
+.theme-popup-title {
+  margin: 0 0 10px;
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.theme-popup-body {
+  margin: 0 0 18px;
+  font-size: 14px;
+  line-height: 1.8;
+  color: var(--yuzhe-ink-dim);
+  white-space: pre-wrap;
+}
+
+.theme-popup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+/* 第一个动作是主按钮，其余当次要按钮 */
+.theme-popup-action {
+  flex: 1 1 auto;
+  min-width: 120px;
+  text-align: center;
+  text-decoration: none;
+}
+
+.theme-popup-close {
+  width: 100%;
+}

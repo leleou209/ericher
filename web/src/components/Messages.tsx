@@ -11,6 +11,8 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import ReactMarkdown from "react-markdown";
@@ -26,10 +28,26 @@ import {
   type UIMessage,
 } from "ai";
 import { api, type Role } from "../lib/api";
-import type { FeedbackSummary, MsgComment } from "../lib/types";
-import { Icon } from "./Icons";
+import type { FeedbackSummary, MsgComment, TurnError } from "../lib/types";
+import { agentDisplay, useTheme } from "../lib/theme";
+import { Icon, type IconName } from "./Icons";
 import { zoomIn } from "./Lightbox";
 import { toolMeta } from "./Panels";
+
+/** 他说话前自报的那枚小签：主题给了头像就把头像别上，名字也随主题叫 */
+function AgentLabel() {
+  const { theme } = useTheme();
+  const { name, avatar } = agentDisplay(theme);
+  return (
+    <div className="msg-label">
+      {avatar && <img className="msg-avatar" src={avatar} alt="" />}
+      {name}
+    </div>
+  );
+}
+
+/** 死因认领的年龄门槛：只认这个时刻之内的「新伤」，更老的直接进收件箱 */
+const CLAIM_MAX_AGE = 10 * 60 * 1000;
 
 const STATE_META: Record<string, { label: string; cls: string }> = {
   loading: { label: "运行中…", cls: "run" },
@@ -116,36 +134,245 @@ function ToolCall({
   );
 }
 
-// ── mermaid：她写的源码，渲染器摆线 ──────────────────────
-// 动态 import 让首屏不背 mermaid 的包体 —— 只有真出现图时才拉渲染器；
-// 渲染结果按源码缓存，历史消息重渲时直接复用，不重画。
+/**
+ * 一轮异常中断的死因卡。
+ *
+ * 工具链断环、输出顶到上限被截、上游直接拒单 —— 这些以前只躺在 console 里：
+ * 界面上要么一片安静（以为他还在酝酿），要么只留一个「结果没回来」。
+ * 这张卡把死因明文摆出来，和思考过程一样直白 —— 是话太长被截、是被人按下停，
+ * 还是上游把这一轮拒了。管理员还能展开看原始报文（状态码 / URL / 返回体）。
+ */
+const REASON_ICON: Record<TurnError["reason"], IconName> = {
+  "output-limit": "scissors",
+  aborted: "stop",
+  "stream-error": "alert-circle",
+};
 
+function TurnErrorCard({
+  err,
+  showDetail,
+}: {
+  err: TurnError;
+  /** 管理员才看得到原始报文；来客只看人话 */
+  showDetail: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`turn-err ${err.reason}`}>
+      <div className="turn-err-head">
+        <span className="turn-err-icon">
+          <Icon name={REASON_ICON[err.reason]} size={14} />
+        </span>
+        <span className="turn-err-title">{err.title}</span>
+      </div>
+      <div className="turn-err-detail">{err.detail}</div>
+      {showDetail && err.raw ? (
+        <>
+          <button
+            type="button"
+            className="turn-err-toggle"
+            onClick={() => setOpen((v) => !v)}
+          >
+            <Icon name={open ? "chevron-up" : "chevron-down"} size={12} />
+            <span>{open ? "收起原始报文" : "看原始报文"}</span>
+          </button>
+          {open && <pre className="turn-err-raw">{err.raw}</pre>}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+// ── mermaid：她写的源码，渲染器摆线 ──────────────────────
+// 动态 import 让首屏不背 mermaid 的包体 —— 只有真出现图时才拉渲染器。
+// 几张缓存各管一段：同一份源码只取一遍、同一张图只渲一遍（工具卡和正文各摆一份也只渲一次）、
+// 用户拖过的高度按图记住 —— 历史消息重渲、外观翻面，都不白跑一趟。
+
+/** 当前真正生效的外观主题。App 已把「跟随系统」落成 paper/dark，这里只兜底一次 */
+function resolvedTheme(): string {
+  const t = document.documentElement.dataset.theme || "paper";
+  if (t !== "system") return t;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "paper";
+}
+
+/**
+ * 把当前主题的灰阶实取出来交给 mermaid。
+ *
+ * mermaid 自带的几套主题跟我们的纸感无关：白底黑线摆在一张夜墨的纸上，
+ * 图自己亮着一块，像贴上去的打印纸。换成 base 主题 + 显式喂色，
+ * 图就长在纸面上 —— 线的颜色、节点的填充、聚类的底，全是页面上正在用的那几个变量。
+ */
+function mermaidVars(): Record<string, unknown> {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (n: string) => cs.getPropertyValue(n).trim();
+  const surface = v("--yuzhe-surface");
+  const soft = v("--yuzhe-bg-soft");
+  const ink = v("--yuzhe-ink");
+  const inkDim = v("--yuzhe-ink-dim");
+  const inkFaint = v("--yuzhe-ink-faint");
+  const line = v("--yuzhe-line");
+  return {
+    darkMode: resolvedTheme() === "dark",
+    fontFamily: v("--font-ui"),
+    fontSize: "14px",
+    // 纸面
+    background: surface,
+    // 节点
+    mainBkg: soft,
+    primaryColor: soft,
+    primaryTextColor: ink,
+    primaryBorderColor: inkFaint,
+    secondaryColor: soft,
+    tertiaryColor: soft,
+    nodeBorder: inkFaint,
+    nodeTextColor: ink,
+    // 连线与文字
+    lineColor: inkDim,
+    textColor: ink,
+    titleColor: ink,
+    edgeLabelBackground: surface,
+    // 聚类（subgraph）
+    clusterBkg: surface,
+    clusterBorder: line,
+    // 时序图
+    actorBkg: soft,
+    actorBorder: inkFaint,
+    actorTextColor: ink,
+    actorLineColor: inkFaint,
+    signalColor: inkDim,
+    signalTextColor: ink,
+    labelBoxBkgColor: surface,
+    labelBoxBorderColor: inkFaint,
+    labelTextColor: ink,
+    loopTextColor: ink,
+    noteBkgColor: soft,
+    noteBorderColor: inkFaint,
+    noteTextColor: ink,
+    // 状态图 / 类图
+    labelBackgroundColor: surface,
+  };
+}
+
+// 主题::源码 → 渲好的 svg ｜ 正在渲的那一个 ｜ 云盘地址 → 取回来的源码 ｜ 源码 → 拖过的高度
 const mermaidSvgCache = new Map<string, string>();
+const mermaidRenderInflight = new Map<string, Promise<string>>();
+const mmdSourceCache = new Map<string, Promise<string>>();
+const mermaidHeightCache = new Map<string, number>();
+
 let mermaidMod: Promise<(typeof import("mermaid"))["default"]> | null = null;
 let mermaidThemeKey = "";
 
+/**
+ * 外观翻了面（含「跟随系统」跟着系统变）：mermaid 的主题是全局配置，
+ * 旧渲染按旧配色出的图全作废，喊所有还挂着的图重来一遍。
+ * 只盯 data-theme 这一个开关 —— App 已经把系统明暗解析成 paper/dark 写在这上面了。
+ */
+let themeVersion = 0;
+let themeWatchOn = false;
+let themeSeen = "paper";
+const themeSubs = new Set<() => void>();
+
+function subscribeTheme(fn: () => void) {
+  if (!themeWatchOn) {
+    themeWatchOn = true;
+    themeSeen = resolvedTheme();
+    new MutationObserver(() => {
+      const now = resolvedTheme();
+      if (now === themeSeen) return;
+      themeSeen = now;
+      themeVersion++;
+      mermaidSvgCache.clear();
+      themeSubs.forEach((f) => f());
+    }).observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+  }
+  themeSubs.add(fn);
+  return () => {
+    themeSubs.delete(fn);
+  };
+}
+
+/** 主题一翻就重渲：图跟着纸面换色，不用刷新页面 */
+function useThemeVersion(): number {
+  return useSyncExternalStore(subscribeTheme, () => themeVersion);
+}
+
 function loadMermaid(): Promise<(typeof import("mermaid"))["default"]> {
   // mermaid 的主题是全局配置，初始化时定死 —— 外观主题变了就得重初始化、旧渲染作废
-  const theme = document.documentElement.dataset.theme || "paper";
-  const dark =
-    theme === "dark" ||
-    (theme === "system" &&
-      window.matchMedia("(prefers-color-scheme: dark)").matches);
-  const key = dark ? "dark" : "neutral";
-  if (!mermaidMod || mermaidThemeKey !== key) {
+  const theme = resolvedTheme();
+  if (!mermaidMod || mermaidThemeKey !== theme) {
     if (mermaidMod) mermaidSvgCache.clear();
-    mermaidThemeKey = key;
+    mermaidThemeKey = theme;
     mermaidMod = import("mermaid").then((m) => {
       m.default.initialize({
         startOnLoad: false,
-        theme: key,
+        // base 是「不自作主张」的那套：颜色全部由 themeVariables 说了算
+        theme: "base",
+        themeVariables: mermaidVars(),
         securityLevel: "strict",
         suppressErrorRendering: true,
+        // 关掉自动撑满：默认会往根 svg 上写 width="100%" 和一条行内 max-width，
+        // 横图被压扁、竖图被拉长，行内那条还压过样式表。让它按自然尺寸出图，
+        // 摆放交给 CSS（max-width:100% 只缩不放）。
+        flowchart: { useMaxWidth: false },
+        sequence: { useMaxWidth: false },
+        state: { useMaxWidth: false },
+        class: { useMaxWidth: false },
+        er: { useMaxWidth: false },
       });
       return m.default;
     });
   }
   return mermaidMod;
+}
+
+/**
+ * 一段源码 → 一张图，同一张（同一主题下）只渲一遍。
+ * 工具卡和正文里的 markdown 常常各摆一份同样的图，走同一个 cache key，
+ * 后到的那个直接等前一个的 promise，不再重拉渲染器、不再重画。
+ */
+function renderMermaid(source: string): Promise<string> {
+  const key = resolvedTheme() + "\u0000" + source;
+  const done = mermaidSvgCache.get(key);
+  if (done !== undefined) return Promise.resolve(done);
+  const running = mermaidRenderInflight.get(key);
+  if (running) return running;
+
+  const job = (async () => {
+    const stage = newMermaidStage();
+    try {
+      const mm = await loadMermaid();
+      const { svg } = await mm.render(
+        "mmd-" + Math.random().toString(36).slice(2),
+        source,
+        stage,
+      );
+      if (mermaidSvgCache.size > 200) mermaidSvgCache.clear();
+      mermaidSvgCache.set(key, svg);
+      // 图渲出来长什么样，先在这儿留个底：看图层量到 0 宽时，这是唯一的对照物。
+      // foreignObject / width / max-width 这三样正是内联能不能立住的关键。
+      console.warn("[看图] mermaid 渲染成功", {
+        源码行数: source.split("\n").length,
+        svg长度: svg.length,
+        带foreignObject: svg.includes("foreignObject"),
+        带HTML标签: /<(div|span|p)\b/i.test(svg),
+        viewBox: /viewBox="([^"]*)"/.exec(svg)?.[1] ?? "(无)",
+        svg的width属性: /<svg[^>]*\swidth="([^"]*)"/.exec(svg)?.[1] ?? "(无)",
+        内联maxWidth: /max-width:\s*([^;"]*)/.exec(svg)?.[1] ?? "(无)",
+        主题: key.slice(0, key.indexOf("\u0000")),
+      });
+      return svg;
+    } finally {
+      stage.remove();
+      mermaidRenderInflight.delete(key);
+    }
+  })();
+  mermaidRenderInflight.set(key, job);
+  return job;
 }
 
 /**
@@ -171,45 +398,44 @@ function newMermaidStage(): HTMLDivElement {
 /**
  * 一段 mermaid 源码 → 一张图。渲染失败把错误摆出来而不是吞掉 ——
  * 空卡片没人知道为什么，摆出来她改一版重发就是。
+ *
+ * 高度：建议默认高 = min(图的自然高, 约 70vh)。装得下就原样摊开，
+ * 装不下就在框里滚 —— 一张五十节点的大图不该把一整屏聊天顶走。
+ * 框底那道边可以往下拖，把框放高；拖过的高度按图记住，重渲也不丢。
  */
 function MermaidView({ source, alt }: { source: string; alt: string }) {
-  const [svg, setSvg] = useState(() => mermaidSvgCache.get(source) ?? "");
+  const themeV = useThemeVersion();
+  const [svg, setSvg] = useState(
+    () => mermaidSvgCache.get(resolvedTheme() + "\u0000" + source) ?? "",
+  );
   const [err, setErr] = useState("");
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  const lastSource = useRef(source);
+  // 用户拖过的高度：null = 还没动过，随「建议默认高」走
+  const [cap, setCap] = useState<number | null>(
+    () => mermaidHeightCache.get(source) ?? null,
+  );
+  // 图比一屏还高才有得调 —— 装得下的时候摆个把手只是徒增困惑
+  const [tall, setTall] = useState(false);
+  const dragFrom = useRef<{ y: number; h: number } | null>(null);
+  // 拖过把手的那一下不是「点图」：松手别顺手把看图层弹出来
+  const dragged = useRef(false);
+
   useEffect(() => {
-    const cached = mermaidSvgCache.get(source);
-    if (cached) {
-      setSvg(cached);
-      setErr("");
+    let alive = true;
+    // 换了一张图才清空；只是翻了主题就先把旧图摆着，等新的渲好再换，免得闪一下白
+    const sameSource = lastSource.current === source;
+    lastSource.current = source;
+    if (!sameSource) setSvg("");
+    setErr("");
+    const hit = mermaidSvgCache.get(resolvedTheme() + "\u0000" + source);
+    if (hit) {
+      setSvg(hit);
       return;
     }
-    setSvg("");
-    let alive = true;
-    const stage = newMermaidStage();
-    loadMermaid()
-      .then(async (mm) => {
-        const { svg: out } = await mm.render(
-          "mmd-" + Math.random().toString(36).slice(2),
-          source,
-          stage,
-        );
-        if (mermaidSvgCache.size > 200) mermaidSvgCache.clear();
-        mermaidSvgCache.set(source, out);
-        // 图渲出来长什么样，先在这儿留个底：看图层量到 0 宽时，这是唯一的对照物。
-        // foreignObject / width / max-width 这三样正是内联能不能立住的关键。
-        console.warn("[看图] mermaid 渲染成功", {
-          源码行数: source.split("\n").length,
-          svg长度: out.length,
-          带foreignObject: out.includes("foreignObject"),
-          带HTML标签: /<(div|span|p)\b/i.test(out),
-          viewBox: /viewBox="([^"]*)"/.exec(out)?.[1] ?? "(无)",
-          svg的width属性: /<svg[^>]*\swidth="([^"]*)"/.exec(out)?.[1] ?? "(无)",
-          内联maxWidth: /max-width:\s*([^;"]*)/.exec(out)?.[1] ?? "(无)",
-          主题: mermaidThemeKey,
-        });
-        if (alive) {
-          setSvg(out);
-          setErr("");
-        }
+    renderMermaid(source)
+      .then((out) => {
+        if (alive) setSvg(out);
       })
       .catch((e) => {
         // 整颗错误对象都摆出来：只取 message 会丢掉 mermaid 抛的语法细节
@@ -217,16 +443,65 @@ function MermaidView({ source, alt }: { source: string; alt: string }) {
           源码前200字: source.slice(0, 200),
           错误对象: e,
           消息: e instanceof Error ? e.message : String(e),
-          主题: mermaidThemeKey,
+          主题: resolvedTheme(),
         });
         if (alive) setErr(e instanceof Error ? e.message : String(e));
-      })
-      // 画完（无论成没成）把落脚处撤掉：留在 body 里就是一堆看不见的空壳
-      .finally(() => stage.remove());
+      });
     return () => {
       alive = false;
     };
+  }, [source, themeV]);
+
+  // 换了图就换回它自己那条高度记录（没记过就回到建议默认高）
+  useEffect(() => {
+    setCap(mermaidHeightCache.get(source) ?? null);
   }, [source]);
+
+  // 量的永远是 svg 自己的高（父框把它裁了也不影响）：比 70vh 高才给把手
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!svg || !frame) return;
+    const measure = () => {
+      const h = frame.querySelector("svg")?.getBoundingClientRect().height ?? 0;
+      setTall(h > window.innerHeight * 0.7 + 8);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(frame);
+    window.addEventListener("resize", measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [svg]);
+
+  const gripDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    const frame = frameRef.current;
+    if (!frame) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragged.current = false;
+    dragFrom.current = {
+      y: e.clientY,
+      h: frame.getBoundingClientRect().height,
+    };
+  };
+
+  const gripMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const from = dragFrom.current;
+    if (!from) return;
+    e.stopPropagation();
+    const dy = e.clientY - from.y;
+    if (Math.abs(dy) > 3) dragged.current = true;
+    setCap(Math.max(120, Math.round(from.h + dy)));
+  };
+
+  const gripUp = () => {
+    if (!dragFrom.current) return;
+    dragFrom.current = null;
+    const h = frameRef.current?.getBoundingClientRect().height;
+    if (h) mermaidHeightCache.set(source, Math.round(h));
+  };
 
   if (err)
     return (
@@ -249,13 +524,53 @@ function MermaidView({ source, alt }: { source: string; alt: string }) {
     <div
       className="mermaid-view"
       title="点开看大图"
-      onClick={() => zoomIn("", alt, svg)}
-      dangerouslySetInnerHTML={{ __html: svg }}
-    />
+      onClick={() => {
+        // 刚拖完把手的那一下不算「点图」
+        if (dragged.current) {
+          dragged.current = false;
+          return;
+        }
+        zoomIn("", alt, svg);
+      }}
+    >
+      <div
+        className="mermaid-frame"
+        ref={frameRef}
+        style={cap != null ? { maxHeight: `${cap}px` } : undefined}
+        dangerouslySetInnerHTML={{ __html: svg }}
+      />
+      {tall && (
+        <div
+          className="mermaid-grip"
+          title="拖动调高"
+          onPointerDown={gripDown}
+          onPointerMove={gripMove}
+          onPointerUp={gripUp}
+          onPointerCancel={gripUp}
+          onClick={(e) => e.stopPropagation()}
+        />
+      )}
+    </div>
   );
 }
 
-/** 云盘里的 .mmd：先取回源码再渲 —— 图是记忆和 send_image 的凭据，源码必须落在桶里 */
+/**
+ * 云盘里的 .mmd：先取回源码再渲 —— 图是记忆和 send_image 的凭据，源码必须落在桶里。
+ * 同一份源码只取一遍：工具卡和正文各摆一份时，后到的那个等前一个的回包。
+ */
+function loadMmdSource(src: string): Promise<string> {
+  const hit = mmdSourceCache.get(src);
+  if (hit) return hit;
+  const job = fetch(src).then((r) => {
+    console.warn("[看图] .mmd 取源码回来", { 状态码: r.status, ok: r.ok });
+    return r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`));
+  });
+  // 失败的不留在缓存里，下次还有重试的机会
+  job.catch(() => mmdSourceCache.delete(src));
+  mmdSourceCache.set(src, job);
+  return job;
+}
+
 function MermaidFile({ src, alt }: { src: string; alt: string }) {
   const [source, setSource] = useState("");
   const [err, setErr] = useState("");
@@ -263,11 +578,7 @@ function MermaidFile({ src, alt }: { src: string; alt: string }) {
     let alive = true;
     setSource("");
     setErr("");
-    fetch(src)
-      .then((r) => {
-        console.warn("[看图] .mmd 取源码回来", { 状态码: r.status, ok: r.ok });
-        return r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`));
-      })
+    loadMmdSource(src)
       .then((t) => {
         if (alive) setSource(t);
       })
@@ -320,9 +631,11 @@ function Drawn({ output }: { output: unknown }) {
   // .mmd 是 mermaid 源码，得取回来渲染；.svg（旧图）和位图照旧当 <img>
   if (/\.mmd($|\?)/.test(src))
     return <MermaidFile src={src} alt="画出来的图" />;
+  // 存量的 .svg 是深色主题之前、白底黑线那套渲的，夜墨纸上得翻个面（见 .pic-svg）
+  const svgFile = /\.svg($|\?)/i.test(src);
   return (
     <img
-      className="tool-img"
+      className={`tool-img${svgFile ? " pic-svg" : ""}`}
       src={src}
       alt="画出来的图"
       title="点开看大图"
@@ -424,6 +737,7 @@ const Markdown = memo(function Markdown({ text }: { text: string }) {
             return (
               <img
                 {...rest}
+                className={/\.svg($|\?)/i.test(src) ? "pic-svg" : undefined}
                 alt={alt}
                 loading="lazy"
                 title="点开看大图"
@@ -975,7 +1289,8 @@ function Comments({
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") void post();
+              // isComposing 守卫：输入法确认候选词的那下回车不算提交
+              if (e.key === "Enter" && !e.nativeEvent.isComposing) void post();
             }}
             placeholder="补充一句…"
             autoComplete="off"
@@ -1002,10 +1317,12 @@ const Message = memo(function Message({
   m,
   streaming,
   thoughts,
+  turnError,
   feedback,
   speaking,
   retry,
   showThinking,
+  showDetail,
   onSpeak,
   onRetry,
   onVote,
@@ -1016,11 +1333,15 @@ const Message = memo(function Message({
   streaming?: boolean;
   /** 这一轮他在想什么（只喂给最后一条助手消息，见 Messages） */
   thoughts?: string[];
+  /** 这一轮这个回答的死因（后端按 messageId 挂上来的）；没有就是正常跑完 */
+  turnError?: TurnError;
   feedback: FeedbackSummary;
   speaking?: boolean;
   retry?: boolean;
   /** 访客不渲染思考过程 —— 思考里可能复述任何上下文，属于纵深防御 */
   showThinking: boolean;
+  /** 访客不渲染原始报文；只有管理员能展开看死因细节 */
+  showDetail: boolean;
   onSpeak?: (id: string, text: string) => void;
   onRetry?: (id: string) => void;
   onVote: (id: string, value: 1 | -1) => void;
@@ -1049,9 +1370,9 @@ const Message = memo(function Message({
       data-streaming={streaming ? "1" : "0"}
     >
       <div className="msg-main">
-        {/* ericher 的名字是一枚小号衬线标签；我的发言靠靠右这一下就认得出，不必再报名 */}
-        {!mine && <div className="msg-label">ericher</div>}
-        <div className="msg-body">
+        {/* 他说话前自报的小签：名字和头像都随主题换 */}
+        {!mine && <AgentLabel />}
+        <div className="msg-body theme-msg">
           {m.parts.map((p, i) => (
             <Part
               key={i}
@@ -1065,6 +1386,9 @@ const Message = memo(function Message({
           {thoughts?.length ? (
             <Thoughts lines={thoughts} now={!!streaming && !shown} />
           ) : null}
+          {turnError && (
+            <TurnErrorCard err={turnError} showDetail={showDetail} />
+          )}
           {streaming && <span className="live-spin" />}
         </div>
         {!streaming && (
@@ -1094,8 +1418,10 @@ export function Messages({
   streaming,
   role,
   thoughts,
+  turnErrors,
   speakingId,
   room,
+  showDetail,
   onSpeak,
   onRetry,
   onFlash,
@@ -1105,9 +1431,13 @@ export function Messages({
   role: Role;
   /** 这一轮他在想什么（服务端隔几秒翻一句过来）。只在生成期间有 */
   thoughts: string[];
+  /** 异常中断的死因账（后端写进 state）；按 messageId 挂到对应回答下面 */
+  turnErrors?: TurnError[];
   speakingId?: string;
   /** 当前连着的屋。反馈（赞/踩/标重/评论）都得跟着它走 —— 消息住在场屋里 */
   room?: string;
+  /** 管理员才看得到原始报文；来客只看人话 */
+  showDetail: boolean;
   onSpeak?: (id: string, text: string) => void;
   onRetry?: (id: string) => void;
   onFlash: (text: string) => void;
@@ -1117,7 +1447,29 @@ export function Messages({
     comments: {},
     flags: [],
   });
+  /** 主题给他起的名字 —— 空态招呼语也跟着叫 */
+  const { theme } = useTheme();
   const [openId, setOpenId] = useState<string | null>(null);
+  /** 异常收件箱开不开 —— 落不到具体消息上的死因都汇总在这里 */
+  const [errOpen, setErrOpen] = useState(false);
+  /**
+   * 认到的死因去向，按「哪一场 + 何时断 + 怎么断」记。
+   * 流被掐断时，界面上那条助手消息还挂着客户端的临时 id，和落库的 id 对不上，
+   * 死因当场认不到人 —— 所以要退一步认给当时队尾那条助手消息；认过就钉住，
+   * 别让后面新来的消息把它带跑（认一次 = 那一刻断在哪条上）。换了屋整段作废。
+   */
+  const claimed = useRef(new Map<string, string>());
+  /**
+   * 降级的死因：认过的目标消息后来消失了（重取后那条残段压根没落库），
+   * 就进收件箱 —— 钉死，绝不改口认给别的消息。以前这里会「松手重认」，
+   * 每次重取都认给新的队尾，报错卡就一路往下漂，新消息全跑它上面去了。
+   */
+  const demoted = useRef(new Set<string>());
+  useEffect(() => {
+    claimed.current.clear();
+    demoted.current.clear();
+    setErrOpen(false);
+  }, [room]);
 
   const reload = useCallback(() => {
     api
@@ -1162,7 +1514,7 @@ export function Messages({
     return (
       <div className="empty">
         {/* ericher 没有立绘和封面图，空态只留文字 */}
-        <p>和 ericher 说点什么吧…</p>
+        <p>和 {agentDisplay(theme).name} 说点什么吧…</p>
         <p className="meta">输入 /help 看他现在能做什么</p>
       </div>
     );
@@ -1182,6 +1534,59 @@ export function Messages({
   // 思考过程只给管理员看。访客的界面里整个跳过这个 part：
   // 思考里可能复述任何上下文，不渲染是最稳的一层 —— 就算哪天读路径松了，屏幕上也先不露。
   const showThinking = role === "admin";
+  /**
+   * 死因分两路：挂得上的，钉在对应回答下面；挂不上或认过又丢了的，进收件箱。
+   * 绝不重认 —— 报错卡要么钉死在断的那条下面，要么老实待在收件箱，永不漂移。
+   */
+  const liveIds = new Set(messages.map((m) => m.id));
+  const errByMsg = new Map<string, TurnError>();
+  const inboxErrors: TurnError[] = [];
+  const takenIds = new Set<string>();
+  // 从新到旧认：最新的死因配最新的回答，往前的依次往前配，次序才对得上
+  for (const e of [...(turnErrors ?? [])].reverse()) {
+    const key = `${e.sessionId ?? ""}|${e.at}|${e.reason}`;
+    if (e.messageId && liveIds.has(e.messageId)) {
+      if (!errByMsg.has(e.messageId)) errByMsg.set(e.messageId, e);
+      takenIds.add(e.messageId);
+      continue;
+    }
+    if (!e.messageId || demoted.current.has(key)) {
+      inboxErrors.push(e);
+      continue;
+    }
+    let target = claimed.current.get(key) ?? "";
+    // 认过的去向已经不在场上了（重取后那条残段没落库）：降级进收件箱，钉死
+    if (target && !liveIds.has(target)) {
+      claimed.current.delete(key);
+      demoted.current.add(key);
+      inboxErrors.push(e);
+      continue;
+    }
+    if (!target) {
+      // 认领有年龄门槛：只认新伤。老死因的残段多半早就不在场上，刷新后硬认
+      // 只会认给最新的回复 —— 几小时前断的一轮，死因卡凭空钉在最新回答下面，
+      // 看着就是张孤儿卡。老伤一律进收件箱，胶囊里翻得到。
+      if (Date.now() - e.at > CLAIM_MAX_AGE) {
+        demoted.current.add(key);
+        inboxErrors.push(e);
+        continue;
+      }
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m.role !== "assistant" || takenIds.has(m.id)) continue;
+        target = m.id;
+        claimed.current.set(key, target);
+        break;
+      }
+    }
+    if (target && liveIds.has(target)) {
+      errByMsg.set(target, e);
+      takenIds.add(target);
+    } else {
+      inboxErrors.push(e);
+    }
+  }
+  inboxErrors.reverse(); // 收件箱新的在上
   return (
     <>
       <div className="msg-list">
@@ -1191,10 +1596,12 @@ export function Messages({
             m={m}
             streaming={streaming && onAssistant && i === last}
             thoughts={i === lastAssistant ? thoughts : undefined}
+            turnError={m.role === "assistant" ? errByMsg.get(m.id) : undefined}
             feedback={feedback}
             speaking={speakingId === m.id}
             retry={i === lastAssistant}
             showThinking={showThinking}
+            showDetail={showDetail}
             onSpeak={onSpeak}
             onRetry={onRetry}
             onVote={onVote}
@@ -1208,8 +1615,8 @@ export function Messages({
           // 等真正的消息一到，位置和字号一点都不会跳。
           <div className="msg assistant">
             <div className="msg-main">
-              <div className="msg-label">ericher</div>
-              <div className="msg-body">
+              <AgentLabel />
+              <div className="msg-body theme-msg">
                 {thoughts.length ? (
                   <Thoughts lines={thoughts} now />
                 ) : (
@@ -1220,6 +1627,50 @@ export function Messages({
                 )}
               </div>
             </div>
+          </div>
+        )}
+        {/* 异常收件箱：落不到具体消息上的死因（话没吐出来就断的、认过的消息
+            没落库的）全汇总在这里 —— 胶囊钉在列表底，点开向上翻，按时间倒序。
+            以前这些卡摆在队尾，新消息一来就被顶到上面，看着像报错在「漂」 */}
+        {!!inboxErrors.length && (
+          <div className="err-inbox">
+            {errOpen && (
+              <div className="err-inbox-panel">
+                <div className="err-inbox-cap">
+                  这一场的异常，新的在上
+                  <button
+                    className="err-inbox-close"
+                    onClick={() => setErrOpen(false)}
+                    aria-label="收起"
+                  >
+                    <Icon name="x" size={12} />
+                  </button>
+                </div>
+                {inboxErrors.map((e) => (
+                  <div
+                    className="err-inbox-item"
+                    key={`turn-err-${e.at}-${e.reason}`}
+                  >
+                    <span className="err-inbox-time">
+                      {new Date(e.at).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                    <TurnErrorCard err={e} showDetail={showDetail} />
+                  </div>
+                ))}
+              </div>
+            )}
+            <button
+              className="err-inbox-chip"
+              onClick={() => setErrOpen((v) => !v)}
+              title="落不到具体消息上的异常中断，点开看"
+            >
+              <Icon name="alert-circle" size={13} />
+              异常 {inboxErrors.length}
+              <Icon name={errOpen ? "chevron-down" : "chevron-up"} size={12} />
+            </button>
           </div>
         )}
       </div>

@@ -12,6 +12,30 @@ import type { SqlTag } from "./state";
 
 export type SessionVisibility = "private" | "public";
 
+/**
+ * 本场步骤的一条。
+ *
+ * 和全局待办（state.ts 的 Task）字段一模一样，不是重复造轮子 —— 是它们
+ * 本来就说的是同一件事，只是作用域不同：那个跨会话，这个只属于这一场。
+ * 分成两个类型是为了让「这场」和「所有场」在类型上就不混。
+ */
+export interface SessionTask {
+  title: string;
+  desc: string;
+  status: "todo" | "doing" | "done";
+  created: string;
+}
+
+/** 本场步骤的条数上限：比全局待办的 50 小 —— 这是「这一场」的步骤，不是待办仓库 */
+export const SESSION_TASK_CAP = 20;
+
+/**
+ * 本场目标的长短上限。目标是要进提示词的一段文段，不能由着它长 ——
+ * 和摘要（context.ts 的 DIGEST_MAX）是同一个道理。
+ * 截断放在写入这一层做：无论谁写进来的（我、他、以后的别的路）都躲不掉。
+ */
+export const SESSION_GOAL_MAX = 600;
+
 /** 会话列表里一条。msgCount 由子查询算出来，前端要拿它判断「这场有没有内容」 */
 export interface SessionMeta {
   id: string;
@@ -92,6 +116,7 @@ export function ensureSessionSchema(db: SqlTag): void {
     pinned text not null default '',
     digest text not null default '',
     digest_upto text not null default '',
+    goal text not null default '',
     archived integer not null default 0,
     named integer not null default 0,
     unread integer not null default 0,
@@ -105,6 +130,19 @@ export function ensureSessionSchema(db: SqlTag): void {
     message text not null,
     primary key (session_id, seq)
   )`;
+  // 本场步骤：这一场要做的那几件事。键是 session_id —— 一间屋能装好几场
+  // （见文件顶上的分片说明），只按屋子存会在多场共用的屋里串台。
+  // 为什么不塞进 sessions 行的 JSON 列：条目要能单独排序、单独改状态，
+  // 一条一行比每次整段读改写省事，也和 session_messages 是同一个形状。
+  db`create table if not exists session_tasks (
+    session_id text not null,
+    seq integer not null,
+    title text not null,
+    desc text not null default '',
+    status text not null default 'todo',
+    created text not null,
+    primary key (session_id, seq)
+  )`;
   // 老表补列：create table if not exists 不会给已存在的表加列
   try {
     db`alter table sessions add column digest text not null default ''`;
@@ -113,6 +151,11 @@ export function ensureSessionSchema(db: SqlTag): void {
   }
   try {
     db`alter table sessions add column digest_upto text not null default ''`;
+  } catch {
+    // 列已存在
+  }
+  try {
+    db`alter table sessions add column goal text not null default ''`;
   } catch {
     // 列已存在
   }
@@ -260,6 +303,63 @@ export function setSessionDigest(
   upto: string,
 ): void {
   db`update sessions set digest = ${digest}, digest_upto = ${upto} where id = ${id}`;
+}
+
+/**
+ * 这场要干什么 —— 一段话，面向前方。
+ *
+ * 和 digest 并排放在 sessions 行上，因为它们是同一层的两半：digest 回头看（这场聊过什么），
+ * goal 向前看（这场要做什么）。都按 id 定位、都不跨场，存储位置也就该一样。
+ *
+ * 空串 = 没设目标。「没设就等于是无目的」，不替它编一个 —— 目标一旦是编的，
+ * 它就只是又一段背景噪音，起不到把注意力钉住的作用。
+ */
+export function getSessionGoal(db: SqlTag, id: string): string {
+  const rows = db<{ goal: string }>`
+    select goal from sessions where id = ${id}`;
+  return rows.length ? rows[0].goal || "" : "";
+}
+
+export function setSessionGoal(db: SqlTag, id: string, goal: string): void {
+  const text = goal.trim().slice(0, SESSION_GOAL_MAX);
+  db`update sessions set goal = ${text} where id = ${id}`;
+}
+
+/** 这场排的步骤，按排定的先后。 */
+export function listSessionTasks(db: SqlTag, sessionId: string): SessionTask[] {
+  const rows = db<{
+    title: string;
+    desc: string;
+    status: string;
+    created: string;
+  }>`
+    select title, desc, status, created from session_tasks
+    where session_id = ${sessionId} order by seq asc`;
+  return rows.map((r) => ({
+    title: r.title,
+    desc: r.desc || "",
+    status: r.status === "doing" || r.status === "done" ? r.status : "todo",
+    created: r.created || "",
+  }));
+}
+
+/**
+ * 整表替换这一场的步骤。
+ *
+ * 为什么不是逐条增删：写入的两条路（我改 / 他手改）最后都落到「一份新的完整清单」上，
+ * 拆成 add/update/delete 三套语义反而要在两处各维护一遍顺序与索引。
+ * 单行有大小上限，但步骤封顶 20 条，一次重写的量是可控的。
+ */
+export function saveSessionTasks(
+  db: SqlTag,
+  sessionId: string,
+  tasks: SessionTask[],
+): void {
+  db`delete from session_tasks where session_id = ${sessionId}`;
+  tasks.slice(0, SESSION_TASK_CAP).forEach((t, i) => {
+    db`insert into session_tasks (session_id, seq, title, desc, status, created)
+       values (${sessionId}, ${i}, ${t.title}, ${t.desc || ""}, ${t.status}, ${t.created || ""})`;
+  });
 }
 
 /** 这场已回想到第几条、上次几时、排程句柄是谁。 */
@@ -536,12 +636,22 @@ function plainText(m: UIMessage): string {
 }
 
 /**
+ * LIKE 模式收口：把查询词里的 %、_ 和转义符自己都转成字面量。
+ * 不转的话这三个字符在 LIKE 里是通配符 —— 搜「100% 完成」会宽出一大片不相干的
+ * 命中，召回比字面意图宽；转完还得在 SQL 里 ESCAPE '\' 声明谁是转义符。
+ */
+function likePattern(q: string): string {
+  return "%" + q.replace(/[%_\\]/g, (c) => "\\" + c) + "%";
+}
+
+/**
  * 跨会话回忆检索：按关键词在全部会话消息里找，同时也按会话标题过滤。
  * 用 LIKE 全文扫，不走向量 —— 中文关键词（「上次那个方案」里的实词）不会误命中
  * 内嵌的 uuid / id，命中工具参数也算「她当时在做这件事」，结果够用。
  * 命中按会话活跃时间排序，返回纯文本片段给模型引用。
  */
 export function searchMessages(db: SqlTag, q: string, limit = 8): RecallHit[] {
+  const pat = likePattern(q);
   const rows = db<{
     session_id: string;
     message: string;
@@ -551,7 +661,7 @@ export function searchMessages(db: SqlTag, q: string, limit = 8): RecallHit[] {
     select m.session_id, m.message, s.title, s.last_active
     from session_messages m
     join sessions s on s.id = m.session_id
-    where m.message like ${"%" + q + "%"} or s.title like ${"%" + q + "%"}
+    where m.message like ${pat} escape '\\' or s.title like ${pat} escape '\\'
     order by s.last_active desc
     limit ${limit}`;
   const out: RecallHit[] = [];
@@ -629,6 +739,7 @@ export function searchRecallIndex(
   limit = 8,
 ): RecallHit[] {
   ensureRecallIndex(db);
+  const pat = likePattern(q);
   const rows = db<{
     session_id: string;
     text: string;
@@ -639,7 +750,7 @@ export function searchRecallIndex(
     select i.session_id, i.text, i.role, s.title, s.last_active
     from recall_index i
     join sessions s on s.id = i.session_id
-    where i.text like ${"%" + q + "%"} or s.title like ${"%" + q + "%"}
+    where i.text like ${pat} escape '\\' or s.title like ${pat} escape '\\'
     order by s.last_active desc
     limit ${limit}`;
   return rows.map((r) => ({

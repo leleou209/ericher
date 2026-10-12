@@ -10,6 +10,8 @@ import {
   scopedKey,
   SESSION_FOLDER,
   sessionKey,
+  THEME_PACK_FOLDER,
+  themePackKey,
 } from "../src/fileAccess";
 
 describe("房间文件划界", () => {
@@ -134,6 +136,42 @@ describe("sessionKey 会话归档", () => {
     expect(sessionKey("default", "", "draw", "png")).toMatch(
       /^f\/default\/draw-\d{13}-[0-9a-f]{8}\.png$/,
     );
+  });
+});
+
+describe("themePackKey 美化包归档", () => {
+  it("落进公开空间的 betpag 文件夹，名字洗净、尾缀恒为 .zip", () => {
+    expect(themePackKey("青瓷主题.zip")).toMatch(
+      new RegExp(
+        `^f\\/public\\/${THEME_PACK_FOLDER}\\/青瓷主题-\\d{13}-[0-9a-f]{8}\\.zip$`,
+      ),
+    );
+    // 路径分隔符和非法字符都换掉，不给归档 key 长出脚来的机会
+    expect(themePackKey('a/b\\c:x.zip')).toMatch(
+      new RegExp(
+        `^f\\/public\\/${THEME_PACK_FOLDER}\\/a_b_c_x-\\d{13}-[0-9a-f]{8}\\.zip$`,
+      ),
+    );
+  });
+
+  it("归档的包人人读得：皮肤全局可见，包也一样", () => {
+    const k = themePackKey("ericher-theme.zip");
+    expect(canReadFile(k, "admin", "default")).toBe(true);
+    expect(canReadFile(k, "user", "guest-ab12")).toBe(true);
+    expect(k.startsWith(`f/public/${THEME_PACK_FOLDER}/`)).toBe(true);
+  });
+
+  it("没名字就叫 ericher-theme，同名传两次是两份、都留着", () => {
+    const a = themePackKey("");
+    const b = themePackKey("ericher-theme.zip");
+    for (const k of [a, b])
+      expect(k).toMatch(
+        new RegExp(
+          `^f\\/public\\/${THEME_PACK_FOLDER}\\/ericher-theme-\\d{13}-[0-9a-f]{8}\\.zip$`,
+        ),
+      );
+    // 随机段兜底：同一毫秒连传两份也不会互相覆盖
+    expect(a).not.toBe(b);
   });
 });
 

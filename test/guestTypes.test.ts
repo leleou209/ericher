@@ -87,6 +87,9 @@ function fakeDb() {
         number,
         string,
       ];
+      // 真库里 id 是主键、内置档那条语句带 ON CONFLICT DO NOTHING：
+      // 同一个 id 再插一次什么都不做（种入是幂等的）
+      if (rows.some((r) => r.id === id)) return [] as T[];
       rows.push({
         id,
         name,
@@ -184,7 +187,11 @@ describe("guest_types 增删改查", () => {
     expect(t.permMemory).toBe(true);
     expect(t.active).toBe(true);
     expect(t.created).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    expect(listGuestTypes(db).map((x) => x.name)).toEqual(["合作方"]);
+    // 名册第一行恒是内置通用档（见下面那组用例），自定义档排在它后面
+    expect(listGuestTypes(db).map((x) => x.name)).toEqual([
+      "通用来客",
+      "合作方",
+    ]);
   });
 
   it("perm 明确关掉就是关掉，没提的仍全开", async () => {
@@ -226,8 +233,10 @@ describe("guest_types 增删改查", () => {
       ...ENV_PW,
     });
     // 模拟逐工具化之前的存量行：没有 tools，只有老开关
-    rows[0].tools = "";
-    rows[0].perm_search = 0;
+    // （按 id 找这一行 —— rows[0] 是内置通用档）
+    const legacyRow = rows.find((r) => r.id === t.id)!;
+    legacyRow.tools = "";
+    legacyRow.perm_search = 0;
     const back = listGuestTypes(db).find((x) => x.id === t.id)!;
     expect(back.tools).not.toContain("search");
     expect(back.tools).toContain("draw");
@@ -269,7 +278,81 @@ describe("guest_types 增删改查", () => {
       ...ENV_PW,
     });
     expect(removeGuestType(db, t.id)).toBe(true);
-    expect(listGuestTypes(db)).toHaveLength(0);
+    expect(listGuestTypes(db).map((x) => x.id)).toEqual(["common"]);
+  });
+});
+
+/**
+ * 内置通用档：拿前台门禁口令进来的人都归这一档。
+ *
+ * 它从前钉死在代码里、权限恒全开，管理面板上看不见。现在它是名册里真实的
+ * 一行：能按件关工具、能写接待说明，但口令取自 env（表里那格留空）、
+ * 不能停用也不能删 —— 它是门口最后一把钥匙。
+ */
+describe("内置通用档", () => {
+  it("随建表种入：id=common、缺省全开、排在最前、种几次都只一行", () => {
+    const { db, rows } = fakeDb();
+    // 反复读名册（每次都过一遍 ensureGuestTypesSchema）不该重复种
+    listGuestTypes(db);
+    listGuestTypes(db);
+    expect(rows.filter((r) => r.id === "common")).toHaveLength(1);
+
+    const common = getGuestType(db, "common")!;
+    expect(common.name).toBe("通用来客");
+    expect(common.active).toBe(true);
+    expect(common.tools).toEqual([...GUEST_TOGGLABLE_TOOLS]);
+    expect(common.permNotes).toBe(true);
+    expect(common.permFiles).toBe(true);
+    expect(common.permPublic).toBe(true);
+    // 表里那格口令是空的：进门验的是 env 里的前台口令，不走这张表
+    expect(common.password).toBe("");
+    // 名册第一行（created 钉在最早）
+    expect(listGuestTypes(db)[0].id).toBe("common");
+  });
+
+  it("能改工具与说明 —— 收紧自定义之外，通用档也能收", async () => {
+    const { db } = fakeDb();
+    const up = await updateGuestType(db, "common", {
+      note: "只做接待，不外发",
+      tools: ["memory"],
+      permPublic: false,
+      ...ENV_PW,
+    });
+    expect(up?.note).toBe("只做接待，不外发");
+    expect(up?.tools).toEqual(["memory"]);
+    expect(up?.permPublic).toBe(false);
+    expect(up?.name).toBe("通用来客");
+    // 改完再读一遍：改动没被下一次建表冲掉
+    expect(getGuestType(db, "common")!.tools).toEqual(["memory"]);
+  });
+
+  it("口令改不得（它就是前台门禁口令）、停用不得、删除不得", async () => {
+    const { db } = fakeDb();
+    await expect(
+      updateGuestType(db, "common", { password: "x1", ...ENV_PW }),
+    ).rejects.toThrow(/前台门禁口令/);
+    await expect(
+      updateGuestType(db, "common", { active: false, ...ENV_PW }),
+    ).rejects.toThrow(/不能停用/);
+    expect(() => removeGuestType(db, "common")).toThrow(/删不得/);
+    // 上面几次都没能把这一档弄没
+    expect(getGuestType(db, "common")).not.toBeNull();
+  });
+
+  it("门口验密码不会命中它：空口令那格永远撞不上谁", async () => {
+    const { db } = fakeDb();
+    for (const pw of ["common", "通用来客", " ", ""]) {
+      expect(
+        await findGuestTypeByPassword(db, pw, ENV_PW.adminPw, ENV_PW.gatePw),
+      ).toBeNull();
+    }
+    // 也不占用查重名额：自定义档照常能建
+    const t = await createGuestType(db, {
+      name: "合作方",
+      password: "hz",
+      ...ENV_PW,
+    });
+    expect(t.name).toBe("合作方");
   });
 });
 
@@ -287,8 +370,41 @@ describe("停用的档：新登录不开门，按 id 查也当查无此档", () 
     // 停用后按 id 查就是查无此档：30 天的旧票、名下的旧卡都拿不到这一档的权益，
     // 「收回」不再只剩删档一条路
     expect(getGuestType(db, t.id)).toBeNull();
-    // 面板看名册不受影响：停用的档还在列表里
-    expect(listGuestTypes(db)).toHaveLength(1);
+    // 面板看名册不受影响：停用的档还在列表里（列表也含内置通用档）
+    expect(listGuestTypes(db).map((x) => x.name)).toEqual([
+      "通用来客",
+      "停用档",
+    ]);
+  });
+
+  it("停用的档能改名并重新启用：改档查档不过滤 active，停用不是单行道", async () => {
+    const { db } = fakeDb();
+    const t = await createGuestType(db, {
+      name: "待重生",
+      password: "p1",
+      ...ENV_PW,
+    });
+    await updateGuestType(db, t.id, { active: false, ...ENV_PW });
+    // 权益核实对停用档返回 null（上面验过），但改档路径必须还认得它 ——
+    // 要不然停用的档在面板上看得见、删得掉，唯独改不动也启用不回来
+    const up = await updateGuestType(db, t.id, {
+      name: "复名",
+      note: "回来接待",
+      active: true,
+      ...ENV_PW,
+    });
+    expect(up?.name).toBe("复名");
+    expect(up?.note).toBe("回来接待");
+    expect(up?.active).toBe(true);
+    // 转正后权益核实查得回来，门口验密码也重新放行
+    expect(getGuestType(db, t.id)?.name).toBe("复名");
+    const hit = await findGuestTypeByPassword(
+      db,
+      "p1",
+      ENV_PW.adminPw,
+      ENV_PW.gatePw,
+    );
+    expect(hit?.id).toBe(t.id);
   });
 });
 
@@ -438,9 +554,14 @@ describe("门口验密码", () => {
 describe("摘要存储与两代兼容", () => {
   it("建档后库里是摘要不是明文，门口用原口令照样进", async () => {
     const { db, rows } = fakeDb();
-    await createGuestType(db, { name: "a", password: "秘密口令", ...ENV_PW });
-    expect(rows[0].password).toMatch(/^[0-9a-f]{64}$/);
-    expect(rows[0].password).not.toContain("秘密口令");
+    const t = await createGuestType(db, {
+      name: "a",
+      password: "秘密口令",
+      ...ENV_PW,
+    });
+    const row = rows.find((r) => r.id === t.id)!;
+    expect(row.password).toMatch(/^[0-9a-f]{64}$/);
+    expect(row.password).not.toContain("秘密口令");
     const hit = await findGuestTypeByPassword(
       db,
       "秘密口令",
@@ -452,8 +573,12 @@ describe("摘要存储与两代兼容", () => {
 
   it("老条目还是明文：门口照样验得过", async () => {
     const { db, rows } = fakeDb();
-    await createGuestType(db, { name: "老档", password: "old-pw", ...ENV_PW });
-    rows[0].password = "old-pw"; // 模拟摘要化之前的存量条目
+    const t = await createGuestType(db, {
+      name: "老档",
+      password: "old-pw",
+      ...ENV_PW,
+    });
+    rows.find((r) => r.id === t.id)!.password = "old-pw"; // 模拟摘要化之前的存量条目
     const hit = await findGuestTypeByPassword(
       db,
       "old-pw",
@@ -470,7 +595,7 @@ describe("摘要存储与两代兼容", () => {
       password: "old-pw",
       ...ENV_PW,
     });
-    rows[0].password = "old-pw";
+    rows.find((r) => r.id === t.id)!.password = "old-pw";
     const up = await updateGuestType(db, t.id, {
       password: "old-pw",
       ...ENV_PW,

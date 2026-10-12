@@ -1,5 +1,7 @@
 import {
   Component,
+  lazy,
+  Suspense,
   useEffect,
   useMemo,
   useRef,
@@ -13,7 +15,9 @@ import type {
   ThemeKey,
   UserCard,
 } from "../lib/types";
+import { agentDisplay, useTheme } from "../lib/theme";
 import { Icon, type IconName } from "./Icons";
+import { AppearancePanel, type AppearancePage } from "./ThemePanel";
 import {
   ContactPanel,
   FilePanel,
@@ -47,6 +51,13 @@ import type {
   Voice,
 } from "../lib/types";
 import "./Pages.css";
+
+// 网页矩阵是挂在主体之外的一批自建网页：设置页只放一张状态卡（版本、规模、进工作台的门）。
+// 完整管理界面在独立整页工作台（/assistant/workbench），页面预览与图谱要占满整页，
+// 塞在设置抽屉里铺不开。两块都动态 import，不进主包首屏。
+const MatrixStatus = lazy(() =>
+  import("./MatrixStatus").then((m) => ({ default: m.MatrixStatus })),
+);
 
 type Patch = (patch: Partial<ChatState>) => Promise<void>;
 
@@ -403,6 +414,9 @@ export function ChatSidebar({
   const list = sessions.filter((s) => !s.archived && !s.pinned);
   const archived = sessions.filter((s) => s.archived);
   const [showArchived, setShowArchived] = useState(false);
+  // 签名块上那行名字随主题叫（本文件另有纸色的 theme，换个叫法拿主题域的）
+  const { theme: themeConfig } = useTheme();
+  const persona = agentDisplay(themeConfig);
 
   /**
    * 「他另开了一场」的两种样子：先闪几秒把人叫过来，之后退成一个小点，
@@ -432,25 +446,47 @@ export function ChatSidebar({
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<RecallHit[] | null>(null);
   const [searching, setSearching] = useState(false);
+  // 搜失败和「没找到」是两回事：网络/服务端出错时如实说、让人能重试，
+  // 别把报错渲染成「没找到」—— 那是在让人以为历史里根本没有这段
+  const [searchErr, setSearchErr] = useState(false);
+  // 搜索的请求定序：连打几个字就是几次搜索，只认最后一次的响应，
+  // 免得先发的慢请求回来把后发的快请求刚写好的结果覆盖掉
+  const recallSeq = useRef(0);
+  // 失败不自动重试；点「再试一次」把同一个词重搜一遍
+  const [retryN, setRetryN] = useState(0);
 
   useEffect(() => {
     const keyword = q.trim();
     if (!isAdmin || !keyword) {
       setHits(null);
       setSearching(false);
+      setSearchErr(false);
       return;
     }
     setSearching(true);
+    setSearchErr(false);
     // 打字停下来再发请求，不然每敲一个字都打一次后端
     const t = setTimeout(() => {
+      const seq = ++recallSeq.current;
       api
         .recall(keyword)
-        .then(setHits)
-        .catch(() => setHits([]))
-        .finally(() => setSearching(false));
+        .then((rows) => {
+          if (seq !== recallSeq.current) return; // 过期响应：丢弃，别 set
+          setHits(rows);
+          setSearchErr(false);
+        })
+        .catch(() => {
+          if (seq !== recallSeq.current) return;
+          setHits(null);
+          setSearchErr(true);
+        })
+        .finally(() => {
+          // 只有最新那次才负责收旗，旧响应回来不能把新请求的「翻找中」熄掉
+          if (seq === recallSeq.current) setSearching(false);
+        });
     }, 280);
     return () => clearTimeout(t);
-  }, [q, isAdmin]);
+  }, [q, isAdmin, retryN]);
 
   /**
    * 一行会话。置顶区与主列表用的是同一行渲染 —— 两处的行必须长得一模一样，
@@ -546,7 +582,7 @@ export function ChatSidebar({
         {/* 签名块：纯黑底上一行白色衬线名字。整套皮的识别记号就这一块。
             在线状态也住在这里 —— 底下那张 ericher 卡撤掉后，这是唯一的「他在不在」 */}
         <div className="brand-block">
-          <h1 className="brand-name">ericher</h1>
+          <h1 className="brand-name">{persona.name}</h1>
           <span className="brand-sub">接待台</span>
           <span className="brand-status" data-off={online ? "false" : "true"}>
             <span className="status-dot" />
@@ -606,6 +642,14 @@ export function ChatSidebar({
         {q.trim() ? (
           <nav className="chat-history">
             {searching && <p className="empty-sm">翻找中…</p>}
+            {!searching && searchErr && (
+              <p className="empty-sm">
+                翻旧账没翻成 —— 搜索这会儿不通，稍后再来，或{" "}
+                <button className="link" onClick={() => setRetryN((n) => n + 1)}>
+                  再试一次
+                </button>
+              </p>
+            )}
             {!searching && hits?.length === 0 && (
               <p className="empty-sm">没找到和「{q.trim()}」有关的旧对话</p>
             )}
@@ -738,6 +782,8 @@ export function ChatSidebar({
 
 const GROUPS: Array<{
   title: string;
+  /** 整组是外挂 / 试验性功能：标题旁挂一枚小标，和常规设置分开 */
+  beta?: boolean;
   items: Array<{
     key: SettingsKey;
     label: string;
@@ -813,7 +859,23 @@ const GROUPS: Array<{
   },
   {
     title: "外观",
-    items: [{ key: "appearance", label: "主题与动效", icon: "play" }],
+    // 外观摊成四页：一页塞不下主题、壁纸、形象、弹页、动效、消息栏这一整套
+    items: [
+      { key: "appearance-theme", label: "主题", icon: "play" },
+      { key: "appearance-color", label: "壁纸与配色", icon: "image" },
+      { key: "appearance-face", label: "形象与弹页", icon: "user" },
+      { key: "appearance-motion", label: "动效与消息", icon: "refresh" },
+    ],
+  },
+  {
+    // 扩展功能自成一栏：它们不是接待台的常设部件，
+    // 混在常规设置里会让人觉得「天天都在用」—— 所以拎出来、并标 beta
+    title: "扩展功能",
+    beta: true,
+    items: [
+      // 网页矩阵：矩阵页挂在主域名下，管理面在独立整页工作台
+      { key: "matrix", label: "网页矩阵", icon: "link", admin: true },
+    ],
   },
 ];
 
@@ -849,6 +911,10 @@ const SECTION_META: Record<SettingsKey, { title: string; desc: string }> = {
   guestPerms: {
     title: "来客权限管理",
     desc: "各档 × 各工具：逐件勾这一档能用什么，恒开的单独标出来",
+  },
+  matrix: {
+    title: "网页矩阵",
+    desc: "主域名下的一批自建网页：层级路径、按树导航、四档身份",
   },
   modelConfigs: {
     title: "模型配置",
@@ -889,7 +955,22 @@ const SECTION_META: Record<SettingsKey, { title: string; desc: string }> = {
   },
   self: { title: "自我认知", desc: "ericher 对自己的理解，以及更新日志" },
   voice: { title: "朗读嗓音", desc: "ericher 念给你听时用的是哪副嗓子" },
-  appearance: { title: "主题与动效", desc: "界面配色与动效" },
+  "appearance-theme": {
+    title: "主题",
+    desc: "四套内置纸色、自定义主题存档与主题包",
+  },
+  "appearance-color": {
+    title: "壁纸与配色",
+    desc: "基调色、六个落点的壁纸、功能块与按钮花纹、自定义 CSS",
+  },
+  "appearance-face": {
+    title: "形象与弹页",
+    desc: "ericher 的称呼与头像、界面图标覆盖、进站触发的弹页",
+  },
+  "appearance-motion": {
+    title: "动效与消息",
+    desc: "本机动效开关、主题级的动画档与消息栏风格",
+  },
 };
 
 /**
@@ -969,26 +1050,36 @@ function VersionCard() {
 
 /**
  * 模式指派：把模型目录里的条目分给「普通模式」和「深度思考」两个槽位。
- * 普通 = 载入中的那个条目（activate 语义）；深度 = state.deepConfigId，
+ * 普通 = 载入中的那个条目（activate 语义）；深度 = 主屋 state.deepConfigId，
  * 空着表示跟普通同一个。删掉的条目会自动从槽位上摘下来（后端兜底）。
+ *
+ * 深度槽位为什么自己管一份值、不读眼前的 state：这个槽位是「全屋一把」的 ——
+ * 模型目录只活在主屋的库里，聊天取深度目录也是去主屋取（fetchActiveCatalog
+ * 跨间调 owner.deepCatalog），patchConfig 落的还是主屋。而设置页眼前的 state
+ * 是当前这间场屋的，那份 deepConfigId 只是开场时从人屋抄的旧快照，写入的回推
+ * 永远到不了它 —— 拿它当下拉的值，选完立刻弹回去，看着就像「切换不了」。
+ * 所以读也走主屋（api.getConfig 落的就是主屋），选完就地改自己这份，不等回推。
  */
 function StyleAssign({
-  deepConfigId,
   patch,
 }: {
-  deepConfigId: string;
   patch: (p: { deepConfigId?: string }) => void;
 }) {
   const [catalog, setCatalog] = useState<{
     providers: ModelProvider[];
     entries: ModelEntry[];
   } | null>(null);
+  const [deep, setDeep] = useState("");
 
   useEffect(() => {
     void api
       .modelCatalog()
       .then((r) => setCatalog({ providers: r.providers, entries: r.entries }))
       .catch(() => setCatalog({ providers: [], entries: [] }));
+    void api
+      .getConfig()
+      .then((cfg) => setDeep(cfg.deepConfigId || ""))
+      .catch(() => undefined);
   }, []);
 
   if (catalog === null) return <p className="meta">模型目录读取中…</p>;
@@ -1032,9 +1123,13 @@ function StyleAssign({
         <span className="meta">深度思考用</span>
         <select
           className="field"
-          value={deepConfigId}
+          value={deep}
           disabled={!entries.length}
-          onChange={(e) => patch({ deepConfigId: e.target.value })}
+          onChange={(e) => {
+            // 就地改自己这份，别等状态回推 —— 回推的是场屋那份，永远等不到
+            setDeep(e.target.value);
+            patch({ deepConfigId: e.target.value });
+          }}
         >
           <option value="">跟普通模式同一套</option>
           {entries.map((e) => (
@@ -1208,6 +1303,10 @@ export function SettingsPage({
   /** 调思考强度。和别的设置分开走：这一格来客也有，不能经过管理员那道路由 */
   setThink: (mode: "normal" | "deep") => void;
 }) {
+  // 主题域的 ThemeConfig：和纸色的 props.theme（ThemeKey）撞名，换个叫法拿
+  const { theme: themeConfig } = useTheme();
+  // 他叫什么、长什么样 —— 侧栏那张卡和「关于」都随主题
+  const persona = agentDisplay(themeConfig);
   const groups = useMemo(
     () =>
       GROUPS.map((g) => ({
@@ -1227,6 +1326,8 @@ export function SettingsPage({
     [groups],
   );
   const meta = SECTION_META[section];
+  // 外观四页共用同一个外壳（草稿住在壳里），所以这四页走同一个渲染口
+  const isAppearance = section.startsWith("appearance");
 
   // 权限收窄（或分组变化）后，把停在隐藏分区上的选择拉回来
   useEffect(() => {
@@ -1250,7 +1351,10 @@ export function SettingsPage({
         <nav className="settings-nav">
           {groups.map((g) => (
             <div className="nav-group" key={g.title}>
-              <div className="nav-group-title">{g.title}</div>
+              <div className="nav-group-title">
+                {g.title}
+                {g.beta && <span className="nav-beta">beta</span>}
+              </div>
               {g.items.map((i) => (
                 <button
                   key={i.key}
@@ -1269,10 +1373,16 @@ export function SettingsPage({
         <div className="sidebar-footer">
           <div className="character-card">
             <div className="avatar-ring">
-              <div className="character-avatar">e</div>
+              <div className="character-avatar">
+                {persona.avatar ? (
+                  <img src={persona.avatar} alt="" />
+                ) : (
+                  persona.name.slice(0, 1)
+                )}
+              </div>
             </div>
             <div className="character-meta">
-              <span className="character-name">ericher</span>
+              <span className="character-name">{persona.name}</span>
               <span
                 className="character-status"
                 data-off={online ? "false" : "true"}
@@ -1350,7 +1460,7 @@ export function SettingsPage({
             {section === "about" && (
               <div className="settings-card">
                 <div className="card-header">
-                  <h3 className="card-title">ericher</h3>
+                  <h3 className="card-title">{persona.name}</h3>
                   <p className="card-desc">
                     接待台的助手：问清来意、办能办的事、办不了的如实转达
                   </p>
@@ -1457,12 +1567,7 @@ export function SettingsPage({
                     </div>
                   </label>
                 </div>
-                {isAdmin && (
-                  <StyleAssign
-                    deepConfigId={state.deepConfigId}
-                    patch={patch}
-                  />
-                )}
+                {isAdmin && <StyleAssign patch={patch} />}
               </div>
             )}
 
@@ -1540,6 +1645,14 @@ export function SettingsPage({
               </div>
             )}
 
+            {section === "matrix" && (
+              <div className="settings-card">
+                <Suspense fallback={<p className="dim">正在载入…</p>}>
+                  <MatrixStatus />
+                </Suspense>
+              </div>
+            )}
+
             {section === "modelConfigs" && (
               <div className="settings-card">
                 <ModelConfigsPanel />
@@ -1613,74 +1726,21 @@ export function SettingsPage({
               </div>
             )}
 
-            {section === "appearance" && (
-              <>
-                <div className="settings-card">
-                  <div className="card-header">
-                    <h3 className="card-title">外观主题</h3>
-                    <p className="card-desc">
-                      同一套版式换几种纸色；跟随系统按系统的明暗自动翻面
-                    </p>
-                  </div>
-                  <div className="theme-options">
-                    {(
-                      [
-                        { key: "paper", name: "白纸黑字", cls: "theme-paper" },
-                        { key: "dawn", name: "晨曦微蓝", cls: "theme-dawn" },
-                        { key: "dark", name: "夜墨", cls: "theme-dark" },
-                        {
-                          key: "system",
-                          name: "跟随系统",
-                          cls: "theme-system",
-                        },
-                      ] as { key: ThemeKey; name: string; cls: string }[]
-                    ).map((t) => (
-                      <label key={t.key} className="theme-option">
-                        <input
-                          type="radio"
-                          name="theme"
-                          checked={theme === t.key}
-                          onChange={() => setTheme(t.key)}
-                        />
-                        <div className={`theme-preview ${t.cls}`}>
-                          <span className="theme-ring" />
-                        </div>
-                        <span className="theme-name">{t.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="settings-card">
-                  <div className="card-header">
-                    <h3 className="card-title">动画效果</h3>
-                    <p className="card-desc">关掉之后界面动画与过渡都停下</p>
-                  </div>
-                  <div className="toggle-list">
-                    <div className="toggle-row">
-                      <div className="toggle-info">
-                        <div className="toggle-icon">
-                          <Icon name="play" size={17} />
-                        </div>
-                        <div className="toggle-text">
-                          <div className="toggle-title">动效</div>
-                          <div className="toggle-desc">
-                            背景微晕与界面的过渡动画
-                          </div>
-                        </div>
-                      </div>
-                      <label className="toggle-switch">
-                        <input
-                          type="checkbox"
-                          checked={motion}
-                          onChange={(e) => setMotion(e.target.checked)}
-                        />
-                        <span className="toggle-slider" />
-                      </label>
-                    </div>
-                  </div>
-                </div>
-              </>
+            {/* 外观摊成四个独立子页，共用同一个外壳 —— 位置固定、组件类型固定，
+                切子页只是换 page 这个 prop，外壳不卸载，没保存的草稿不会丢 */}
+            {isAppearance && (
+              // 外层壳是给这四页专用的「松一档」间距标记；和 AppearancePanel 同生共死，
+              // 换子页时它和里面的外壳都不卸载，草稿因此不会丢
+              <div className="tp-appear">
+                <AppearancePanel
+                  page={section as AppearancePage}
+                  isAdmin={isAdmin}
+                  paperKey={theme}
+                  setPaperKey={setTheme}
+                  motion={motion}
+                  setMotion={setMotion}
+                />
+              </div>
             )}
           </div>
         </div>

@@ -47,10 +47,22 @@ ADMIN_PASSWORD=换成你自己的管理员口令
 # 硅基流动 Z-Image-Turbo（高质量档）；不配则逐级降档到 Workers AI / 智谱
 # SILICONFLOW_API_KEY=sk-...
 
+# ── MiniMax（可选）──────────────────────────
+# 聊天（M 系列）/ 语音（t2a_v2）/ 绘图（image_generation）共用这一把；
+# M Plan 订阅 key（sk-cp- 开头）走 api.minimax.cn
+# MINIMAX_KEY=your-minimax-key
+
 # ── 维护模型（可选）──────────────────────────
 # 会话标题、回想整理、思考文本等小调用用的独立 key；
 # 不配则复用主模型的 API_KEY
 # SK_MAINTENANCE=your-maintenance-key
+
+# ── 网页矩阵（可选，本地/自动化推包用）─────────────
+# 矩阵并回主包，平时在工作台里整包装备即可。若想让本地脚本直接把一个矩阵包
+# 推上云，配这把令牌：`POST /api/matrix/pack` 就多认一种身份 ——
+# Authorization: Bearer <token>。不配则这条道整个关闭，推包只有工作台那一处。
+# 生产环境用 npx wrangler secret put MATRIX_PUSH_TOKEN。
+# MATRIX_PUSH_TOKEN=换成一段随机长字符串
 
 # ── 官方用量校准（可选）───────────────────────
 # 额度面板用官方 API 核准真实用量；不配则用自计量口径并在面板标注。

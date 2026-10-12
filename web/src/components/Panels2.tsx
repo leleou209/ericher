@@ -16,10 +16,13 @@ import {
 import { api } from "../lib/api";
 import { speak, stopSpeaking } from "../lib/speech";
 import {
+  DRAW_FORMAT_DEFAULTS,
   MODEL_FORMAT_LABEL,
   TTS_DEFAULTS,
   TTS_PROTOCOL_LABEL,
+  TTS_VOICE_PRESETS,
   VENDOR_PRESETS,
+  voiceLabel,
 } from "../lib/presets";
 import { Icon } from "./Icons";
 import {
@@ -231,7 +234,8 @@ export function LedgerPanel({
             onChange={(e) => setPostDraft(e.target.value)}
             placeholder="往墙上贴一句话，进门的人都看得到…"
             onKeyDown={(e) => {
-              if (e.key === "Enter") void post();
+              // isComposing 守卫：输入法确认候选词的那下回车不算提交
+              if (e.key === "Enter" && !e.nativeEvent.isComposing) void post();
             }}
           />
           <button
@@ -299,7 +303,8 @@ export function LedgerPanel({
             onChange={(e) => setDraft(e.target.value)}
             placeholder="想留在账本上的一句话…"
             onKeyDown={(e) => {
-              if (e.key === "Enter") void add();
+              // isComposing 守卫：输入法确认候选词的那下回车不算提交
+              if (e.key === "Enter" && !e.nativeEvent.isComposing) void add();
             }}
           />
           <button
@@ -1504,6 +1509,7 @@ const PROVIDER_LABEL: Record<string, string> = {
   "mimo-chat": "MiMo 式",
   doubao: "豆包",
   "glm-speech": "智谱",
+  minimax: "MiniMax",
 };
 
 /**
@@ -1545,20 +1551,29 @@ export function VoicePanel({
     }
     stopSpeaking();
     setBad("");
+    // 「正在念」是先举手后出声：念成了由 onEnd/下面的分支收旗，
+    // 念砸了（promise 直接 reject）也得有人收 —— 不然按钮永远停在「停」上
     setTrying(v.id);
-    const r = await speak("你好，我是 ericher。以后就由我来念。", v.id, () =>
-      setTrying(""),
-    );
-    if (r.by === "cloud") return;
-    setTrying("");
-    if (r.by === "browser") {
-      // 云端没接上、退成了系统音色。不说清楚的话，人会把那个难听的嗓子
-      // 当成「这一副就长这样」，于是以为换嗓子根本没用 —— 其实是要去修配置。
-      setBad(
-        `「${v.label}」没念成：${r.why}。刚才那句是浏览器自带的音色念的。`,
+    try {
+      const r = await speak("你好，我是 ericher。以后就由我来念。", v.id, () =>
+        setTrying(""),
       );
-    } else {
-      setBad(`「${v.label}」没念出声音，换一个试试，或者稍后再来。`);
+      if (r.by === "cloud") return;
+      setTrying("");
+      if (r.by === "browser") {
+        // 云端没接上、退成了系统音色。不说清楚的话，人会把那个难听的嗓子
+        // 当成「这一副就长这样」，于是以为换嗓子根本没用 —— 其实是要去修配置。
+        setBad(
+          `「${v.label}」没念成：${r.why}。刚才那句是浏览器自带的音色念的。`,
+        );
+      } else {
+        setBad(`「${v.label}」没念出声音，换一个试试，或者稍后再来。`);
+      }
+    } catch {
+      // 朗读这条路真出了错（不是「没念成」那种带着原因回来的）：
+      // 把卡住的「正在念」复位，并照实说一句，别让人对着不动的按钮干等
+      setTrying("");
+      setBad(`「${v.label}」试听出了错，稍后再试一次。`);
     }
   };
 
@@ -1599,6 +1614,8 @@ export function VoicePanel({
           // 用户会以为是自己选错了
           const chosen = v.available && current === v.id;
           const on = v.available && (chosen || (!current && fallback === v.id));
+          // 音色 id 翻成人话名：光看 female-shaonv 谁也不知道是什么嗓子
+          const desc = v.voice ? `音色 ${voiceLabel(v.provider, v.voice)}` : v.desc;
           return (
             <Row
               key={v.id}
@@ -1637,7 +1654,7 @@ export function VoicePanel({
                 )}
               </div>
               <span className="meta">
-                {v.available ? v.desc : `${v.desc} —— ${v.why}`}
+                {v.available ? desc : `${desc} —— ${v.why}`}
               </span>
             </Row>
           );
@@ -2005,6 +2022,8 @@ export function GuestTypesPanel() {
       <p className="meta">
         不同口令进来是不同类型：各自独立房间与记忆。这一页只管档位与口令；
         各档能用哪些工具，去「来客权限管理」页按件勾。口令只存摘要不回显，忘了就在编辑里重设。改动对之后新登录的来客生效。
+        第一行的「通用来客」是内置的默认档 —— 拿前台门禁口令进来的人都归它，
+        口令取自环境变量，改不得也删不得。
       </p>
 
       <h3 className="sect">新增类型</h3>
@@ -2044,9 +2063,12 @@ export function GuestTypesPanel() {
         </div>
       </div>
 
-      <h3 className="sect">自定义类型（{types.length}）</h3>
+      <h3 className="sect">类型（{types.length}）</h3>
       <ul className="remind-list">
         {types.map((t) => {
+          // 内置通用档恒在名册第一行：拿前台门禁口令进来的人都归它。
+          // 它跟自定义档一样能调工具与接待说明，但口令取自 env、也删不得停不得。
+          const builtin = t.id === "common";
           return (
             <li
               className="remind-row"
@@ -2055,9 +2077,26 @@ export function GuestTypesPanel() {
             >
               <div className="remind-when">
                 <span style={{ fontWeight: 600 }}>{t.name}</span>
-                <span className="meta" title="口令只存摘要不回显，忘了就重设">
-                  ••••••
-                </span>
+                {builtin ? (
+                  <>
+                    <span
+                      className="tag"
+                      title="前台门禁口令进来的来客都归这一档"
+                    >
+                      内置
+                    </span>
+                    <span
+                      className="meta"
+                      title="口令取自环境变量，不在这张表里"
+                    >
+                      口令：前台门禁口令
+                    </span>
+                  </>
+                ) : (
+                  <span className="meta" title="口令只存摘要不回显，忘了就重设">
+                    ••••••
+                  </span>
+                )}
                 {!t.active && <span className="tag">已停用</span>}
               </div>
 
@@ -2124,18 +2163,23 @@ export function GuestTypesPanel() {
                 >
                   {editingId === t.id ? "收起" : "编辑"}
                 </button>
-                <button
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => void toggleActive(t)}
-                >
-                  {t.active ? "停用" : "启用"}
-                </button>
-                <button
-                  className="btn btn-danger btn-sm"
-                  onClick={() => void del(t)}
-                >
-                  删除
-                </button>
+                {/* 内置档没有「停用」「删除」这两条路：口令就是门口那把总钥匙 */}
+                {!builtin && (
+                  <>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => void toggleActive(t)}
+                    >
+                      {t.active ? "停用" : "启用"}
+                    </button>
+                    <button
+                      className="btn btn-danger btn-sm"
+                      onClick={() => void del(t)}
+                    >
+                      删除
+                    </button>
+                  </>
+                )}
               </div>
 
               {editingId === t.id && draft && (
@@ -2150,14 +2194,16 @@ export function GuestTypesPanel() {
                         setDraft({ ...draft, name: e.target.value })
                       }
                     />
-                    <input
-                      className="field"
-                      placeholder="口令（留空 = 不改）"
-                      value={draft.password}
-                      onChange={(e) =>
-                        setDraft({ ...draft, password: e.target.value })
-                      }
-                    />
+                    {!builtin && (
+                      <input
+                        className="field"
+                        placeholder="口令（留空 = 不改）"
+                        value={draft.password}
+                        onChange={(e) =>
+                          setDraft({ ...draft, password: e.target.value })
+                        }
+                      />
+                    )}
                   </div>
                   <input
                     className="field"
@@ -2168,18 +2214,22 @@ export function GuestTypesPanel() {
                     }
                   />
                   <p className="meta pad">
-                    对外工具与长期权益到「来客权限管理」页按件调。
+                    {builtin
+                      ? "对外工具与长期权益到「来客权限管理」页按件调。口令就是前台门禁口令，这一档不能停用，也删不得。"
+                      : "对外工具与长期权益到「来客权限管理」页按件调。"}
                   </p>
-                  <label className="check-line">
-                    <input
-                      type="checkbox"
-                      checked={draft.active}
-                      onChange={(e) =>
-                        setDraft({ ...draft, active: e.target.checked })
-                      }
-                    />
-                    启用：这个口令现在能进门
-                  </label>
+                  {!builtin && (
+                    <label className="check-line">
+                      <input
+                        type="checkbox"
+                        checked={draft.active}
+                        onChange={(e) =>
+                          setDraft({ ...draft, active: e.target.checked })
+                        }
+                      />
+                      启用：这个口令现在能进门
+                    </label>
+                  )}
                   <div className="inline-form">
                     <button
                       className="btn btn-primary btn-sm"
@@ -2208,7 +2258,8 @@ export function GuestTypesPanel() {
       {loading && <p className="empty-sm">读取中…</p>}
       {!loading && !types.length && !err && (
         <p className="empty-sm">
-          还没有自定义类型。通用门禁口令进来的来客不在此列，权限全开。
+          还没有自定义类型。名册里只有内置的「通用来客」—— 拿前台门禁口令进来
+          的人都归这一档，它的工具在「来客权限管理」页按件调。
         </p>
       )}
 
@@ -2321,15 +2372,15 @@ export function GuestPermsPanel() {
     <div className="panel-body">
       <p className="meta">
         逐件勾这一档能用的工具：勾了才出现在来客那间；没勾的，来客问起来助手会照实说「做不到」，不拿好听的话应付。
-        改一格即时生效，对之后新登录的来客生效。通用门禁口令进来的来客不在此列
-        —— 那种来客权限全开。
+        改一格即时生效，对之后新登录的来客生效。第一行是内置的「通用来客」 ——
+        拿前台门禁口令进来的人都归它，一样按件调；它不能停用也不能删。
       </p>
 
       {loading && <p className="empty-sm">读取中…</p>}
 
       {!loading && !types.length && (
         <p className="empty-sm">
-          还没有自定义档位。先去「来客类型」页建一档、配好口令，再回来勾工具。
+          还没有档位。先去「来客类型」页建一档、配好口令，再回来勾工具。
         </p>
       )}
 
@@ -3302,6 +3353,30 @@ const blankTtsDraft = (): TtsDraft => ({
   style: "",
 });
 
+/**
+ * 「默认匹配」：换协议时，没被用户动过的字段跟到新协议的默认值
+ * （地址 / Key 变量名 / 模型 / 音色一起换对），手填过的字段留住不洗。
+ * 判「没动过」就看是不是空的、或者还停在旧协议的默认值上。
+ */
+const ttsWithProtocol = (d: TtsDraft, next: TtsProtocol): TtsDraft => {
+  const from = TTS_DEFAULTS[d.protocol];
+  const to = TTS_DEFAULTS[next];
+  const swap = (cur: string, oldDef: string, newDef: string) =>
+    cur.trim() === "" || cur.trim() === oldDef.trim() ? newDef : cur;
+  return {
+    ...d,
+    protocol: next,
+    baseUrl: swap(d.baseUrl, from.baseUrl, to.baseUrl),
+    keySecret: swap(d.keySecret, from.keySecret, to.keySecret),
+    model: swap(d.model, from.model, to.model),
+    voice: swap(d.voice, from.voice, to.voice),
+  };
+};
+
+/** 新增表单一进来就带出默认协议（MiMo）的全套默认值，起个头再改 */
+const freshTtsDraft = (): TtsDraft =>
+  ttsWithProtocol(blankTtsDraft(), "mimo-chat");
+
 const ttsDraftOf = (t: TtsConfig): TtsDraft => ({
   name: t.name,
   protocol: t.protocol,
@@ -3335,7 +3410,7 @@ export function TtsConfigsPanel() {
   const [err, setErr] = useState("");
 
   // 新增表单
-  const [draft, setDraft] = useState<TtsDraft>(blankTtsDraft);
+  const [draft, setDraft] = useState<TtsDraft>(freshTtsDraft);
   const [addErr, setAddErr] = useState("");
   const [adding, setAdding] = useState(false);
 
@@ -3368,7 +3443,7 @@ export function TtsConfigsPanel() {
     setAddErr("");
     try {
       await api.ttsConfigAdd(ttsPayloadOf(draft));
-      setDraft(blankTtsDraft());
+      setDraft(freshTtsDraft());
       await load();
     } catch (e) {
       setAddErr((e as Error).message);
@@ -3428,7 +3503,9 @@ export function TtsConfigsPanel() {
           <select
             className="field"
             value={d.protocol}
-            onChange={(e) => patch({ protocol: e.target.value as TtsProtocol })}
+            onChange={(e) =>
+              patch(ttsWithProtocol(d, e.target.value as TtsProtocol))
+            }
             aria-label="协议"
           >
             {(Object.keys(TTS_PROTOCOL_LABEL) as TtsProtocol[]).map((p) => (
@@ -3460,6 +3537,7 @@ export function TtsConfigsPanel() {
           />
           <input
             className="field"
+            list={`tts-voices-${d.protocol}`}
             placeholder={def.voicePh}
             value={d.voice}
             onChange={(e) => patch({ voice: e.target.value })}
@@ -3520,7 +3598,7 @@ export function TtsConfigsPanel() {
                 {TTS_PROTOCOL_LABEL[t.protocol] || t.protocol}
               </span>
               <span className="meta">{t.model || "默认模型"}</span>
-              <span className="meta">音色 {t.voice || "默认"}</span>
+              <span className="meta">音色 {voiceLabel(t.protocol, t.voice)}</span>
             </div>
 
             <div className="row-actions">
@@ -3585,6 +3663,16 @@ export function TtsConfigsPanel() {
           <option key={k} value={k} />
         ))}
       </datalist>
+
+      {/* 音色预置表按协议各挂一个 datalist：选了哪家协议就出哪一家的音色清单。
+          option 的 value 是进接口的 id，label 是给人看的名字；手填清单外的 id 也照收。 */}
+      {(Object.keys(TTS_VOICE_PRESETS) as TtsProtocol[]).map((p) => (
+        <datalist key={p} id={`tts-voices-${p}`}>
+          {TTS_VOICE_PRESETS[p].map((v) => (
+            <option key={v.id} value={v.id} label={v.label} />
+          ))}
+        </datalist>
+      ))}
     </div>
   );
 }
@@ -3609,6 +3697,7 @@ const DRAW_FORMAT_LABEL: Record<DrawFormat, string> = {
   "workers-ai": "Workers AI 绑定",
   siliconflow: "硅基流动",
   zhipu: "智谱",
+  minimax: "MiniMax",
 };
 
 /** 表单草稿：模型清单在输入框里是逗号分隔的字符串，存库时折回数组 */
@@ -3627,6 +3716,25 @@ const drawDraftOf = (c: DrawConfig): DrawDraft => ({
   models: c.models.join(", "),
   keySecret: c.keySecret,
 });
+
+/**
+ * 「默认匹配」：换出图协议时，没被用户动过的字段跟到新格式的默认值
+ * （端点 / 模型清单 / Key 变量名 / 标注名一起换对），手填过的留住不洗。
+ */
+const drawWithFormat = (d: DrawDraft, next: DrawFormat): DrawDraft => {
+  const from = DRAW_FORMAT_DEFAULTS[d.format];
+  const to = DRAW_FORMAT_DEFAULTS[next];
+  const swap = (cur: string, oldDef: string, newDef: string) =>
+    cur.trim() === "" || cur.trim() === oldDef.trim() ? newDef : cur;
+  return {
+    ...d,
+    format: next,
+    endpoint: swap(d.endpoint, from.endpoint, to.endpoint),
+    models: swap(d.models, from.models, to.models),
+    keySecret: swap(d.keySecret, from.keySecret, to.keySecret),
+    label: swap(d.label, from.label, to.label),
+  };
+};
 
 /**
  * 绘图配置面板：出图三档各一张卡，每档配「出图协议 / 标注名 / 端点 /
@@ -3720,7 +3828,10 @@ export function DrawConfigsPanel() {
                 onChange={(ev) =>
                   setDrafts({
                     ...drafts,
-                    [c.tier]: { ...d, format: ev.target.value as DrawFormat },
+                    [c.tier]: drawWithFormat(
+                      d,
+                      ev.target.value as DrawFormat,
+                    ),
                   })
                 }
               >

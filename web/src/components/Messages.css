@@ -21,14 +21,24 @@
   min-width: 0;
 }
 
-/* ericher 的名字：小号衬线标签，纸面上的署名 */
+/* ericher 的名字：小号衬线标签，纸面上的署名；主题给了头像就署在名字前 */
 .msg-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin-bottom: 6px;
   font-family: var(--font-display);
   font-size: 12.5px;
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--yuzhe-ink-dim);
+}
+
+.msg-avatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  object-fit: cover;
 }
 
 .msg-body {
@@ -409,6 +419,71 @@
   word-break: break-word;
 }
 
+/* ── 一轮异常中断的死因卡：和工具卡同一套视觉，红色立起来 ── */
+.turn-err {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: rgba(201, 54, 44, 0.06);
+  border: 1px solid var(--yuzhe-line);
+  border-left: 2px solid var(--yuzhe-danger);
+  border-radius: var(--yuzhe-r-m);
+  font-size: 13px;
+}
+
+.turn-err-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.turn-err-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--yuzhe-danger);
+}
+
+.turn-err-title {
+  font-weight: 500;
+  color: var(--yuzhe-ink-strong);
+}
+
+.turn-err-detail {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--yuzhe-ink-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.turn-err-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 12px;
+  color: var(--yuzhe-danger);
+  cursor: pointer;
+}
+
+.turn-err-raw {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 240px;
+  overflow-x: auto;
+  background: var(--yuzhe-bg-soft);
+  border-radius: var(--yuzhe-r-m);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--yuzhe-ink-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* 工具画出来的图：摆出来，点开看大图 */
 .tool-img {
   display: block;
@@ -419,35 +494,67 @@
   cursor: zoom-in;
 }
 
-/* mermaid 渲出来的示意图：白底卡片，白板讲解的气质；暗色主题下渲染器自己出黑底 */
+/* mermaid 渲出来的示意图：跟纸面一色（配色由渲染器按当前主题变量喂），
+   外面只留一圈发丝线，框住图的范围 */
 .mermaid-view {
-  background: #ffffff;
   border: 1px solid var(--yuzhe-line);
   border-radius: var(--yuzhe-r-m);
-  padding: 12px;
   margin-top: 8px;
-  max-width: min(480px, 100%);
-  overflow-x: auto;
   cursor: zoom-in;
 }
 
-.mermaid-view svg {
+/* 图装在一层可滚的取景框里：建议默认高 = min(图的自然高, 70vh)，
+   装不下就框内滚 —— 一张五十节点的大图不该把一整屏聊天顶走。
+   宽度铺满消息列，图只缩不放（max-width:100% + height:auto）。 */
+.mermaid-frame {
+  max-height: 70vh;
+  padding: 12px;
+  overflow: auto;
+}
+
+.mermaid-frame svg {
   max-width: 100%;
   height: auto;
   display: block;
   margin: 0 auto;
 }
 
-/* 渲染中 / 渲染失败：不占大块白底，一行小字说清楚发生了什么 */
+/* 框底那道可拖的边：图比一屏还高时才出现，往下拖把框放高，拖过的高度按图记住 */
+.mermaid-grip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 14px;
+  border-top: 1px solid var(--yuzhe-line-soft);
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.mermaid-grip::before {
+  content: "";
+  width: 40px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--yuzhe-ink-faint);
+}
+
+/* 渲染中 / 渲染失败：不占大块空白，一行小字说清楚发生了什么 */
 .mermaid-view.mermaid-note {
   background: transparent;
   border-style: dashed;
+  padding: 10px 12px;
   cursor: default;
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
   color: var(--yuzhe-ink-dim);
+}
+
+/* 存量的 .svg（深色主题之前、白底黑线那套渲的）：夜墨纸上翻个面跟上，
+   不然纸上亮着一块。位图照片不动 —— 反色一张人脸没有任何道理。 */
+[data-theme="dark"] .pic-svg {
+  filter: invert(1) hue-rotate(180deg);
 }
 
 /* ── 思考块：12.5px 次级色 + 左发丝线 ── */
@@ -764,6 +871,100 @@
 .vote.on {
   background: var(--yuzhe-bg-hover);
   color: var(--yuzhe-ink-strong);
+}
+
+/* ── 异常收件箱 ──
+   胶囊 sticky 在消息列表底的右侧、贴着输入栏右端：列表滚到哪儿都看得见；
+   点开向上摊出面板，按时间倒序翻这一场落不到具体消息上的死因。 */
+.err-inbox {
+  position: sticky;
+  bottom: 8px;
+  z-index: 5;
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 10px;
+  pointer-events: none;
+}
+
+.err-inbox-chip {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: 999px;
+  background: var(--yuzhe-surface);
+  box-shadow: var(--yuzhe-shadow-pop);
+  color: var(--yuzhe-ink-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
+}
+
+.err-inbox-chip:hover {
+  color: var(--yuzhe-ink-strong);
+  border-color: var(--yuzhe-line-strong);
+}
+
+.err-inbox-panel {
+  pointer-events: auto;
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 34px;
+  max-height: min(52vh, 420px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-surface);
+  box-shadow: var(--yuzhe-shadow-pop);
+}
+
+.err-inbox-cap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--yuzhe-ink-faint);
+}
+
+.err-inbox-close {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  padding: 2px;
+  border-radius: var(--yuzhe-r-s);
+  color: var(--yuzhe-ink-faint);
+  cursor: pointer;
+}
+
+.err-inbox-close:hover {
+  color: var(--yuzhe-ink);
+  background: var(--yuzhe-bg-hover);
+}
+
+.err-inbox-item {
+  position: relative;
+  padding-left: 44px;
+}
+
+.err-inbox-time {
+  position: absolute;
+  left: 0;
+  top: 4px;
+  font-size: 11px;
+  color: var(--yuzhe-ink-faint);
+  font-variant-numeric: tabular-nums;
 }
 
 .vote.on.down {

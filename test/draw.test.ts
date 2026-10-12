@@ -9,6 +9,8 @@
  *                   错一个字符，人就什么图都看不到。
  *   imageKeyIn    ：自检要按那个地址把图从云盘取回来重递一遍 —— 抠错就是「让她看一眼」，
  *                   而她眼前什么都没有。
+ *   requestBody   ：图生图的参考图只在 minimax 那档有落点 —— 塞错位置/塞错形状，
+ *                   参考图等于没给，「照这张图改」出来的是另一张图。
  * 这几处出错的症状是同一个：「她说画好了，他什么都没看见」，而那最难查。
  *
  * 运行: npx vitest run
@@ -19,7 +21,9 @@ import {
   extractMermaid,
   handOff,
   imageKeyIn,
+  requestBody,
   selfCheck,
+  supportsReference,
 } from "../src/tools/draw";
 
 describe("extractMermaid", () => {
@@ -127,5 +131,33 @@ describe("画完自检（图递回去让她自己看一眼）", () => {
 
   it("没有图的时候（比如没画成）抠出来是空的，别硬凑一个文件名", () => {
     expect(imageKeyIn("这次没画成：\nFLUX：HTTP 500")).toBeNull();
+  });
+});
+
+describe("图生图（参考图）的请求体", () => {
+  const REF = "data:image/png;base64,AAAA";
+
+  it("minimax 带参考图：subject_reference 单图 character —— 官方限一，类型只认 character", () => {
+    const b = requestBody("minimax", "image-01", "换个海边的场景", "16:9", REF);
+    expect(b).toMatchObject({
+      model: "image-01",
+      aspect_ratio: "16:9",
+      subject_reference: [{ type: "character", image_file: REF }],
+    });
+  });
+
+  it("minimax 不带参考图：不塞 subject_reference —— 文生图就是文生图", () => {
+    const b = requestBody("minimax", "image-01", "画一只猫", "1:1", null);
+    expect(b).not.toHaveProperty("subject_reference");
+  });
+
+  it("吃不下参考图的档：支持表里只有 minimax，其余给了参考图就跳过那档", () => {
+    expect(supportsReference("minimax")).toBe(true);
+    for (const f of ["workers-ai", "siliconflow", "zhipu"] as const) {
+      expect(supportsReference(f)).toBe(false);
+      expect(requestBody(f, "m", "p", "1024x1024", REF)).not.toHaveProperty(
+        "subject_reference",
+      );
+    }
   });
 });

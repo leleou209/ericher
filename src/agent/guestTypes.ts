@@ -14,7 +14,25 @@
 
 import { timingSafeEqual } from "../auth";
 import type { SqlTag } from "./state";
-import { GUEST_ALWAYS_ON } from "./toolGroups";
+import { GUEST_ALWAYS_ON, GUEST_TOGGLABLE_TOOLS } from "./toolGroups";
+
+/**
+ * 内置通用档的档位 id：走前台门禁口令（env.GATE_PASSWORD）进来的来客都归这一档。
+ *
+ * 它从前只活在代码里（cowork.ts 就地给一份全开快照），面板上看不见、也就调不了。
+ * 现在它是名册里真实的一行（见 ensureCommonGuestType），管理员能像别的档一样
+ * 按件关它的工具。身份卡也拿它当默认档。
+ */
+export const COMMON_TYPE_ID = "common";
+
+/** 内置通用档的名字 */
+export const COMMON_TYPE_NAME = "通用来客";
+
+/**
+ * 内置档的建档时刻钉在最早：名册按 created 排，它永远排第一 ——
+ * 它是底板，不是众多档位里的一档。
+ */
+const COMMON_TYPE_CREATED = "1970-01-01T00:00:00.000Z";
 
 export interface GuestTypeRow {
   id: string;
@@ -242,6 +260,29 @@ function rowToType(r: TypeRow): GuestTypeRow {
   };
 }
 
+/**
+ * 种入内置通用档。
+ *
+ * 为什么要落成真实的一行：从前它钉死在代码里、权限恒全开，管理面板上根本
+ * 没有这一档，想收一收「拿前台口令进来的人」能做些什么就无从下手。落成一行
+ * 之后，它出现在来客类型名册和权限矩阵里，可以按件关工具、能写接待说明。
+ *
+ * 口令列留空：进门验的是 env 里的前台门禁口令，不走这张表（findGuestTypeByPassword
+ * 跳过这一行，免得空口令被谁撞上）。权益缺省全开 —— 与它历史上的行为一致，
+ * 种入不改任何人的既得权限；收紧是管理员后来的事。
+ * created 钉在最早，名册里它排第一。
+ * ON CONFLICT DO NOTHING：种一次就够，管理员后来的改动不会被下一次建表冲掉。
+ */
+export function ensureCommonGuestType(sql: SqlTag): void {
+  const tools = serializeTools([...GUEST_TOGGLABLE_TOOLS]);
+  sql`INSERT INTO guest_types (id, name, password, note, tools, perm_search,
+            perm_draw, perm_memory, perm_notes, perm_files, perm_public,
+            active, created)
+      VALUES (${COMMON_TYPE_ID}, ${COMMON_TYPE_NAME}, ${""}, ${""}, ${tools},
+              ${1}, ${1}, ${1}, ${1}, ${1}, ${1}, ${1}, ${COMMON_TYPE_CREATED})
+      ON CONFLICT(id) DO NOTHING`;
+}
+
 export function ensureGuestTypesSchema(sql: SqlTag): void {
   sql`CREATE TABLE IF NOT EXISTS guest_types (
        id          TEXT PRIMARY KEY,
@@ -282,6 +323,8 @@ export function ensureGuestTypesSchema(sql: SqlTag): void {
   } catch {
     /* 已有该列 */
   }
+  // 建表补齐之后就种上内置通用档：它是名册的底板，任何读名册的路都该看见它
+  ensureCommonGuestType(sql);
 }
 
 export function listGuestTypes(sql: SqlTag): GuestTypeRow[] {
@@ -297,13 +340,30 @@ export function listGuestTypes(sql: SqlTag): GuestTypeRow[] {
  *
  * 管权益核实的全走这条：旧票（30 天有效期）和名下旧卡不会因为管理员点了
  * 停用就失效，这里不过滤的话，停用只挡得住新登录，收回权益的唯一手段
- * 就只剩破坏性的删档。面板看档位走 listGuestTypes（不过滤），两不耽误。
+ * 就只剩破坏性的删档。面板看档位走 listGuestTypes（不过滤），改档走
+ * typeByIdAnyState（不过滤 —— 停用的档要能改回来），权益核实独享这把过滤的尺。
  */
 function typeById(sql: SqlTag, id: string): GuestTypeRow | null {
   const rows = sql<TypeRow>`
     SELECT id, name, password, note, tools, perm_search, perm_draw, perm_memory,
            perm_notes, perm_files, perm_public, active, created
     FROM guest_types WHERE id = ${id} AND active = 1`;
+  return rows.length ? rowToType(rows[0]) : null;
+}
+
+/**
+ * 按 id 查档，停用的也查得到：管「改档」的路径专用。
+ *
+ * updateGuestType 不能用上面那把过滤 active 的尺 —— 停用的档在面板上看得见
+ * （listGuestTypes 不过滤）、删得掉（removeGuestType 不过滤），唯独改档查不到的
+ * 话就永远动不了：改个名要查档，重新启用（PATCH active:true）更要先拿到停用档
+ * 本身，否则「停用」成了单行道，想收回只能删档重来。
+ */
+function typeByIdAnyState(sql: SqlTag, id: string): GuestTypeRow | null {
+  const rows = sql<TypeRow>`
+    SELECT id, name, password, note, tools, perm_search, perm_draw, perm_memory,
+           perm_notes, perm_files, perm_public, active, created
+    FROM guest_types WHERE id = ${id}`;
   return rows.length ? rowToType(rows[0]) : null;
 }
 
@@ -343,6 +403,25 @@ export function toGuestTypeInfo(t: GuestTypeRow): GuestTypeInfo {
 }
 
 /**
+ * 内置通用档的全开快照：主人那间读不到名册时拿它兜底。
+ *
+ * 别的档核实不了要全关（见下面 disabledGuestTypeInfo），这一档反过来：
+ * 它是门口最后一把钥匙（前台口令），不能因为一次 DO 抖动把所有进门的人
+ * 锁在门外。缺省语义本来就是全开，兜底也就落在全开。
+ */
+export function defaultCommonGuestTypeInfo(): GuestTypeInfo {
+  return {
+    id: COMMON_TYPE_ID,
+    name: COMMON_TYPE_NAME,
+    note: "",
+    tools: [...GUEST_TOGGLABLE_TOOLS],
+    permNotes: true,
+    permFiles: true,
+    permPublic: true,
+  };
+}
+
+/**
  * 档位失效时的兜底快照：票里声称的那一档查不到 / 停用了 / 查询失败，
  * 就按这一份接待 —— 能关的一律全关。
  *
@@ -376,6 +455,8 @@ async function assertPasswordFree(
     throw new Error("这档密码和前台口令撞了，换一个");
   const pwHash = await hashPassword(pw);
   for (const t of listGuestTypes(sql)) {
+    // 内置档的口令就是前台门禁口令，表里那一格是空的，不参与查重
+    if (t.id === COMMON_TYPE_ID) continue;
     if (verifyStoredPassword(t.password, pw, pwHash))
       throw new Error(`这档密码已经「${t.name}」在用，换一个`);
   }
@@ -421,8 +502,17 @@ export async function updateGuestType(
   patch: GuestTypePatch & { adminPw: string; gatePw: string },
 ): Promise<GuestTypeRow | null> {
   ensureGuestTypesSchema(sql);
-  const cur = typeById(sql, id);
+  // 改档路径用不过滤 active 的查档：停用的档也查得到，PATCH {active:true} 才有路转正
+  const cur = typeByIdAnyState(sql, id);
   if (!cur) return null;
+  // 内置通用档只开放「叫什么、怎么接待、开哪些工具」：口令就是 env 里的前台
+  // 门禁口令，没有重设这一说；也不能停用 —— 它是门口最后一把钥匙，关了这一档
+  // 等于整条进门的路断了（要收紧就按件关工具）。
+  if (id === COMMON_TYPE_ID) {
+    if (patch.password)
+      throw new Error("默认来客类型的口令就是前台门禁口令，改不了");
+    if (patch.active === false) throw new Error("默认来客类型不能停用");
+  }
   const name =
     patch.name === undefined
       ? cur.name
@@ -491,6 +581,8 @@ export async function updateGuestType(
 }
 
 export function removeGuestType(sql: SqlTag, id: string): boolean {
+  // 内置档删不得：删了它就只剩「全开兜底」，管理员收过的权限会集体被放开
+  if (id === COMMON_TYPE_ID) throw new Error("默认来客类型是内置的，删不得");
   ensureGuestTypesSchema(sql);
   const rows = sql<{ id: string }>`SELECT id FROM guest_types WHERE id = ${id}`;
   if (!rows.length) return false;
@@ -518,6 +610,9 @@ export async function findGuestTypeByPassword(
     FROM guest_types WHERE active = 1 ORDER BY created`;
   const pwHash = await hashPassword(pw);
   for (const r of rows) {
+    // 内置档走的是 env 里的前台口令（上面已早退排除），表里那一格是空的：
+    // 跳过它，免得哪个来客拿空口令或撞上这一行
+    if (r.id === COMMON_TYPE_ID) continue;
     if (verifyStoredPassword(r.password, pw, pwHash)) return rowToType(r);
   }
   return null;

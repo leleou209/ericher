@@ -218,7 +218,8 @@ function fakeAgent(
     db: db.sql,
     appEnv: {} as Env,
     // 回想走维护模型的口（见 recap.ts）：假的不分辨是谁家的，只认「有一台」
-    maintModel: () => ({ id: "fake-maint" }),
+    // 冷唤醒版 —— 闹钟轮靠它去模型目录读，不然目录配的模型白配
+    resolveMaintModel: async () => ({ id: "fake-maint" }),
     // 默认按主人房算 —— 绝大多数用例验的是整理本身的机制；
     // 分库（来客屋）的闸在下面单独验
     isOwnerRoom: true,

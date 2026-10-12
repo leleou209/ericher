@@ -20,6 +20,56 @@ function fmtSize(n: number): string {
   return (n / 1048576).toFixed(1) + "MB";
 }
 
+/** 网页矩阵的配置落点（与 src/matrix/core.ts 的 CONFIG_KEY 一致） */
+const MATRIX_CONFIG_KEY = "matrix/config.json";
+
+/**
+ * 网页矩阵页引用着的云盘文件：key → 引用它的页面路径们。
+ * 矩阵页的正文可以直接「引用」云盘里的一只文件（实时读它，不拷副本），
+ * 那只文件就成了页面的一部分 —— 删它/搬它，页面当场没有正文。
+ * 配置读不到或坏了就返回空表（矩阵是可选的，不该因为它的配置问题把云盘锁死）。
+ */
+async function matrixDriveRefs(
+  bucket: R2Bucket,
+): Promise<Map<string, string[]>> {
+  const refs = new Map<string, string[]>();
+  try {
+    const obj = await bucket.get(MATRIX_CONFIG_KEY);
+    if (!obj) return refs;
+    const cfg = JSON.parse(await obj.text()) as {
+      pages?: Array<{ path?: unknown; driveKey?: unknown }>;
+    };
+    for (const p of cfg.pages ?? []) {
+      const key = typeof p.driveKey === "string" ? p.driveKey : "";
+      if (!key) continue;
+      const arr = refs.get(key) ?? [];
+      arr.push(String(p.path ?? "（未命名页面）"));
+      refs.set(key, arr);
+    }
+  } catch {
+    // 按没引用处理：宁可漏拦，也不能因为读不到配置就让整库文件动不了
+  }
+  return refs;
+}
+
+/** 这批 key 里有没有被矩阵页引用的；有就回绝并说清是谁引用的，没有返回 null */
+async function matrixRefGuard(
+  bucket: R2Bucket,
+  keys: string[],
+  action: string,
+): Promise<string | null> {
+  const refs = await matrixDriveRefs(bucket);
+  if (!refs.size) return null;
+  const hits = keys
+    .filter((k) => refs.has(k))
+    .map((k) => `${k}（被页面 /${refs.get(k)!.join("、/")} 引用）`);
+  if (!hits.length) return null;
+  return (
+    `网页矩阵正在引用这些文件，${action}不了：${hits.join("；")}。` +
+    "要动它，先去矩阵里把那一页的正文来源换成别的，再来。"
+  );
+}
+
 export function fileTools(ctx: ToolCtx) {
   return {
     files: tool({
@@ -148,15 +198,23 @@ export function fileTools(ctx: ToolCtx) {
           // 精确命中一个对象：就是移动 / 改名一个文件
           const obj = await bucket.get(src);
           if (obj) {
+            // 被矩阵页引用着的文件不许搬：搬走那一页就读不到正文了
+            const refGuard = await matrixRefGuard(bucket, [src], "搬");
+            if (refGuard) return refGuard;
             await bucket.put(dst, obj.body, {
               httpMetadata: obj.httpMetadata,
+              // customMetadata（主题导入记的 sourceKey 来路）要跟着走：move 是 copy+delete，
+              // 不捎上就被剥掉，导入去重会把同一条云盘文件当成两个来路
+              customMetadata: obj.customMetadata,
             });
             await bucket.delete(src);
             return `搬好了：${src} → ${dst}`;
           }
-          // 没精确命中就当前缀：整个「文件夹」逐个 copy + delete
+          // 没精确命中就当前缀：整个「文件夹」逐个 copy + delete。
+          // 先把整夹的 key 攒齐、过一遍矩阵引用检查，再动手 —— 边搬边撞到引用
+          // 中途停手，就剩半个文件夹散在外头
           const srcPrefix = `${src}/`;
-          let moved = 0;
+          const keys: string[] = [];
           let cursor: string | undefined;
           do {
             const list = await bucket.list({
@@ -164,21 +222,23 @@ export function fileTools(ctx: ToolCtx) {
               cursor,
               limit: 500,
             });
-            for (const o of list.objects) {
-              const one = await bucket.get(o.key);
-              if (!one) continue;
-              await bucket.put(
-                `${dst}/${o.key.slice(srcPrefix.length)}`,
-                one.body,
-                {
-                  httpMetadata: one.httpMetadata,
-                },
-              );
-              await bucket.delete(o.key);
-              moved++;
-            }
+            keys.push(...list.objects.map((o) => o.key));
             cursor = list.truncated ? list.cursor : undefined;
           } while (cursor);
+          const refGuard = await matrixRefGuard(bucket, keys, "搬");
+          if (refGuard) return refGuard;
+          let moved = 0;
+          for (const key of keys) {
+            const one = await bucket.get(key);
+            if (!one) continue;
+            await bucket.put(`${dst}/${key.slice(srcPrefix.length)}`, one.body, {
+              httpMetadata: one.httpMetadata,
+              // 同上：customMetadata（sourceKey 来路）跟着搬走，别被剥掉
+              customMetadata: one.customMetadata,
+            });
+            await bucket.delete(key);
+            moved++;
+          }
           return moved
             ? `整个文件夹搬好了（${moved} 个文件）：${src}/ → ${dst}/`
             : `没有这个文件或文件夹：${src}`;
@@ -192,6 +252,9 @@ export function fileTools(ctx: ToolCtx) {
           if (!(await bucket.head(key))) return "没有这个文件：" + key;
           if (!confirm)
             return `删除是不可逆操作。确认要删除「${key}」的话，请带 confirm=true 再调用一次。`;
+          // 被矩阵页引用着的文件删不得：删了那一页当场没有正文
+          const refGuard = await matrixRefGuard(bucket, [key], "删");
+          if (refGuard) return refGuard;
           await bucket.delete(key);
           return "已删除：" + key;
         }
@@ -201,16 +264,21 @@ export function fileTools(ctx: ToolCtx) {
           return "这个前缀超出了本间的文件范围，clear 只能动自己那间的文件。";
         if (!confirm)
           return `clear 将删除所有以「${prefix}」开头的文件。确认请带 confirm=true 再调用一次。`;
-        let deleted = 0;
+        // 先列全、过一遍矩阵引用检查，再删 —— 免得删到一半撞上引用，剩下半截
+        const doomed: string[] = [];
         let cursor: string | undefined;
         do {
           const list = await bucket.list({ prefix, cursor, limit: 500 });
-          for (const o of list.objects) {
-            await bucket.delete(o.key);
-            deleted++;
-          }
+          doomed.push(...list.objects.map((o) => o.key));
           cursor = list.truncated ? list.cursor : undefined;
         } while (cursor);
+        const refGuard = await matrixRefGuard(bucket, doomed, "清");
+        if (refGuard) return refGuard;
+        let deleted = 0;
+        for (const k of doomed) {
+          await bucket.delete(k);
+          deleted++;
+        }
         return `已按前缀「${prefix}」清空 ${deleted} 个文件。`;
       },
     }),

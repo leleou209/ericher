@@ -159,6 +159,18 @@ export interface Task {
   created: string;
 }
 
+/**
+ * 本场步骤的一条。字段和全局的 Task 一样，只是作用域不同：
+ * 那个跨会话（存在 state.tasks 里），这个只属于当前这一场
+ * （后端按 session_id 存 session_tasks 表，见 agent/sessionStore.ts）。
+ */
+export interface SessionTask {
+  title: string;
+  desc: string;
+  status: TaskStatus;
+  created: string;
+}
+
 export interface ToolStat {
   tool: string;
   count: number;
@@ -220,6 +232,11 @@ export interface ChatState {
   recapPrompt: string;
   skills: Record<string, string[]>;
   tasks: Task[];
+  /**
+   * 本场计划（目标 + 步骤）改过几次。内容不在这里，得按 room/session 去
+   * /api/session-plan 拉；这个计数器当信号用 —— 它一变就重拉一次。
+   */
+  planRev: number;
   /** 还摆在我眼前、没答的问题 */
   asks: AskEntry[];
   thinkMode: "normal" | "deep";
@@ -253,6 +270,32 @@ export interface ChatState {
    * 聊天头部拿它画「这一场聊到了窗口的几成」，顺带把缓存命中率放进提示里。
    */
   lastUsage?: LastUsage;
+  /** 异常中断的死因账（后端轮尾回写）；界面按 messageId 挂在对应回答下面 */
+  turnErrors?: TurnError[];
+  /** 最后看的哪间屋（人屋名/场屋名）；多端对齐用，空串 = 没记过 */
+  lastRoom: string;
+  /** 最后看的那一场（sessions 表主键）；与人屋的 activeSession 不是同一格 */
+  lastSession: string;
+  /**
+   * 上面那笔记于何时（毫秒时间戳）；0 = 从没记过。
+   * 多端各自都会写回，人屋只留最晚的那笔 —— 谁的时间新就以谁为准。
+   */
+  lastViewAt: number;
+}
+
+/**
+ * 一次异常中断的死因（后端 src/agent/turnReport.ts 判定后写进 state）。
+ * title/detail 是给所有人看的人话；raw 是给开发者的原始报文，界面折叠、管理员可展开。
+ */
+export interface TurnError {
+  /** 绑定的助手消息 id；断在还没吐出内容时为空串，界面按尾部落单条 */
+  messageId: string;
+  sessionId: string;
+  reason: "stream-error" | "aborted" | "output-limit";
+  title: string;
+  detail: string;
+  raw?: string;
+  at: number;
 }
 
 /** 一轮对话烧掉多少上下文（后端 onChatMessage 轮尾回写，见 src/agent/state.ts） */
@@ -303,6 +346,7 @@ export const INITIAL_UI_STATE: ChatState = {
   recapPrompt: "",
   skills: {},
   tasks: [],
+  planRev: 0,
   asks: [],
   thinkMode: "normal",
   deepConfigId: "",
@@ -317,6 +361,10 @@ export const INITIAL_UI_STATE: ChatState = {
   expCount: 0,
   voice: "",
   noteFocus: "",
+  turnErrors: [],
+  lastRoom: "",
+  lastSession: "",
+  lastViewAt: 0,
 };
 
 export interface R2File {
@@ -509,6 +557,8 @@ export interface VoiceOption {
   id: string;
   label: string;
   provider: string;
+  /** 这条配置点名的音色 id；空串 = 用协议默认音色。前端拿它翻人话名 */
+  voice: string;
   /** 一句话说明这个嗓子的性格，选的时候有依据 */
   desc: string;
   /** 这台机器现在用得上吗 */
@@ -545,9 +595,12 @@ export interface VisitorRoom {
 export type GuestTypeInfo = Omit<GuestType, "active" | "created">;
 
 /**
- * 来客类型（后端 guest-types 表的镜像）：一个自定义口令就是一类来客。
- * 用通用门禁口令进来的不在此列 —— 那种来客权限全开。
- * 口令在后端只存 SHA-256 摘要，不回显：忘了就重设一个。
+ * 来客类型（后端 guest-types 表的镜像）：一个口令就是一类来客。
+ *
+ * 表里第一行恒是内置通用档（id = "common"，名字「通用来客」）：用前台门禁
+ * 口令进来的来客都归这一档。它一样可以按件关工具，只是口令取自 env、
+ * 不可改也不可停用、更删不得 —— 它是门口最后一把钥匙。
+ * 自定义档的口令在后端只存 SHA-256 摘要，不回显：忘了就重设一个。
  */
 export interface GuestType {
   id: string;
@@ -605,7 +658,13 @@ export interface PublicPost {
 
 /** 工具语义组 */
 type ToolGroupId =
-  "read" | "visual" | "memory" | "todo" | "session" | "system";
+  | "read"
+  | "visual"
+  | "memory"
+  | "todo"
+  | "session"
+  | "system"
+  | "matrix";
 
 export interface ToolGroupDef {
   id: ToolGroupId;
@@ -649,7 +708,7 @@ export interface ToolCatalog {
 export type ModelFormat = "anthropic" | "openai-chat" | "openai-responses";
 
 /** 读音服务的接法。决定这一条怎么发请求、参数叫什么名字 */
-export type TtsProtocol = "mimo-chat" | "doubao" | "glm-speech";
+export type TtsProtocol = "mimo-chat" | "doubao" | "glm-speech" | "minimax";
 
 /** 一家模型供应商：接哪一家的钥匙串（名称、地址、格式、Key 变量名），模型条目挂它底下 */
 export interface ModelProvider {
@@ -699,7 +758,7 @@ export interface TtsConfig {
 }
 
 /** 绘图的出图协议。决定这一档怎么发请求、尺寸参数叫什么名字 */
-export type DrawFormat = "workers-ai" | "siliconflow" | "zhipu";
+export type DrawFormat = "workers-ai" | "siliconflow" | "zhipu" | "minimax";
 
 /** 绘图配置：出图三档（fast 主力 / high 高质量 / fallback 兜底）各一条 */
 export interface DrawConfig {
@@ -741,6 +800,8 @@ export type SettingsKey =
   | "visitors"
   | "guestTypes"
   | "guestPerms"
+  // 网页矩阵：矩阵页挂在主域名下，管理面在独立整页工作台
+  | "matrix"
   | "modelConfigs"
   | "ttsConfigs"
   | "drawConfigs"
@@ -753,4 +814,151 @@ export type SettingsKey =
   | "recapPrompt"
   | "self"
   | "voice"
-  | "appearance";
+  // 外观摊成四个独立子页（共用一份草稿，见 ThemePanel.tsx 的 AppearancePanel）
+  | "appearance-theme"
+  | "appearance-color"
+  | "appearance-face"
+  | "appearance-motion";
+
+// ── 网页矩阵 ─────────────────────────────────────
+// 矩阵已并回主包：这些数据由 /api/matrix/* 提供（见 src/matrix/core.ts）。
+
+/** 一页的身份档：公开 / 持票来客 / 管理员 / 指定来客档位白名单 */
+export type MatrixAccess = "public" | "visitor" | "admin" | "types";
+
+/** 矩阵里的一页：一条层级路径 + 一档身份 + 一段正文（或一条外站链接） */
+export interface MatrixPage {
+  id: string;
+  path: string;
+  title: string;
+  access: MatrixAccess;
+  types?: string[];
+  sandbox?: boolean;
+  entry?: boolean;
+  external?: string;
+  /** 本页自由 CSS：只在这一页生效，排在矩阵默认样式之后 */
+  css?: string;
+  /**
+   * 正文改为引用云盘里的一只文件时记的 key。有它就不出本页正文，实时读那只文件；
+   * 那只文件因此不能删/搬（后端云盘工具会拦）。
+   */
+  driveKey?: string;
+  updatedAt: number;
+}
+
+/** 全局悬浮菜单：所有页面统一挂的那个左上角浮窗 */
+export interface MatrixNav {
+  on: boolean;
+}
+
+/**
+ * 矩阵外观：注入物（通路按钮、悬浮菜单）的主色与按钮形态。
+ * 它管的是「矩阵加进去的那层壳」，跟页面自己写的 CSS 是两回事。
+ */
+export interface MatrixTheme {
+  /** 主色：链接与按钮的强调色，六个十六进制位 */
+  accent: string;
+  button: "text" | "outline" | "solid";
+}
+
+export interface MatrixPages {
+  rev: number;
+  pages: MatrixPage[];
+  nav: MatrixNav;
+  theme: MatrixTheme;
+}
+
+/**
+ * 外站认定：列在这张表里的域名才允许从内站过去，门卫页据此放行或拦下。
+ * 表外的一律拦（包括伪造跳转目标的情形），所以这份表默认是空的、安全的。
+ */
+export interface ApprovedSite {
+  /** 域名（小写，不含协议与路径）；它同时放行自己的子域 */
+  host: string;
+  /** 为什么放行：给自己下次看得懂的备注 */
+  note?: string;
+  /** 免提示：认定过、信得过，从内站过去不再停门卫页，直接跳 */
+  skip?: boolean;
+}
+
+export interface MatrixSites {
+  sites: ApprovedSite[];
+}
+
+export interface MatrixPageDetail {
+  page: MatrixPage;
+  body: string;
+}
+
+/**
+ * 按钮摆在页面里的哪里 —— 按钮本身不属于页面内容，是矩阵在渲染时拼进去的：
+ *   auto   兜底：注入到页面末尾的「通路」栏
+ *   anchor 填进正文里名为 name 的命名锚点（空元素，如 <div id="north"></div>）
+ *   point  拖拽落点（百分比 0-100，设计器里用）
+ */
+export type LinkPlace =
+  | { kind: "auto" }
+  | { kind: "anchor"; name: string }
+  | { kind: "point"; x: number; y: number };
+
+/** 矩阵里的一条通路：A 页里的一个按钮，指向 B 页 */
+export interface MatrixLink {
+  /** 起点页面 id（不是 path —— 页面改路径时连线不能断） */
+  from: string;
+  /** 终点页面 id */
+  to: string;
+  label: string;
+  place: LinkPlace;
+  order: number;
+}
+
+export interface MatrixLinks {
+  links: MatrixLink[];
+}
+
+/**
+ * 网页矩阵的一次性总览（/api/matrix/stat）：设置页状态卡与工作台头部拿它显示
+ * 「什么版本、矩阵多大规模、外观开着没」。只读汇总，细节去 pages/links 取。
+ */
+export interface MatrixStat {
+  /** 版本号（与主包同取自 package.json） */
+  version: string;
+  /** 构建号（那次提交的短 hash） */
+  build: string;
+  /** 云盘桶通不通 */
+  r2: boolean;
+  /** 配置版本号，每次写配置自增 */
+  rev: number;
+  pages: number;
+  links: number;
+  /** 入口页条数（应当 0 或 1） */
+  entries: number;
+  /** 外链页条数 */
+  external: number;
+  /** 沙箱页条数 */
+  sandbox: number;
+  /** 外站认定表条数 */
+  sites: number;
+  nav: MatrixNav;
+  theme: MatrixTheme;
+  /** 最近一次改动页面配置的时刻（毫秒），0 = 还没动过 */
+  updatedAt: number;
+}
+
+/**
+ * 装备一个矩阵包（/api/matrix/pack）之后回执的账：装进去多少、丢了多少。
+ * 装备是**整体替换** —— 账目报的是包里的数，不是「新增了多少」。
+ */
+export interface MatrixPackResult {
+  pages: number;
+  links: number;
+  sites: number;
+  /** 指向包外页面的连线，装的时候丢了这么多条 */
+  droppedLinks: number;
+  /** 超过外站认定表上限、被丢掉的那几条 */
+  droppedSites: number;
+  /** 落进云盘的正文总字节 */
+  bodyBytes: number;
+  /** 装之前有没有留下「装前那一版」的留底 */
+  snapshot: boolean;
+}

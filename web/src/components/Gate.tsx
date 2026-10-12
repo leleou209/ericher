@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, setUnauthorizedHandler, type Role } from "../lib/api";
+import { agentDisplay, useTheme } from "../lib/theme";
+import { ThemeBackdrop } from "./ThemeBackdrop";
 import "./Gate.css";
 
 type GateState = "checking" | "locked" | "open";
@@ -75,6 +77,9 @@ export function Gate({
   const [cardPw, setCardPw] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  // 门口报的名、别在门上的徽记 —— 都随主题换
+  const { theme } = useTheme();
+  const agent = agentDisplay(theme);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -101,10 +106,18 @@ export function Gate({
 
   return (
     <form className="gate" onSubmit={submit}>
+      {/* 门口的壁纸：铺在门里（absolute），卡浮在它上面 */}
+      <ThemeBackdrop scope="gate" variant="absolute" />
       <div className="gate-card">
-        {/* ericher 没有立绘和徽记，门口就用名字首字母顶替 */}
-        <div className="gate-mark">e</div>
-        <h1 className="gate-title">ericher 接待台</h1>
+        {/* 没立绘就用名字首字母顶替；主题给了头像就别头像 */}
+        <div className="gate-mark">
+          {agent.avatar ? (
+            <img src={agent.avatar} alt="" />
+          ) : (
+            agent.name.slice(0, 1)
+          )}
+        </div>
+        <h1 className="gate-title">{agent.name} 接待台</h1>
         <div className="gate-tabs" role="tablist">
           <button
             type="button"

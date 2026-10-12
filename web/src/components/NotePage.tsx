@@ -90,6 +90,13 @@ export function NotePage({
   /** 载入一篇的时候，不是「他改过」—— 不挡住这一下，一打开就会立刻自动保存一遍 */
   const loading = useRef(true);
   const titleRef = useRef<HTMLInputElement>(null);
+  // 最新输入的镜像：保存响应回来时要对着它判断「这一轮发出去之后人有没有又敲字」，
+  // 光读闭包只能拿到发起保存那一刻的旧值
+  const latest = useRef({ title: "", body: "", tags: "" });
+  latest.current = { title, body, tags: tagsText };
+  // 打开一篇的请求定序：快速连点两篇，先点的那篇慢回来会把新打开的盖掉 ——
+  // 人接着写，字就落进另一篇里了。过期响应直接作废
+  const openSeq = useRef(0);
 
   const refresh = useCallback(
     async (keyword = "") => {
@@ -104,9 +111,11 @@ export function NotePage({
 
   const open = useCallback(
     async (id: string) => {
+      const seq = ++openSeq.current;
       try {
         const n = await api.readNote(id, room);
-        if (!n) return;
+        // 过期响应：丢弃 —— 别把后点开的那篇刚铺好的稿子又盖回旧的
+        if (!n || seq !== openSeq.current) return;
         loading.current = true;
         setCurrent(n);
         setTitle(n.title);
@@ -119,6 +128,7 @@ export function NotePage({
         // 上报「我翻开了这一篇」。失败不打扰人 —— 界面照常能用，只是他这一轮少知道一件事
         void api.focusNote(id, room).catch(() => {});
       } catch (e) {
+        if (seq !== openSeq.current) return;
         setErr((e as Error).message);
       }
     },
@@ -167,6 +177,10 @@ export function NotePage({
 
   const saveNow = useCallback(async () => {
     if (!current) return;
+    // 快照这一轮存的是什么。请求在途时人还在打字 —— 响应回来若内容已经变了，
+    // 就不能 setDirty(false)：一熄，自动保存 effect 的 cleanup 会把刚排上的
+    // 新定时器清掉，后敲的这段永远落不了库，界面却显示「已保存」
+    const snap = { title, body, tags: tagsText };
     setSaving(true);
     try {
       const n = await api.saveNote(
@@ -180,7 +194,13 @@ export function NotePage({
         room,
       );
       setCurrent(n);
-      setDirty(false);
+      const now = latest.current;
+      if (
+        now.title === snap.title &&
+        now.body === snap.body &&
+        now.tags === snap.tags
+      )
+        setDirty(false);
       setErr("");
       void refresh(q.trim());
     } catch (e) {

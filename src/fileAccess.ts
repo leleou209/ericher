@@ -76,6 +76,22 @@ export function sessionKey(
 }
 
 /**
+ * 美化包（主题包 zip）在云盘里的特殊文件夹：装备过的包都在这里留一份底。
+ * 落公开空间 —— 皮肤本来就是全局可见的东西，包也一样：谁都能翻出来
+ * 再下载、再装备。名字带时间戳和随机段，同名包传两次是两份，都留着。
+ */
+export const THEME_PACK_FOLDER = "betpag";
+
+/** 美化包归档 key：f/public/betpag/<名字>-<时间戳>-<随机段>.zip */
+export function themePackKey(name: string): string {
+  const raw = String(name ?? "")
+    .replace(/\.zip$/i, "")
+    .replace(/[/\\?%*:|"<>]/g, "_")
+    .slice(0, 60);
+  return scopedKey("public", raw || "ericher-theme", "zip", THEME_PACK_FOLDER);
+}
+
+/**
  * 把人给的文件夹路径洗净成安全的相对路径（"a/b" 形状）。
  * 每段都得是正经名字：不为空、不是 . 或 ..、不带控制字符和路径分隔符、
  * 长度有限、层级有限 —— 路径是拿去拼 R2 key 的，这里不干净，

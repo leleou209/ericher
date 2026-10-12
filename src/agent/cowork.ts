@@ -43,6 +43,7 @@ import {
   type ResolvedModel,
 } from "../providers";
 import {
+  AI_AUTHOR,
   addComment,
   commentCounts,
   ensureFeedbackSchema,
@@ -55,6 +56,17 @@ import {
   type CommentRow,
   type VoteValue,
 } from "./feedback";
+import { newerViewWins } from "./lastView";
+import {
+  ensureEventSchema,
+  formatEventAt,
+  hasRecentEvent,
+  insertEvent,
+  listPendingEvents,
+  markEventsDelivered,
+  pruneEvents,
+  type LedgerEvent,
+} from "./events";
 import {
   DEFERRED_TOOLS,
   PROMOTE_CAP,
@@ -107,9 +119,11 @@ import {
   ensureSessionSchema,
   getSession,
   getSessionDigest,
+  getSessionGoal,
   insertRecallIndexRows,
   insertSession,
   listPublicSessions,
+  listSessionTasks,
   listSessions,
   loadSessionMessages,
   markSessionRead,
@@ -119,16 +133,19 @@ import {
   renameSession,
   resetLegacyRecapCursors,
   saveSessionMessages,
+  saveSessionTasks,
   searchMessages,
   searchRecallIndex,
   setSessionArchived,
   setSessionDigest,
+  setSessionGoal,
   setSessionPinned,
   setSessionVisibility,
   touchSession,
   type RecallHit,
   type RecallIndexRow,
   type SessionMeta,
+  type SessionTask,
   type SessionVisibility,
 } from "./sessionStore";
 import {
@@ -159,6 +176,7 @@ import {
   quietEndsAt,
 } from "./speakGate";
 import {
+  COMMON_TYPE_ID,
   createGuestType as createGuestTypeRow,
   ensureGuestTypesSchema,
   findGuestTypeByPassword,
@@ -168,6 +186,7 @@ import {
   toGuestTypeInfo,
   toGuestTypePublic,
   updateGuestType as updateGuestTypeRow,
+  defaultCommonGuestTypeInfo,
   disabledGuestTypeInfo,
   guestHasTool,
   type GuestTypeInfo,
@@ -177,7 +196,6 @@ import {
   type GuestTypeRow,
 } from "./guestTypes";
 import {
-  COMMON_TYPE_ID,
   createUserCard,
   getUserCard,
   listUserCards,
@@ -252,6 +270,20 @@ import {
   type SearchConfig,
 } from "./searchConfigs";
 import {
+  defaultTheme,
+  deleteThemeSet,
+  ensureThemeSchema,
+  getThemeSet,
+  insertThemeSet,
+  listThemeSets,
+  loadTheme,
+  patchTheme as patchThemeRow,
+  saveTheme,
+  type ThemeConfig,
+  type ThemeConfigPatch,
+  type ThemeSet,
+} from "./themeConfig";
+import {
   deleteNote as deleteNoteRow,
   ensureNoteSchema,
   getNote,
@@ -288,7 +320,6 @@ import {
   toolGuide,
 } from "./prompt";
 import {
-  GUEST_TOGGLABLE_TOOLS,
   guestEnabledTools,
   toolCatalog,
   type ToolCatalog,
@@ -335,7 +366,9 @@ import {
   type SqlTag,
   SENSITIVITIES,
   type Task,
+  type TurnError,
 } from "./state";
+import { appendTurnError, describeTurn, type TurnCapture } from "./turnReport";
 
 /** 闲置超过这个时长就认为是一段新关系，清掉旧对话 */
 const IDLE_RESET_MS = 30 * 24 * 60 * 60 * 1000;
@@ -568,6 +601,11 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   get fixedSessionId(): string | null {
     const owner = ownerRoomOf(this.name);
     return owner === null ? null : this.name.slice(owner.length + 2);
+  }
+
+  /** 这一轮归属的会话 id：场屋用屋名里钉死的那场，人屋用当前 activeSession。 */
+  private currentSessionId(): string {
+    return this.fixedSessionId || this.state.activeSession || "";
   }
 
   /**
@@ -843,30 +881,30 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   /**
    * 现查一档的对外快照。票里声称的档位每次核对都以这一趟为准：
-   * common 是内置通用档（名册里没这一页），就地给全开快照；
+   * 内置通用档（common）也是名册里真实的一行，照常现查 —— 管理员关掉的东西
+   * 从下一轮起就真的没有；只是主人那间读不到时落全开兜底（它是门口最后一把
+   * 钥匙，不能因为一次抖动把进门的人锁死）。
    * 其它档查不到、或主人那间没醒，返回失效兜底（权益全关）——
    * 核实不了的一档不能当成「还在」放行，否则删一档类型等于全员放开。
    */
   private async currentGuestType(typeId: string): Promise<GuestTypeInfo> {
-    if (typeId === COMMON_TYPE_ID) {
-      return {
-        id: COMMON_TYPE_ID,
-        name: "通用来客",
-        note: "",
-        // 内置通用档全开：能单独开关的都开上，恒开的那些本来就不在清单里
-        tools: [...GUEST_TOGGLABLE_TOOLS],
-        permNotes: true,
-        permFiles: true,
-        permPublic: true,
-      };
-    }
+    const fallback =
+      typeId === COMMON_TYPE_ID
+        ? defaultCommonGuestTypeInfo()
+        : disabledGuestTypeInfo(typeId);
     try {
+      // 名册在主人那间。本尊直接读本地的表；主人的场屋（default--sX 也满足
+      // isOwnerRoom）读的会是自己的空表，所以这里的门槛必须是「就是主屋本尊」。
+      if (this.name === OWNER_AGENT) {
+        const row = getGuestType(this.db, typeId);
+        return row ? toGuestTypeInfo(row) : fallback;
+      }
       const owner = this.env.COWORK_AGENT.get(
         this.env.COWORK_AGENT.idFromName(OWNER_AGENT),
       );
-      return (await owner.getTypeInfo(typeId)) || disabledGuestTypeInfo(typeId);
+      return (await owner.getTypeInfo(typeId)) || fallback;
     } catch {
-      return disabledGuestTypeInfo(typeId);
+      return fallback;
     }
   }
 
@@ -982,6 +1020,14 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     this.notesReady = true;
   }
 
+  /** 同 feedback：事件台账也可能建在旧实例上，用到的地方先过一遍 */
+  private eventsReady = false;
+  private ensureEvents(): void {
+    if (this.eventsReady) return;
+    ensureEventSchema(this.db);
+    this.eventsReady = true;
+  }
+
   async onStart(): Promise<void> {
     ensureMemorySchema(this.db);
     this.ensureFeedback();
@@ -989,6 +1035,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     this.ensureReminders();
     this.ensureSpeak();
     this.ensureNotes();
+    this.ensureEvents();
     installRuntime(this);
     installMigration(this);
     // DO 的 state 是持久化 blob，新增字段不会自动补齐到老实例上。
@@ -1100,19 +1147,15 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
     // 多档来客：票里带着档位 id（v2/v3 票）。快照每次连接都现查 ——
     // 只在「档位 id 变了」才查的话，管理员调低权益后，旧房间还揣着旧快照照常用。
-    // 查不到 / 停用 / 查询失败都落失效兜底（currentGuestType 内裁决）。
-    // 没带档位的普通来客票本来就是全开基线；但票从有档位换成没有时，
-    // 旧快照得清掉 —— 留着就成了上一张票的权益在给这一场授权。
+    // 查不到 / 停用 / 查询失败都落兜底（currentGuestType 内裁决）。
+    // 没带档位的票（拿前台门禁口令进来的）归内置通用档：它现在也是名册里的
+    // 一行，从前的「全开基线」是这一档种入时的缺省值，管理员可以按件收紧。
     if (role === "user") {
-      if (!info.type) {
-        if (this.state.guestTypeId)
-          this.patchState({ guestTypeId: "", guestType: undefined });
-      } else {
-        this.patchState({
-          guestTypeId: info.type,
-          guestType: await this.currentGuestType(info.type),
-        });
-      }
+      const typeId = info.type || COMMON_TYPE_ID;
+      this.patchState({
+        guestTypeId: typeId,
+        guestType: await this.currentGuestType(typeId),
+      });
     }
 
     // 来客进门留痕，顺手到主人那间报个到（名册，见 visitor.ts）。
@@ -1202,6 +1245,27 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   patchState(patch: Partial<ChatState>): void {
     this.setState({ ...this.state, ...patch });
+  }
+
+  /**
+   * 记下「他最后看的是哪间屋、哪一场」—— 只由人屋持有（见 state.ts 的 lastRoom 注释）。
+   * 多端登录时人屋先连上，前端读这两格把新开的设备送回最后那一间；
+   * 少了它，每台设备刷新都落回人屋默认场，AB 两端各看各的。
+   * room/session 都空时照清：等于「没在看特定的一场」。
+   *
+   * at 是前端在动作发生的那一刻打的时间戳。多端各自都会来写，这里只收更晚的那笔 ——
+   * 慢半拍才到的那条、旧设备内存里揣着的时刻，都不该把已经记下的新状态顶回去。
+   * at 缺省（0 / 非法）时回落到「此刻」，兼容老前端没带这格的请求。
+   */
+  setLastView(room: string, session: string, at: number): ChatState {
+    const when = Number.isFinite(at) && at > 0 ? Math.floor(at) : Date.now();
+    if (!newerViewWins(this.state.lastViewAt ?? 0, when)) return this.state;
+    this.patchState({
+      lastRoom: room || "",
+      lastSession: session || "",
+      lastViewAt: when,
+    });
+    return this.state;
   }
 
   /** 上一次把 lastActive 落库的时刻（内存态，判据见 LAST_ACTIVE_FLUSH_MS） */
@@ -1555,6 +1619,10 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     this.thinker.end();
     // 先把悬空的工具调用收干净，历史、界面、下一轮 API 三边才对得上
     await this.healDanglingToolCalls();
+    // 这一轮断没断、为什么断：把采集到的原始死因翻成人话写进 state.turnErrors。
+    // 借 setState 同时做到「落库」与「实时同步」—— 刷新、换设备都还看得到，
+    // 界面上按 messageId 挂在那一轮的回答下面（见 web 的 TurnErrorCard）。
+    this.reportTurnError(result);
     // 统计和额度都在这儿收口：一轮写一次，而不是每条语句、每次工具调用写一次
     this.flushToolStats();
     // 状态原样进日志：aborted（连接/客户端叫停）和 skipped（切会话推进代际）
@@ -1579,6 +1647,36 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       // 但绝不能让管理员等 —— 丢进 waitUntil，名字晚半拍出现就是了。
       this.ctx.waitUntil(this.nameSession().catch(() => {}));
     }
+  }
+
+  /**
+   * 把这一轮的原始死因翻成人话，追加进 state.turnErrors。
+   *
+   * 采集点见 onChatMessage：流级 onError、abortSignal、onFinish 的 finishReason。
+   * 三个都只在 console 里留过痕，界面上一片干净 —— 人只看到「没跑完」，
+   * 于是「工具链是不是坏了」永远只能靠猜。这里让死因上桌：title 说是什么事、
+   * detail 说怎么办、raw 是给开发者的原始报文（界面折叠，管理员可展开）。
+   *
+   * 全正常（completed 且没截断）时 describeTurn 返回 null，这里一个字都不写。
+   */
+  private reportTurnError(result: ChatResponseResult): void {
+    const desc = describeTurn({
+      status: result.status,
+      capture: this.turnCapture,
+    });
+    // 消费掉：这一轮的死因不能漏进下一轮
+    this.turnCapture = null;
+    if (!desc) return;
+    const entry: TurnError = {
+      // 断在还没吐出任何内容时消息没落库，messageId 留空 —— 界面按尾部落单条告警
+      messageId: result.message?.id ?? "",
+      sessionId: this.state.activeSession,
+      at: Date.now(),
+      ...desc,
+    };
+    this.patchState({
+      turnErrors: appendTurnError(this.state.turnErrors, entry),
+    });
   }
 
   /**
@@ -2252,8 +2350,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
    *
    * 这句话属于「当初约定它的那一场」：他正开着那一场就直接进对话流；他在别处，
    * 就只写进那场的历史，等他切回去看得到 —— 硬塞进当前会话等于打断他正在聊的事。
-   * 另外不管在哪都广播一条 notice，在线的他能立刻感到「她是真的记着」，
-   * 而不是事后翻记录才发现。
+   * 除了这两条路，哪一场都不进：那场已经被删了的话，宁可丢这一句，连 notice 也不发 ——
+   * 局部的事不该串到别场去，串过去只会让人莫名其妙。丢的只是这句话本身，
+   * 提醒自己的账照记（fireReminder / flushSays 该走的收尾一步不少），不影响别的提醒。
    */
   private async speak(sessionId: string, line: string): Promise<void> {
     const msg: UIMessage = {
@@ -2269,8 +2368,10 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       appendSessionMessage(this.db, sessionId, msg);
       touchSession(this.db, sessionId, new Date().toISOString());
     } else {
-      // 那场会话被删了，但话还是得说出口
-      await this.persistMessages([...this.messages, msg]);
+      // 那场会话已经删了：这句话不落到任何一场头上。原先这里会塞进当前对话，
+      // 结果就是一句本属于别场的话凭空冒出来（串场）。宁可丢，不串。
+      console.warn("[speak] 目标会话已删，这句话不落任何一场", { sessionId });
+      return;
     }
     this.notify(line.slice(0, 140));
   }
@@ -2416,7 +2517,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   async maintenance(system: string, user: string): Promise<string> {
-    return this.quick(this.maintModel(), system, user);
+    return this.quick(await this.resolveMaintModel(), system, user);
   }
 
   /**
@@ -2598,6 +2699,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     onFinish: StreamTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions,
   ): Promise<Response | undefined> {
+    // 新一轮新账：先把上一轮的死因攒批清空 —— 这一轮要是又断了，记的是这一轮的真相
+    this.turnCapture = null;
     // 来客限速：一分钟窗口内最多 15 条。正常聊天远够不到这条线——
     // 够得到的不是聊天，是拿管理员的钱包刷存在感。超限不调模型、不落库，
     // 广播一条 notice 请对方缓一缓（消息不进历史，这提示本来就是一次性的）。
@@ -2655,6 +2758,10 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     if (guest) {
       this.beginVisitorBatch();
       if (userText) this.logVisitor("message", userText);
+      // 来客说的话也往主人那间记一笔全局账：他正忙别的场时也该知道有人说话了。
+      // 同一屋 30 分钟内只记一条，连着聊不至于刷屏。
+      if (userText)
+        this.forwardGuestGlobalEvent("visitor-message", userText, 30 * 60_000);
     }
     // 开一轮「她正在想什么」。号要留着，收尾时认得出飘过来的是不是这一轮
     const turn = this.thinker.begin(userText);
@@ -2758,9 +2865,12 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       "\n\n## 现在的时间\n现在是北京时间 " +
       nowInShanghai() +
       "。他说的「今天」「明天」「下周」都以此为参照；写进提醒的绝对时刻带 +08:00 偏移。";
+    // 刚发生过的事（评论 / 来客动静）：写一次、报一次、报过划掉 —— 见 events.ts
+    const eventsText = await this.eventsBlock();
     const systemTail =
       clockBlock +
       digestBlock(view.digest) +
+      this.sessionPlanBlock() +
       memoryBlock +
       publicBlock +
       doubtBlock +
@@ -2768,6 +2878,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       this.noteBlock() +
       this.flaggedBlock() +
       this.feedbackBlock() +
+      eventsText +
       this.identityBlock();
 
     const messages = pruneMessages({
@@ -2796,13 +2907,17 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       "abort",
       () => {
         const why = options?.abortSignal?.reason;
+        const reason =
+          why instanceof Error
+            ? `${why.name}: ${why.message}`
+            : String(why ?? "(无 reason)");
         console.warn("[stream] 轮次被叫停", {
           session: turnSession,
-          reason:
-            why instanceof Error
-              ? `${why.name}: ${why.message}`
-              : String(why ?? "(无 reason)"),
+          reason,
         });
+        // 死因攒批：轮尾翻成人话写进 state.turnErrors，界面上才看得见「为什么停」，
+        // 而不是只剩一个「中断」的状态字
+        this.turnCapture = { kind: "aborted", abortReason: reason };
       },
       { once: true },
     );
@@ -2843,6 +2958,11 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
           },
         });
         this.logCacheHit(r.usage);
+        // 输出顶到上限被截断：这一轮 status 仍是 completed，只有 finishReason 认得出。
+        // 记下来，轮尾翻成红色卡片 —— 不然「话说到一半就停」永远查无实据。
+        // 只在没别的死因时才记：流级错误优先级更高，别被 length 盖掉
+        if (r.finishReason === "length" && !this.turnCapture)
+          this.turnCapture = { kind: "output-limit" };
         return onFinish(r);
       },
       // 「她正在想什么」只记不发：这里回调期间流是停着的，一次模型调用就能把整轮拖住
@@ -2859,6 +2979,10 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
           url?: string;
           responseBody?: unknown;
         };
+        const body =
+          typeof e?.responseBody === "string"
+            ? e.responseBody.slice(0, 1500)
+            : JSON.stringify(e?.responseBody ?? null).slice(0, 1500);
         console.error(
           "[stream] 流级错误：",
           `${e?.name ?? "Error"}: ${e?.message ?? String(error)}`,
@@ -2867,10 +2991,18 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
           "| url=",
           e?.url ?? "(无)",
           "| body=",
-          typeof e?.responseBody === "string"
-            ? e.responseBody.slice(0, 1500)
-            : JSON.stringify(e?.responseBody ?? null).slice(0, 1500),
+          body,
         );
+        // 死因攒批：这一轮的流级死亡同样只进过 console，界面上人只看到「没跑完」。
+        // 原文留在这里，轮尾翻成人话 + 可展开的原始死因
+        this.turnCapture = {
+          kind: "stream-error",
+          name: e?.name ?? "Error",
+          message: e?.message ?? String(error),
+          statusCode: e?.statusCode,
+          url: e?.url,
+          body,
+        };
       },
       // 输出上限跟着生效的配置走 —— 每家厂商的墙不一样高，管理员按自己那家填。
       // 没配就回到 32K：兼容层不认识 DeepSeek 这类第三方模型名，会兜底限到 4096
@@ -2999,6 +3131,48 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
+   * 本场计划：这一场要干什么（目标），以及排了哪几步。
+   *
+   * 和上一段 taskBlock 不是一回事，别混：那个是跨会话的全局待办（state.tasks），
+   * 这个是这一场自己的（sessions.goal + session_tasks 表，按会话 id 定位）。
+   * 放在 digest 后面是有意的：digest 回头看这场聊过什么，它向前看这场要做什么 ——
+   * 同一层的两半，挨着放。
+   *
+   * 两块都空的时候整段不出：一个空的「本场目标」标题只会占位置、烧 token，
+   * 还会把它变成一句每轮都出现的空话 —— 那正好抵消了它「把注意力钉住」的用处。
+   */
+  private sessionPlanBlock(): string {
+    // 只在主人那间出：场屋是主人的，来客那间没有「这一场要办成什么」
+    if (!this.isOwnerRoom) return "";
+    const id = this.state.activeSession;
+    if (!id) return "";
+    this.ensureSessions();
+    try {
+      const goal = getSessionGoal(this.db, id);
+      const tasks = listSessionTasks(this.db, id);
+      if (!goal && !tasks.length) return "";
+      const parts: string[] = [];
+      if (goal) parts.push("## 本场目标\n" + goal);
+      if (tasks.length)
+        parts.push(
+          "\n## 本场步骤（" +
+            tasks.length +
+            "）\n" +
+            tasks
+              .map(
+                (t) =>
+                  `${t.status === "doing" ? "🔄" : t.status === "done" ? "✅" : "📋"} ${t.title}`,
+              )
+              .join("\n"),
+        );
+      return "\n\n" + parts.join("\n");
+    } catch {
+      // 锦上添花：表没补好之类的问题，不该让这一轮说不了话
+      return "";
+    }
+  }
+
+  /**
    * 他此刻翻着的那一篇笔记。
    *
    * 这一段是笔记本这个功能真正值钱的地方：没有它，他每次都得先说清「我说的是哪一篇」，
@@ -3041,14 +3215,13 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   /**
    * 把管理员的赞踩汇成行为信号注入提示词：被赞的方向多走，被踩的方向避开。
-   * 评论正文不在这里 —— 只报条数，让 ericher 自己用 feedback 工具去读。
+   * 评论不在这里了 —— 它按「发生一次、带时刻、报过划掉」走事件台账（见 eventsBlock），
+   * 不再每轮重报条数，也就不会把别场的评论糊到这一场眼前。
    */
   private feedbackBlock(): string {
     this.ensureFeedback();
     const totals = voteTotals(this.db).filter((t) => t.up > 0 || t.down > 0);
-    const comments = commentCounts(this.db).slice(0, 5);
-    if (!totals.length && !comments.length) return "";
-
+    if (!totals.length) return "";
     const text = new Map(
       this.messages.map((m) => [m.id, messageText(m).slice(0, 100)]),
     );
@@ -3061,12 +3234,116 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       const s = text.get(t.messageId);
       if (s) lines.push(`👎 我这样答他不满意，别再走这个方向：${s}`);
     }
-    for (const c of comments) {
-      lines.push(
-        `💬 有一条消息下他留了 ${c.n} 条评论（id ${c.messageId}），想看就用 feedback 工具 action=read 去读`,
+    if (!lines.length) return "";
+    return "\n\n## 用户的赞踩（我自己的行为信号）\n" + lines.join("\n");
+  }
+
+  /**
+   * 刚发生的事：评论（local）+ 来客动静（global），各报一次、带时刻。
+   * 报过就划掉 —— 不重复刷；local 只认本会话 —— 不串场。
+   */
+  private async eventsBlock(): Promise<string> {
+    this.ensureEvents();
+    const local = listPendingEvents(
+      this.db,
+      "local",
+      this.currentSessionId(),
+      8,
+    );
+    if (local.length) {
+      markEventsDelivered(
+        this.db,
+        local.map((e) => e.id),
       );
+      pruneEvents(this.db);
     }
-    return "\n\n## 用户的赞踩与评论（我自己的行为信号）\n" + lines.join("\n");
+    const globals = await this.pullGlobalEvents();
+    const all = [...globals, ...local];
+    if (!all.length) return "";
+    const lines = all.map((e) => `· ${formatEventAt(e.at)}　${e.text}`);
+    return (
+      "\n\n## 刚发生的事（每条只报一次，报过就不再提）\n" +
+      "这些是我在忙别处时发生的，现在一件件告诉你；回不回应、怎么回应都由你判断，不必条条都答。\n" +
+      lines.join("\n")
+    );
+  }
+
+  /** 全局待报的账：主屋本尊就地取，主的场屋向主屋要一眼，来客那间不看。 */
+  private async pullGlobalEvents(): Promise<LedgerEvent[]> {
+    if (!this.isOwnerRoom) return [];
+    const owner = ownerRoomOf(this.name);
+    if (!owner) return this.takeGlobalEvents();
+    try {
+      return await this.env.COWORK_AGENT.get(
+        this.env.COWORK_AGENT.idFromName(owner),
+      ).takeGlobalEvents();
+    } catch {
+      return []; // 主屋没醒：这轮先不知道，账还在，下轮再取
+    }
+  }
+
+  /** 主屋本尊把全局待报的账一次取走并划掉 —— 取一次算一次，不重复刷。 */
+  async takeGlobalEvents(): Promise<LedgerEvent[]> {
+    if (!this.isOwnerRoom) return [];
+    this.ensureEvents();
+    const rows = listPendingEvents(this.db, "global", "", 8);
+    if (rows.length) {
+      markEventsDelivered(
+        this.db,
+        rows.map((e) => e.id),
+      );
+      pruneEvents(this.db);
+    }
+    return rows;
+  }
+
+  /**
+   * 收来客那间寄来的全局账。同一屋、同一类动静在窗口内只留一条 ——
+   * 断线重连、一口气连发都不该在主人那边刷屏。只收进主屋本尊。
+   */
+  async acceptGlobalEvent(input: {
+    ref?: string;
+    kind?: string;
+    text?: string;
+    dedupeMs?: number;
+  }): Promise<void> {
+    if (!this.isOwnerRoom || ownerRoomOf(this.name)) return;
+    const ref = String(input?.ref || "").slice(0, 80);
+    const kind = String(input?.kind || "").slice(0, 40);
+    if (!ref || !kind) return;
+    this.ensureEvents();
+    const within = Math.max(0, Number(input?.dedupeMs) || 0);
+    if (within && hasRecentEvent(this.db, "global", ref, kind, within)) return;
+    const text = String(input?.text || "")
+      .trim()
+      .slice(0, 200);
+    if (!text) return;
+    insertEvent(this.db, { scope: "global", ref, kind, text });
+    pruneEvents(this.db);
+  }
+
+  /**
+   * 来客的动静往主人那间记一笔全局账：他正忙别的场时也该知道有人来了、说话了。
+   * 记不上（主屋没醒）不影响接待、也不重试 —— 这不是账本本体的那一份。
+   */
+  private forwardGuestGlobalEvent(
+    kind: string,
+    detail: string,
+    dedupeMs: number,
+  ): void {
+    const room = ownerRoomOf(this.name) ?? this.name;
+    const who = this.state.guestName
+      ? `「${this.state.guestName}」`
+      : "一位来客";
+    const text =
+      kind === "visitor-join"
+        ? `${who}刚到了接待台。`
+        : `${who}说了一句：${detail.slice(0, 60)}`;
+    void this.env.COWORK_AGENT.get(
+      this.env.COWORK_AGENT.idFromName(OWNER_AGENT),
+    )
+      .acceptGlobalEvent({ ref: room, kind, text, dedupeMs })
+      .catch(() => {});
   }
 
   /** 给每个工具的 execute 包一层，记录调用次数 / 成功率 / 耗时 */
@@ -3405,6 +3682,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       if (key in patch) next[key] = patch[key];
     }
     this.patchState(next as Partial<ChatState>);
+    // 深度思考槽位的指派变了：场屋手里还捏着按旧指派取的目录，
+    // 就地作废，换完下一句话就生效（不用等 30 秒缓存过期）
+    if ("deepConfigId" in next) this.invalidateCatalogCaches();
     return this.state;
   }
 
@@ -3638,6 +3918,50 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   deleteNote(id: string): boolean {
     this.ensureNotes();
     return deleteNoteRow(this.db, id);
+  }
+
+  // ── 本场计划：这一场的目标与步骤 ──
+  // 路由那边和笔记一样是 admin-only（没进 USER_ROUTES），来客碰不到。
+  // 与笔记的区别是数据按 session_id 存，不按屋子存 —— 一间屋能装好几场。
+
+  /**
+   * 只读一份本场计划，不落库、不改指向（读路径不建行，同会话那一套的规矩）。
+   * session 缺省时读当前这一场：场屋的当前这一场就是它自己那一场。
+   */
+  sessionPlan(session?: string): { goal: string; tasks: SessionTask[] } {
+    this.ensureSessions();
+    const id = (session || "").trim() || this.state.activeSession;
+    if (!id) return { goal: "", tasks: [] };
+    return {
+      goal: getSessionGoal(this.db, id),
+      tasks: listSessionTasks(this.db, id),
+    };
+  }
+
+  /**
+   * 写本场计划：给了哪一格就写哪一格。写完递增 planRev，
+   * 前端看它变了就重拉一次（内容在表里，state 只带信号）。
+   *
+   * 本屋没有这一行时直接报错，不顺手补一行：建行只有聊天入口
+   * （ensureRealSession）有权做，不然「新会话」按钮每按一次就多一行空会话。
+   */
+  saveSessionPlan(input: {
+    session?: string;
+    goal?: string;
+    tasks?: SessionTask[];
+  }): { goal: string; tasks: SessionTask[] } {
+    this.ensureSessions();
+    const id = (input.session || "").trim() || this.state.activeSession;
+    if (!id) return { goal: "", tasks: [] };
+    if (!getSession(this.db, id))
+      throw new Error("这一场还没开始（还没有消息），先说一句话再定本场计划");
+    if (typeof input.goal === "string") setSessionGoal(this.db, id, input.goal);
+    if (Array.isArray(input.tasks)) saveSessionTasks(this.db, id, input.tasks);
+    this.patchState({ planRev: (this.state.planRev ?? 0) + 1 });
+    return {
+      goal: getSessionGoal(this.db, id),
+      tasks: listSessionTasks(this.db, id),
+    };
   }
 
   /**
@@ -3878,6 +4202,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       ownerRoomOf(this.name) ?? this.name,
       this.state.guestName || "",
     );
+    // 顺手在主人那间记一笔全局账：他正忙别的场时也该知道有人到了。
+    // 同一屋 6 小时内只记一条 —— 重连不该在主人那边刷屏。
+    this.forwardGuestGlobalEvent("visitor-join", "", 6 * 3600_000);
   }
 
   /** 主人那间收名册。远程调用只写自己那张表，不碰任何来客的屋子。 */
@@ -4307,9 +4634,12 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   ): Promise<boolean> {
     const card = getUserCard(this.db, cardId);
     if (!card) return false;
-    if (card.typeId === COMMON_TYPE_ID) return true;
+    // 档位权益现查名册（内置通用档也在名册里，管理员关掉就真的关掉）
     const row = getGuestType(this.db, card.typeId);
-    return row ? row[perm] : false;
+    if (row) return row[perm];
+    // 兜底分两路：内置档的行缺失（异常）时维持历史全开 —— 那是门口最后一把
+    // 钥匙，不能把在场的长期客人锁在门外；别的档核实不了就按没有算。
+    return card.typeId === COMMON_TYPE_ID;
   }
 
   /**
@@ -4375,7 +4705,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   ): Promise<{ provider: ModelProvider; entry: ModelEntry | null }> {
     if (!this.isOwnerRoom) throw new Error("模型配置只在主人那间维护");
     this.ensureModelConfigs();
-    return createModelProvider(this.db, input);
+    const r = createModelProvider(this.db, input);
+    this.invalidateCatalogCaches();
+    return r;
   }
 
   /** 改一家供应商：字段缺省不动。没这家返回 null。 */
@@ -4385,7 +4717,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   ): Promise<ModelProvider | null> {
     if (!this.isOwnerRoom) throw new Error("模型配置只在主人那间维护");
     this.ensureModelConfigs();
-    return updateModelProvider(this.db, id, patch);
+    const r = updateModelProvider(this.db, id, patch);
+    this.invalidateCatalogCaches();
+    return r;
   }
 
   /** 删一家供应商（连同名下条目）。深度思考槽位若指向被删的条目，就地清空。 */
@@ -4403,6 +4737,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       doomed.includes(this.state.deepConfigId)
     )
       this.patchState({ deepConfigId: "" });
+    this.invalidateCatalogCaches();
     return ok;
   }
 
@@ -4415,7 +4750,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }): Promise<ModelEntry> {
     if (!this.isOwnerRoom) throw new Error("模型配置只在主人那间维护");
     this.ensureModelConfigs();
-    return createModelEntry(this.db, input);
+    const r = createModelEntry(this.db, input);
+    this.invalidateCatalogCaches();
+    return r;
   }
 
   /** 改一个模型条目（模型名 / 输出上限 / 设为生效）。没这条返回 null。 */
@@ -4425,7 +4762,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   ): Promise<ModelEntry | null> {
     if (!this.isOwnerRoom) throw new Error("模型配置只在主人那间维护");
     this.ensureModelConfigs();
-    return updateModelEntry(this.db, id, patch);
+    const r = updateModelEntry(this.db, id, patch);
+    this.invalidateCatalogCaches();
+    return r;
   }
 
   /** 删一个模型条目。删的是生效条目时，modelConfigs.ts 会把最新的另一条顶上来。 */
@@ -4436,13 +4775,17 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     // 深度思考槽位若指着这条被删的，就地清空 —— 退回「跟普通模式同一套」
     if (ok && this.state.deepConfigId === id)
       this.patchState({ deepConfigId: "" });
+    this.invalidateCatalogCaches();
     return ok;
   }
 
   /**
    * 普通模式生效的那组（条目 + 供应商）。无守卫 —— 来客那间的对话也要按这些建模。
+   * fromRoom 是来取的那间屋（跨间 RPC 带上自己的名字）：记着它，
+   * 目录一改就推它作废缓存（见 invalidateCatalogCaches）。
    */
-  async activeCatalog(): Promise<ActiveCatalog | null> {
+  async activeCatalog(fromRoom?: string): Promise<ActiveCatalog | null> {
+    this.noteServedRoom(fromRoom);
     this.ensureModelConfigs();
     return getActiveCatalog(this.db);
   }
@@ -4452,7 +4795,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
    * （state.deepConfigId），指派已失效（条目被删）就退回普通模式那组 ——
    * 换个槽位不该把深度思考弄挂。同样无守卫。
    */
-  async deepCatalog(): Promise<ActiveCatalog | null> {
+  async deepCatalog(fromRoom?: string): Promise<ActiveCatalog | null> {
+    this.noteServedRoom(fromRoom);
     this.ensureModelConfigs();
     const id = this.state.deepConfigId;
     if (id) {
@@ -4460,6 +4804,34 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       if (cat) return cat;
     }
     return getActiveCatalog(this.db);
+  }
+
+  /** 记一笔「这间屋来取过目录」。只存名字，内存态 —— 丢了也就少推一次作废 */
+  private noteServedRoom(fromRoom?: string): void {
+    if (fromRoom && fromRoom !== this.name) this._catalogServedRooms.add(fromRoom);
+  }
+
+  /** 主屋推来的：目录/指派变了，手里那 30 秒缓存作废，下一句话重取 */
+  dropCatalogCache(): void {
+    this._activeCatalog.clear();
+  }
+
+  /**
+   * 目录一改就推给来问过的那几间作废缓存 —— 换模型、换指派要像其他设置
+   * 一样即改即生效，不能让人对着面板干等缓存过期。推不动不碍事：
+   * 缓存 30 秒后自己过期，最多就是某间屋多用一会儿旧目录。
+   */
+  private invalidateCatalogCaches(): void {
+    for (const room of this._catalogServedRooms) {
+      try {
+        const stub = this.env.COWORK_AGENT.get(
+          this.env.COWORK_AGENT.idFromName(room),
+        );
+        void stub.dropCatalogCache().catch(() => {});
+      } catch {
+        // 这间屋拿不到就随它去，别为一次作废把目录写入弄挂
+      }
+    }
   }
 
   // ── 读音配置（tts_configs，见 ttsConfigs.ts）──────────────────
@@ -4604,6 +4976,81 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     }
   }
 
+  // ── 全局美术主题（theme_config，见 themeConfig.ts）───────────
+  // 皮肤/名字头像/弹页/主题包全在这份文档里。**读全局可见**（门口/Gate 也要
+  // 看得到皮肤），写只有管理员（路由层总闸 + 这里的 isOwnerRoom 守卫）。
+  // 表归主人那间：场屋/来客那间要读时隔着 DO 取（fetchTheme），取不到回落
+  // 出厂主题，界面照常不塌。
+
+  private ensureTheme(): void {
+    ensureThemeSchema(this.db);
+  }
+
+  /** 读主题（本库）。loadTheme 自己回落出厂，读路径永远不许抛 */
+  async getTheme(): Promise<ThemeConfig> {
+    this.ensureTheme();
+    return loadTheme(this.db);
+  }
+
+  /** 局部改主题。字段缺省不动。只有管理员能碰（路由层总闸已拦） */
+  async patchTheme(patch: ThemeConfigPatch): Promise<ThemeConfig> {
+    if (!this.isOwnerRoom) throw new Error("主题只在主人那间维护");
+    this.ensureTheme();
+    return patchThemeRow(this.db, patch);
+  }
+
+  /** 整份替换（装备主题包走这里） */
+  async replaceTheme(raw: unknown): Promise<ThemeConfig> {
+    if (!this.isOwnerRoom) throw new Error("主题只在主人那间维护");
+    this.ensureTheme();
+    return saveTheme(this.db, raw);
+  }
+
+  /**
+   * 场屋/来客那间取主人房的主题：跨间一趟，取不到回落出厂（界面照常）。
+   * RPC 暴露给场屋跨间调；REST 读主题直接点名主人房（agentStub 默认就它），
+   * 走不到这里。
+   */
+  async fetchTheme(): Promise<ThemeConfig> {
+    // 门槛用「主屋本尊」而不是 isOwnerRoom：场屋也是主人级，但配置表只在主屋库里
+    if (this.name === OWNER_AGENT) return this.getTheme();
+    try {
+      const owner = this.env.COWORK_AGENT.get(
+        this.env.COWORK_AGENT.idFromName(OWNER_AGENT),
+      );
+      return await owner.getTheme();
+    } catch {
+      return defaultTheme();
+    }
+  }
+
+  /** 自定义主题存档：列 / 存 / 查 / 删。和主题一样只归主人那间维护 */
+  async listThemeSets(): Promise<ThemeSet[]> {
+    this.ensureTheme();
+    return listThemeSets(this.db);
+  }
+
+  async addThemeSet(input: {
+    name: string;
+    packKey: string;
+    bytes: number;
+  }): Promise<ThemeSet> {
+    if (!this.isOwnerRoom) throw new Error("主题只在主人那间维护");
+    this.ensureTheme();
+    return insertThemeSet(this.db, input);
+  }
+
+  async getThemeSet(id: string): Promise<ThemeSet | null> {
+    this.ensureTheme();
+    return getThemeSet(this.db, id);
+  }
+
+  async removeThemeSet(id: string): Promise<ThemeSet | null> {
+    if (!this.isOwnerRoom) throw new Error("主题只在主人那间维护");
+    this.ensureTheme();
+    return deleteThemeSet(this.db, id);
+  }
+
   /** 新建一条读音配置。 */
   async addTtsConfig(input: TtsConfigInput): Promise<TtsConfig> {
     if (!this.isOwnerRoom) throw new Error("读音配置只在主人那间维护");
@@ -4634,8 +5081,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
    * 那组供应商的 key 没配进这台机器，就退回主线，深度思考降档但不掉线。
    *
    * 只有主屋本尊直接查自己的表；场屋（default--sXxx）和来客那间都隔着 DO 去主人房取，
-   * 取回来缓存 30 秒 —— 每句话都跑一趟跨间调用太贵，而目录是「改一次用很久」的东西，
-   * 改完最多等半分钟生效，面板上说明这一点比每句对话多一跳往返划算。
+   * 取回来缓存 30 秒 —— 每句话都跑一趟跨间调用太贵，而目录是「改一次用很久」的东西。
+   * 缓存不是死期：目录/指派一改，主屋点名推这间作废（dropCatalogCache），
+   * 换完下一句话就生效 —— 像其他设置一样即改即生效，不用等缓存过期。
    * 门槛必须是「主屋本尊」而不能是 isOwnerRoom：场屋也是主人级（isOwnerRoom 为真），
    * 但目录只活在主屋的库里 —— 场屋自己的表是空的（老场屋有老表迁移留下的存货，
    * 那是历史遗留不是保障），照着 isOwnerRoom 抄近路就会读到一张空表，新场屋句句 500。
@@ -4646,6 +5094,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     boolean,
     { at: number; cat: ActiveCatalog | null }
   >();
+  /** 来问过目录的屋名单（只主屋用）：目录一改就点名推它们作废缓存 */
+  private _catalogServedRooms = new Set<string>();
   /**
    * 最近一次取目录的结局说明（空串 = 没毛病）。只服务一件事：
    * resolveModel 整体失败时，500 的文案能说出真话 —— 是跨间调用挂了、
@@ -4680,7 +5130,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
           this.env.COWORK_AGENT.idFromName(OWNER_AGENT),
         );
         let cat: ActiveCatalog | null =
-          (await (deep ? owner.deepCatalog() : owner.activeCatalog())) || null;
+          (await (deep
+            ? owner.deepCatalog(this.name)
+            : owner.activeCatalog(this.name))) || null;
         // 深度那组的 key 没配：退回主线，别一头栽进 secrets 旧链
         if (deep && cat) {
           const key = (this.env as unknown as Record<string, unknown>)[
@@ -4716,6 +5168,13 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   private _resolved: ResolvedModel | null = null;
 
   /**
+   * 这一轮攒下的原始死因（流级错误 / 被叫停 / 输出被截断）。
+   * 三个采集点各写一部分，轮尾 onChatResponse 统一翻成人话写进 state.turnErrors。
+   * 开轮清零；一轮结束就消费掉（见 onChatResponse）。内存态，丢了也不影响历史。
+   */
+  private turnCapture: TurnCapture | null = null;
+
+  /**
    * 轮内记忆检索缓存：同轮同词的搜索复用一次向量查询的结果（Vectorize 按维度计费）。
    * 生命周期：onChatMessage 开头清一次；写记忆的工具执行时也会当场清 ——
    * 刚记下的话必须当场搜得到，这条永远比省一次查询重要。
@@ -4724,10 +5183,28 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   /**
    * 维护模型：优先用主对话解析出的那份；没开过聊（如夜间任务先跑）就回落 secrets 链。
-   * 回想（recap.ts）也走这道口 —— 那是后台记账，不值得动用主线那台按量计费的。
+   *
+   * 只给「轮内」用 —— 那一轮 onChatMessage 开头刚解析过，_resolved 一定在。
+   * 闹钟轮（回想、夜间整理、提醒）走 resolveMaintModel，别用这个。
    */
   maintModel(): LanguageModel | null {
     return this._resolved?.maintModel ?? maintenanceModel(this.env);
+  }
+
+  /**
+   * 维护模型的「冷唤醒」版：闹钟轮进来时实例是冷的，_resolved 为空，
+   * 同步那版只会回落旧链；而这台机器常常只在模型目录里配了模型
+   * （旧链 API_KEY / SK_MAINTENANCE 根本没配），回落结果就是 null ——
+   * 回想、夜间整理这类后台活会静默什么都不干，看着就像「从来没触发过」。
+   * 这里补一次目录解析，把模型从目录里读回来。
+   */
+  async resolveMaintModel(): Promise<LanguageModel | null> {
+    const hit = this.maintModel();
+    if (hit) return hit;
+    const resolved = await resolveModel(this.env, () =>
+      this.fetchActiveCatalog(false),
+    );
+    return resolved?.maintModel ?? null;
   }
 
   /** 投票。同值再投即取消。踩下去会触发一次自动反思。 */
@@ -4749,7 +5226,20 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   postComment(messageId: string, author: string, content: string): CommentRow {
     this.ensureFeedback();
-    return addComment(this.db, messageId, author, content);
+    const row = addComment(this.db, messageId, author, content);
+    // 他自己留的评论记一笔 local 账：下一轮他开口时我提一次，带时刻、说完就划掉。
+    // 我自己在评论区回的那句不记 —— 那本来就是我说的（走 feedback 工具，不经这里）。
+    if (author !== AI_AUTHOR) {
+      this.ensureEvents();
+      const who = author === "admin" ? "他" : "这位来客";
+      insertEvent(this.db, {
+        scope: "local",
+        sessionId: this.currentSessionId(),
+        kind: "comment",
+        text: `${who}在消息 [${row.messageId}] 下留了评论：${row.content.slice(0, 60)}`,
+      });
+    }
+    return row;
   }
 
   /**

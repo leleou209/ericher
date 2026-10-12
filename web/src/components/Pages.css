@@ -539,6 +539,14 @@
   font-family: var(--font-display);
   font-size: 15px;
   border-radius: var(--yuzhe-r-m);
+  overflow: hidden;
+}
+
+/* 主题给了头像就整格铺满，字形不上场 */
+.character-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .character-meta {
@@ -700,6 +708,20 @@
   color: var(--yuzhe-ink-faint);
 }
 
+/* 外挂分组的小标：不抢眼，只说明这一组不是常设部件 */
+.nav-beta {
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-s);
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--yuzhe-ink-faint);
+  vertical-align: 1px;
+}
+
 .nav-item {
   position: relative;
   display: flex;
@@ -773,7 +795,9 @@
 }
 
 .settings-content {
-  max-width: 760px;
+  /* 760 太瘦：宽屏下核心功能卡挤在中间，两侧全空。1080 让表单和
+     守则文本框摊开，窄于这个数的窗口不受影响（照旧全宽减内边距）。 */
+  max-width: 1080px;
   margin: 0 auto;
   padding: 30px 26px 72px;
 }

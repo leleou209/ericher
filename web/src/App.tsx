@@ -3,12 +3,22 @@ import { useAgentChat } from "@cloudflare/ai-chat/react";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import { api, type Role } from "./lib/api";
+import {
+  agentDisplay,
+  applyThemeToDocument,
+  defaultTheme,
+  ThemeContext,
+  useTheme,
+  type ThemeConfig,
+} from "./lib/theme";
 import {
   canDictate,
   canSpeak,
@@ -18,12 +28,14 @@ import {
   textOf,
 } from "./lib/speech";
 import { INITIAL_UI_STATE } from "./lib/types";
+import { resolveStartView } from "./lib/lastView";
 import type {
   AskEntry,
   Attachment,
   ChatState,
   LastUsage,
   SessionMeta,
+  SessionTask,
   SettingsKey,
   ThemeKey,
   UserCard,
@@ -38,6 +50,10 @@ import { NoteDrawer } from "./components/NoteDrawer";
 import { NotePage } from "./components/NotePage";
 import { SessionMemoryDrawer } from "./components/SessionMemoryDrawer";
 import { SessionMemoryPage } from "./components/SessionMemoryPage";
+import { SessionPlanBar } from "./components/SessionPlanBar";
+import { SessionPlanDrawer } from "./components/SessionPlanDrawer";
+import { ThemeBackdrop } from "./components/ThemeBackdrop";
+import { ThemePopups } from "./components/ThemePopups";
 import {
   Backdrop,
   ChatSidebar,
@@ -55,6 +71,14 @@ import {
  *          以前也要写一句话让他去调工具：白烧一轮 token，而且他回一句「好的，已切换」
  *          时状态未必真的变了 —— 人看到的是「他说切了」，实际上是没切。
  */
+/**
+ * 界面窗口的层高：消息列表只挂最近这一层的条数，往上翻到顶再放一层。
+ * 整段历史照旧躺在 SDK 的消息库里、照旧进模型上下文 —— 这里只管屏幕：
+ * 几百条一次性 mount，弱设备要画好几秒，看着像一段从上往下扫的「动画」，
+ * 其实是浏览器在逐段绘制。收成层，负载就封了顶。
+ */
+const MSG_WIN = 50;
+
 type Cmd = {
   name: string;
   label: string;
@@ -62,9 +86,26 @@ type Cmd = {
   icon: IconName;
   /** 访客也能用。不标就是主人专属：他手上没有那些工具，列出来才是骗人 */
   guest?: boolean;
+  /**
+   * 这条指令收不收行内参数，值是提示写的什么（如 /plan 后面那句话）。
+   * 有它，敲「名字 + 空格 + 内容」才认（见 submit）；没有，名字后面跟了字
+   * 就当正经说话，不吞。空指令（/plan 光着敲）永远认。
+   */
+  argHint?: string;
 } & (
   | { kind: "say"; text: string }
-  | { kind: "ui"; run: "deep" | "normal" | "new" | "ledger" }
+  | {
+      kind: "ui";
+      run:
+        | "deep"
+        | "normal"
+        | "new"
+        | "ledger"
+        | "plan"
+        | "memory"
+        | "tasks"
+        | "skills";
+    }
 );
 
 const COMMANDS: Cmd[] = [
@@ -82,24 +123,24 @@ const COMMANDS: Cmd[] = [
     label: "记忆库现状",
     desc: "多少条、都分布在哪些分类里",
     icon: "book-open",
-    kind: "say",
-    text: "统计一下记忆库现在有多少条，按分类说一下。",
+    kind: "ui",
+    run: "memory",
   },
   {
     name: "/tasks",
     label: "看看待办",
     desc: "列出当前的任务和各自的状态",
     icon: "clipboard",
-    kind: "say",
-    text: "列出我当前所有任务和状态。",
+    kind: "ui",
+    run: "tasks",
   },
   {
     name: "/skills",
     label: "技能配方",
     desc: "他保存下来的那些成套做法",
     icon: "layers",
-    kind: "say",
-    text: "列出我保存的全部技能配方。",
+    kind: "ui",
+    run: "skills",
   },
   {
     name: "/organize",
@@ -136,6 +177,15 @@ const COMMANDS: Cmd[] = [
     run: "normal",
   },
   {
+    name: "/plan",
+    label: "定本场目标",
+    desc: "只给这一场定目标，当场生效 —— 也可以直接写 /plan 要干什么",
+    icon: "flag",
+    kind: "ui",
+    run: "plan",
+    argHint: "要干什么",
+  },
+  {
     name: "/new",
     label: "开一场新对话",
     desc: "换个话题就换一场，旧的那场还留着",
@@ -165,6 +215,40 @@ const MOTION_KEY = "xm_motion";
 const THEME_KEY = "xm_theme";
 /** 访客介绍页的本机记号：进过一次，这台机器上就不再弹第二次 */
 const INTRO_KEY = "introDone";
+
+/**
+ * 本机记的「最后看的是哪间屋、哪一场」。按身份隔离存放 —— agent 名是按登录身份
+ * 派生的，换个人登进来就是另一间屋，不该被送去上一个人的场屋。
+ *
+ * 它是**开机直连**的依据：本机记着落点在某间场屋上，开机就直接连那间，省掉
+ * 「先连人屋、读到记录、再切过去」——那一下等于两次 Durable Object 冷启动，
+ * 部署后所有屋都是冷的，最贵的就是这一步。后端那份 lastRoom/lastSession 照旧
+ * 负责跨设备对齐，本地这份只是本机的先手；真失效了开机还会做一次兜底核对。
+ */
+const viewKey = (agentName: string) => `xm_lastview:${agentName}`;
+function readLocalView(agentName: string): { room: string; session: string } | null {
+  try {
+    const raw = localStorage.getItem(viewKey(agentName));
+    if (!raw) return null;
+    const o = JSON.parse(raw) as { room?: unknown; session?: unknown };
+    if (typeof o?.room !== "string" || typeof o?.session !== "string") return null;
+    return { room: o.room, session: o.session };
+  } catch {
+    return null;
+  }
+}
+function writeLocalView(agentName: string, room: string, session: string): void {
+  try {
+    localStorage.setItem(viewKey(agentName), JSON.stringify({ room, session }));
+  } catch {
+    /* 存不下就算了：只是少一次直连，功能不受影响 */
+  }
+}
+/** 开机落点：只认本机记录落在场屋上的那一种 —— 人屋上的老场不占这个便宜 */
+function localStartRoom(agentName: string): string {
+  const hint = readLocalView(agentName);
+  return hint && hint.room && hint.room !== agentName ? hint.room : agentName;
+}
 
 /** 待发的一份附件：已经传到云盘、也已经读好了，只等跟着这条消息一起发出去。
  *  file：能内联的那张图，留着原件，发消息时读成 data URL 随行（模型亲眼看原图）。 */
@@ -201,17 +285,27 @@ const readAsDataURL = (f: File): Promise<string> =>
  * 提问卡上的自写答案框：回车就当作对这条问题的回答发出去。
  * 以前自写答案要挪到底下的输入栏 —— 工作流断一次；现在当场写当场发。
  */
-function AskInlineInput({ onSend }: { onSend: (text: string) => void }) {
+function AskInlineInput({
+  onSend,
+  disabled,
+}: {
+  onSend: (text: string) => void;
+  /** 答案正在送：把它也锁上，免得同一张卡送出两份回答 */
+  disabled?: boolean;
+}) {
   const [draft, setDraft] = useState("");
   return (
     <div className="ask-inline">
       <input
         className="ask-inline-input"
         value={draft}
+        disabled={disabled}
         placeholder="自己写一句，回车就发"
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && draft.trim()) {
+          // isComposing 守卫：中文输入法按回车确认候选词时 key 也是 Enter，
+          // 那一下是给输入法的，不是要发送 —— 没守卫会把半句话直接发出去
+          if (e.key === "Enter" && !e.nativeEvent.isComposing && draft.trim()) {
             onSend(draft.trim());
             setDraft("");
           }
@@ -253,16 +347,45 @@ function UsageChip({ usage }: { usage: LastUsage }) {
 
 export default function App() {
   const { gate, role, agent, unlock, unlockCard, lock } = useGate();
+  // 主题（门面装点）：免鉴权下发，门口 Gate 未登录也看得到，所以挂在最外层。
+  // 拉到就 applyThemeToDocument —— 注入样式表 + 锁定时接管 data-theme。
+  const [themeCfg, setThemeCfg] = useState<ThemeConfig>(defaultTheme());
+  const reloadTheme = useCallback(async () => {
+    try {
+      const t = await api.themeGet();
+      setThemeCfg(t);
+      applyThemeToDocument(t);
+    } catch {
+      /* 拿不到就保持出厂样式，不挡人进门 */
+    }
+  }, []);
+  useEffect(() => {
+    void reloadTheme();
+  }, [reloadTheme]);
+  const themeState = useMemo(
+    () => ({ theme: themeCfg, reload: reloadTheme }),
+    [themeCfg, reloadTheme],
+  );
+
+  let body: ReactNode;
   if (gate === "checking") {
-    return (
+    body = (
       <div className="gate">
         <p className="dim">检查中…</p>
       </div>
     );
+  } else if (gate === "locked") {
+    body = <Gate onSubmit={unlock} onSubmitCard={unlockCard} />;
+  } else {
+    body = <Shell role={role} agentName={agent} onLock={lock} />;
   }
-  if (gate === "locked")
-    return <Gate onSubmit={unlock} onSubmitCard={unlockCard} />;
-  return <Shell role={role} agentName={agent} onLock={lock} />;
+  return (
+    <ThemeContext.Provider value={themeState}>
+      {body}
+      {/* 触发式弹页：谁进来看到的都一样（主题全局可见），到点就弹 */}
+      <ThemePopups />
+    </ThemeContext.Provider>
+  );
 }
 
 /**
@@ -294,6 +417,9 @@ function GuestIntro({
   const [cardPw, setCardPw] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  // 介绍页报的名、门口那个字母 —— 都随主题换
+  const { theme } = useTheme();
+  const agent = agentDisplay(theme);
 
   const finish = () => {
     localStorage.setItem(INTRO_KEY, "1");
@@ -380,8 +506,12 @@ function GuestIntro({
         padding: 24,
       }}
     >
+      {/* 登录壁纸：铺在遮罩里（absolute），介绍卡浮在它上面 */}
+      <ThemeBackdrop scope="login" variant="absolute" />
       <div
         style={{
+          position: "relative",
+          zIndex: 1,
           width: "100%",
           maxWidth: 430,
           border: "1px solid var(--yuzhe-line)",
@@ -392,7 +522,7 @@ function GuestIntro({
           padding: "30px 28px",
         }}
       >
-        {/* ericher 没有立绘，门口还是那个字母 */}
+        {/* 没立绘就还是那个字母；主题给了头像就换头像 */}
         <div
           style={{
             width: 44,
@@ -408,9 +538,22 @@ function GuestIntro({
             fontSize: 20,
             fontWeight: 600,
             marginBottom: 16,
+            overflow: "hidden",
           }}
         >
-          e
+          {agent.avatar ? (
+            <img
+              src={agent.avatar}
+              alt=""
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+              }}
+            />
+          ) : (
+            agent.name.slice(0, 1)
+          )}
         </div>
         <h2
           style={{
@@ -420,9 +563,9 @@ function GuestIntro({
             letterSpacing: "0.02em",
           }}
         >
-          这里是 ericher 的接待台
+          这里是 {agent.name} 的接待台
         </h2>
-        <p style={line}>我是 ericher，这间接待台的助手。</p>
+        <p style={line}>我是 {agent.name}，这间接待台的助手。</p>
         <p style={line}>先说说你是谁、为什么来。能办的事，我当场办。</p>
         <p style={{ ...line, marginBottom: 20 }}>办不了的，原话记下来转达。</p>
         <p style={{ ...line, fontSize: 12, marginBottom: 20 }}>
@@ -638,7 +781,10 @@ function Shell({
   // 每场新对话另有自己的一间场屋（屋名 = 人屋--场id）——切场就是换连接：
   // name 一变，底层 socket 自动重连那间屋，历史按屋灌回。一个屋一辈子只聊一场，
   // 老场留在老屋里继续活着，这就是多场并行的地基
-  const [activeRoom, setActiveRoom] = useState(agentName);
+  //
+  // 初值不直接用人屋：本机记着落点在某间场屋上时，开机就直连那间 —— 省掉
+  // 「先连人屋、读到记录、再切过去」那次多余的 Durable Object 冷启动（见 localStartRoom）。
+  const [activeRoom, setActiveRoom] = useState(() => localStartRoom(agentName));
   const agent = useAgent<ChatState>({ agent: "CoworkAgent", name: activeRoom });
   // experimental_throttle：流水式刷新消息 store 会把 useSyncExternalStore 逼到同一 tick
   // 里嵌套更新几十次，React 直接抛「Maximum update depth exceeded」——抛错打断流处理，
@@ -691,12 +837,33 @@ function Shell({
       ? saved
       : "paper";
   });
+  // 主题里的他叫什么、长什么样（本组件的 theme 已被配色档占了名，换个叫法）
+  const { theme: themeConfig } = useTheme();
+  const persona = agentDisplay(themeConfig);
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
+  /** 会话清单第一次拿到没有 —— 多端还原得等它到位才好判断「那一场还在不在」 */
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
+  /** 清单是真拿到了还是失败了 —— 失败时恢复段只放行落点，不拿空列表误判「已删」去抹记录 */
+  const [sessionsOk, setSessionsOk] = useState(false);
+  /**
+   * 开机落点拍板完成 —— 状态恢复的**唯一入口**。
+   *
+   * 以前有两条路各跑各的：后端同步 effect 一拿到 state 就把人屋的 activeSession
+   * 画出来（那只是「人屋此刻的指向」，未必是「我最后看的那一场」——多半还停在
+   * 上一场或宿在人屋的旧场），独立恢复器再等清单到位、照 lastRoom/lastSession
+   * 记录跳一次 —— 看着就是「先加载出错误的一场，又跳到另一场」。
+   *
+   * 合一：清单到位前正文空着、遮罩明说「正在接入」；到位后由恢复器一次定下落点，
+   * 后端同步只在拍板之后接手「之后的变化」（切场、被删这些）。
+   */
+  const [startupDone, setStartupDone] = useState(false);
   /** 这台机器上能用的嗓子。拿不到（比如来客）就是空的，设置页自然不显示这一块 */
   const [voices, setVoices] = useState<Voice[]>([]);
   /** 没选嗓音时后端实际会用哪一副。设置页要把它标出来，否则一列选项没人认领 */
   const [voiceDefault, setVoiceDefault] = useState("");
   const [voiceCloud, setVoiceCloud] = useState(false);
+  /** 嗓子清单拉过没有。拉过之后只有进设置页才重拉，别每次切页都去戳后端 */
+  const voicesLoadedRef = useRef(false);
   const [activeSession, setActiveSession] = useState("");
   /**
    * 正在换场。从点下去到新屋把状态推回来，中间那几秒屏幕上摆的还是旧那一场 ——
@@ -731,6 +898,16 @@ function Shell({
   const [noteDrawer, setNoteDrawer] = useState(false);
   /** 左边的回想抽屉。和笔记本互斥，理由同上 */
   const [memoDrawer, setMemoDrawer] = useState(false);
+  /** 左边的本场计划抽屉（本场目标 + 步骤）。和上面两块左边的东西互斥 */
+  const [planDrawer, setPlanDrawer] = useState(false);
+  /**
+   * 这一场的计划（目标 + 步骤）。内容不在 state 里，得按 room/session 去
+   * /api/session-plan 拉；state.planRev 一变就重拉一次（见下面的 effect）。
+   */
+  const [sessionPlan, setSessionPlan] = useState<{
+    goal: string;
+    tasks: SessionTask[];
+  }>({ goal: "", tasks: [] });
   const [input, setInput] = useState("");
   const [notice, setNotice] = useState("");
   /**
@@ -768,12 +945,17 @@ function Shell({
   const picker = useRef<HTMLInputElement>(null);
   const stick = useRef(true);
   /**
-   * 换场落底：切进一场有记录的对话，就该落在最新那条的末尾 ——
+   * 落底旗：切进一场有记录的对话，就该落在最新那条的末尾 ——
    * 不是从开头翻起。平时自动滚动只认「人本来就贴着底部」（stick），
    * 可刚从一场翻着旧账的对话里切出来时 stick 是假的，新场的历史灌进来
-   * 就会停在顶上 —— 等于每换一场都被人摁回第一页。这个旗子压过 stick 一次
+   * 就会停在顶上 —— 等于每换一场都被人摁回第一页。这个旗子压过 stick 一次。
+   *
+   * 开机首次加载同样靠它：不立旗的话，首屏历史灌进来走的是跟随 effect 的
+   * 平滑滚动 —— 短会话（不足两屏，绕过距离保险丝）就成了一段从顶端滑到底
+   * 的「动画」，流式内容撑高时还会被反复打断。初始就为真，
+   * 让第一帧非空渲染抢在浏览器动笔前瞬移落底。
    */
-  const jumpBottom = useRef(false);
+  const jumpBottom = useRef(true);
   const rec = useRef<{ stop: () => void } | null>(null);
   /** 按下麦克风之前输入框里已有的内容，语音识别出来的接在它后面 */
   const dictBase = useRef("");
@@ -790,8 +972,94 @@ function Shell({
   // 朗读定序：每次朗读领一个自增 token，过期的 onEnd 不许清 speakingId（见 speakMsg）
   const speakToken = useRef(0);
 
+  /**
+   * 停滞检测：busy 期间如果 5 秒没有任何新内容（消息没变、想法没翻新），
+   * 就截一份当前状态报出来。CF 打盹、工具卡死、上游断流都会让会话静默停下 ——
+   * 以前界面只是一直转、永不报错，人分不清是在想还是卡了。
+   *
+   * 正常结束的会话不会触发：busy 变 false 时检测器直接清掉。
+   * 正常思考期间想法每几秒翻一句、消息不断有新 part，都不会到 5 秒门槛。
+   */
+  const lastActivity = useRef(Date.now());
+  const stallReported = useRef(false);
+  const [stallReport, setStallReport] = useState<{
+    at: number;
+    session: string;
+    msgCount: number;
+    thoughtCount: number;
+    lastMsgRole: string;
+    toolStates: string[];
+  } | null>(null);
+
+  // busy 一变就重置：开始新一轮检测；结束时清掉报告
+  useEffect(() => {
+    if (busy) {
+      lastActivity.current = Date.now();
+      stallReported.current = false;
+      setStallReport(null);
+    } else {
+      setStallReport(null);
+      stallReported.current = false;
+    }
+  }, [busy]);
+
+  // 消息或想法有更新就刷新活动时间
+  useEffect(() => {
+    if (busy) lastActivity.current = Date.now();
+  }, [messages.length, thoughts.length, busy]);
+
+  // 轮询：每秒看一次，busy 超过 5 秒没动静就报
+  useEffect(() => {
+    if (!busy) return;
+    const iv = setInterval(() => {
+      if (!busy || stallReported.current) return;
+      const elapsed = Date.now() - lastActivity.current;
+      if (elapsed < 5000) return;
+      // 到了：截一份状态
+      stallReported.current = true;
+      const lastMsg = messages[messages.length - 1];
+      // 把正在跑的工具状态捞出来 —— 那些多半就是卡住的地方
+      const toolStates: string[] = [];
+      if (lastMsg) {
+        for (const part of lastMsg.parts ?? []) {
+          if (part.type?.startsWith("tool-")) {
+            const st = (part as { state?: string }).state ?? "?";
+            const name = (part as { toolName?: string }).toolName ?? "";
+            if (st === "input-streaming" || st === "output-available") continue;
+            toolStates.push(`${name}:${st}`);
+          }
+        }
+      }
+      setStallReport({
+        at: Date.now(),
+        session: activeSession,
+        msgCount: messages.length,
+        thoughtCount: thoughts.length,
+        lastMsgRole: lastMsg?.role ?? "",
+        toolStates,
+      });
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [busy, messages, thoughts, activeSession]);
+
   /** 当前这一场。列表里没有它（刚点的新建、还没说过话）时就没有标题，走「新的对话」 */
   const current = sessions.find((s) => s.id === activeSession);
+
+  /** 界面窗口：现在从最新往回挂多少条。换场/换屋收回到一层 */
+  const [winSize, setWinSize] = useState(MSG_WIN);
+  useEffect(() => {
+    setWinSize(MSG_WIN);
+  }, [activeRoom, activeSession]);
+
+  /**
+   * 我此刻是不是贴着最新那一条。
+   *
+   * 和 stick 那个 ref 不同：stick 是给自动滚动看的内部旗，改它不重渲染；
+   * 这个要驱动界面 —— 翻上去看旧账时，右下角浮出「滑到底」，点一下回来。
+   */
+  const [atBottom, setAtBottom] = useState(true);
+  /** 放层那一刻的 scrollHeight：prepend 之后把视口补回去，眼前那条原地不动 */
+  const growAnchor = useRef<number | null>(null);
 
   /**
    * 摆到屏幕上的那一份消息。
@@ -803,9 +1071,27 @@ function Shell({
    *
    * 刚点的新建（pendingRoom）同理：新屋还没开，手上这份还是上一场的，
    * 新场该是空的。
+   *
+   * 在这之上再收一道窗口：只挂最近 winSize 条，老消息翻到顶再放一层。
+   * SDK 的消息库仍是全量（发话、重来都从那儿走，模型上下文也在服务端），
+   * 这里只是别让几百条一次性 mount 把弱设备画瘫。
    */
-  const shownMessages =
-    switching || pendingRoom || !agent.state ? [] : messages;
+  const shown =
+    switching || pendingRoom || !agent.state || !startupDone ? [] : messages;
+  /** 还压在窗口上面没挂出来的老消息数 */
+  const olderCount = Math.max(0, shown.length - winSize);
+  const shownMessages = useMemo(
+    () => (olderCount ? shown.slice(-winSize) : shown),
+    [shown, olderCount, winSize],
+  );
+
+  // 放层之后把视口补回去：上面插进来多高，scrollTop 就补多少 —— 眼前这条不跳
+  useLayoutEffect(() => {
+    if (growAnchor.current == null) return;
+    const el = stream.current;
+    if (el) el.scrollTop += el.scrollHeight - growAnchor.current;
+    growAnchor.current = null;
+  }, [shownMessages]);
 
   /**
    * 界面上「现在这间屋」是哪一间。
@@ -816,12 +1102,52 @@ function Shell({
    */
   const uiRoom = pendingRoom ? agentName : activeRoom;
 
+  // 本场计划（目标 + 步骤）存在场屋的表里，state 只给一个 planRev 信号。
+  // 换场、换屋，或他/我改过计划（planRev 变）时都重拉一次。
+  // 换场空窗里先清空：手上这份还是上一场的，摆出来等于把上一场的目标贴到新场头上。
+  useEffect(() => {
+    if (!isAdmin || switching || pendingRoom || !state.activeSession) {
+      setSessionPlan({ goal: "", tasks: [] });
+      return;
+    }
+    let alive = true;
+    void (async () => {
+      try {
+        const p = await api.sessionPlan(uiRoom, state.activeSession);
+        if (alive) setSessionPlan(p);
+      } catch {
+        /* 拉不到就当这一场没设过：这条只是提示，不该为它打扰人 */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [
+    isAdmin,
+    uiRoom,
+    state.activeSession,
+    state.planRev,
+    switching,
+    pendingRoom,
+  ]);
+
   const flash = useCallback((text: string) => {
     setNotice(text);
     // 每条提示自己带一个定时器，并且把上一条的取消掉 ——
     // 否则前一条的定时器会提前把后一条抹掉（「停下了」紧跟「已切换」就会闪一下没）
     window.clearTimeout(noticeTimer.current);
     noticeTimer.current = window.setTimeout(() => setNotice(""), 2500);
+  }, []);
+
+  /**
+   * 多行数据的长版 flash：10 秒、等宽换行。
+   * 给 /memory /tasks /skills 这种代码化指令用 —— 那些是多行结构化数据，
+   * 2.5 秒不够人看完。仍然和 flash 共用同一个定时器：后一条来了照样替掉前一条。
+   */
+  const flashLong = useCallback((text: string) => {
+    setNotice(text);
+    window.clearTimeout(noticeTimer.current);
+    noticeTimer.current = window.setTimeout(() => setNotice(""), 10_000);
   }, []);
 
   /**
@@ -876,13 +1202,18 @@ function Shell({
     setDrawer(false);
     setNoteDrawer(false);
     setMemoDrawer(false);
+    setPlanDrawer(false);
   }, []);
+
+  // 主题（门面装点）：locked 时纸色/黎明/暗色的最终决定权在管理员那
+  const { theme: themeCfg } = useTheme();
 
   // 动效开关：写 body 属性，CSS 里 body[data-motion="off"] 负责停掉动画
   useEffect(() => {
-    document.body.dataset.motion = motion ? "on" : "off";
+    document.body.dataset.motion =
+      motion && themeCfg.motion !== "off" ? "on" : "off";
     localStorage.setItem(MOTION_KEY, motion ? "on" : "off");
-  }, [motion]);
+  }, [motion, themeCfg.motion]);
 
   // 外观主题：写 <html> 的 data-theme，theme.css 按值换一套 token。
   // 「跟随系统」解析成 paper/dark，并盯着系统的明暗开关实时翻面。
@@ -891,10 +1222,14 @@ function Shell({
     localStorage.setItem(THEME_KEY, theme);
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const apply = () => {
-      const dark = theme === "dark" || (theme === "system" && mq.matches);
+      // 「允许来客改自己的纸色」关着时，来客的本机选择被管理员定的基调接管
+      // （管理员自己不受这条约束 —— 那个开关管的是来客）
+      const pick: ThemeKey =
+        themeCfg.locked && !isAdmin ? themeCfg.base : theme;
+      const dark = pick === "dark" || (pick === "system" && mq.matches);
       document.documentElement.dataset.theme = dark
         ? "dark"
-        : theme === "dawn"
+        : pick === "dawn"
           ? "dawn"
           : "paper";
       document
@@ -904,7 +1239,7 @@ function Shell({
     apply();
     mq.addEventListener("change", apply);
     return () => mq.removeEventListener("change", apply);
-  }, [theme]);
+  }, [theme, themeCfg.locked, themeCfg.base, isAdmin]);
 
   // 会话都在后端，侧栏与设置页共用这一份。
   // 不分角色取两份：谁都只看自己那几场 —— 后端按登录身份把请求落到各自的屋子里，
@@ -913,10 +1248,14 @@ function Shell({
     try {
       const list = await api.sessions();
       setSessions(list);
+      setSessionsOk(true);
+      setSessionsLoaded(true);
       // 把最新列表交回去：删掉当前这场时得按 id 从里面找目标会话的 home，才知道换到哪间屋
       return list;
     } catch {
-      /* 拿不到就保持空列表，不打扰用户 */
+      /* 拿不到就保持空列表，不打扰用户。但开机不能因此卡死：
+         照样放行（sessionsOk 为假 —— 恢复段见下面，不拿空列表误判「已删」） */
+      setSessionsLoaded(true);
       return undefined;
     }
   }, []);
@@ -924,6 +1263,15 @@ function Shell({
   useEffect(() => {
     void loadSessions();
   }, [loadSessions]);
+
+  // 开机落点的保险丝：正常路径下 state、连接认身、清单三样几乎同时到位，恢复段当场拍板。
+  // 万一某一样迟迟不来（半死的连接、卡住的清单请求），也别把人永久锁在「正在接入」后面 ——
+  // 到点直接放行，落点退回到「连上哪间就停在哪」，至少界面能用。
+  useEffect(() => {
+    if (startupDone) return;
+    const t = window.setTimeout(() => setStartupDone(true), 8000);
+    return () => window.clearTimeout(t);
+  }, [startupDone]);
 
   /**
    * 接住服务端主动开口时广播的那条 notice。
@@ -967,36 +1315,38 @@ function Shell({
     return () => agent.removeEventListener("message", onMessage);
   }, [agent, flash, loadSessions]);
 
-  // 嗓子清单只问一次：它是这台机器的配置，跟聊什么无关。
+  // 嗓子清单跟聊什么无关，但管理员在「读音配置」里改动后要能马上看到——
+  // 所以进设置页、在设置页里换区时都重拉一次，其余时间不打扰后端。
   // 来客没有这个接口的权限，拿不到就空着 —— 设置页那一块会自己藏起来。
   useEffect(() => {
     if (!isAdmin) return;
+    if (view !== "settings" && voicesLoadedRef.current) return;
     let alive = true;
-    void api
-      .voices()
-      .then((r) => {
-        if (!alive) return;
-        setVoices(r.voices);
-        setVoiceDefault(r.defaultVoice);
-        setVoiceCloud(r.cloud);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [isAdmin]);
+    void api.voices().then((r) => {
+      if (!alive) return;
+      voicesLoadedRef.current = true;
+      setVoices(r.voices); setVoiceDefault(r.defaultVoice); setVoiceCloud(r.cloud);
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, [isAdmin, view, section]);
 
   // 「当前是哪一场」以后端为准：切会话、新建、被删都是它在改。
   // 但换场途中要放行本地那次乐观跳转 —— 旧屋的 state 会晚到一步，
   // 照单全收就会把刚点的那一场拽回去，看上去正是「乱跳会话」。
   // 站在还没开出来的新场上同理：那一场后端还不知道（屋都没建），
   // 位置只能本地拿着，这会儿后端说的「当前是上一场」不作数。
+  //
+  // 开机前闸：清单还没到位、恢复器还没拍板时，后端同步过来的 activeSession
+  // 多半是「人屋此刻的指向」，不是「我最后看的那一场」——照单全收就会先画出
+  // 错误的一场，紧接着恢复器又跳一次，正是「双恢复器打架」的元凶。
+  // 合一：开机前一律不接，恢复器一次定下落点后再放行。
   useEffect(() => {
+    if (!startupDone) return;
     if (!state.activeSession) return;
     if (switching && state.activeSession !== switching.id) return;
     if (pendingRoom) return;
     setActiveSession(state.activeSession);
-  }, [state.activeSession, switching, pendingRoom]);
+  }, [state.activeSession, switching, pendingRoom, startupDone]);
 
   // 新屋把状态推回来了：activeSession 落到目标上，就是「到了」，撤遮罩。
   // 连接也认出来了才算数 —— 否则刚换连接、旧屋的 state 还挂在那儿时会被误判成到位。
@@ -1034,27 +1384,74 @@ function Shell({
     thoughtTurn.current = 0;
   }, [activeSession]);
 
-  // 只在用户本来就贴着底部时才自动滚动，免得翻历史记录被拽回来
+  // 只在用户本来就贴着底部时才自动滚动，免得翻历史记录被拽回来。
+  // 翻到顶则是另一件事：上面还压着没挂出来的老消息，当场再放一层
   const onScroll = useCallback(() => {
     const el = stream.current;
     if (!el) return;
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-  }, []);
-
-  // 自动滚动分两种：人本来就贴着底部（stick），跟着新话往下走；
-  // 或者刚换了一场（jumpBottom），不管刚才在哪儿都得落到最新消息的末尾
-  useEffect(() => {
-    if (jumpBottom.current) {
-      // 空列表跳了等于没跳：等历史灌进来再落底
-      if (!messages.length) return;
-      jumpBottom.current = false;
-      stick.current = true;
-      bottom.current?.scrollIntoView({ behavior: "auto", block: "end" });
-      return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    stick.current = nearBottom;
+    // 同一个值反复 set 会被 React 挡回去，不必自己比
+    setAtBottom(nearBottom);
+    if (el.scrollTop <= 4 && messages.length > winSize) {
+      growAnchor.current = el.scrollHeight;
+      setWinSize((s) => s + MSG_WIN);
     }
-    if (stick.current)
-      bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages.length, winSize]);
+
+  // 换场落底要抢在浏览器动笔之前：useLayoutEffect 跑在绘制前，首帧就是底部。
+  // 以前放在 useEffect 里（画完才跳），首帧从列表顶画起 —— 绘制又重，
+  // 看起来就是一段从上往下扫的「渐进动画」，扫完才落到最新消息。
+  // 注意等的是 shownMessages（换场遮罩开了才算数）：SDK 手上的消息在推送前
+  // 还是上一场的，拿 messages 判空会把「跳底」白白消耗在旧列表上
+  useLayoutEffect(() => {
+    if (!jumpBottom.current) return;
+    if (!shownMessages.length) return;
+    jumpBottom.current = false;
+    stick.current = true;
+    setAtBottom(true);
+    const el = stream.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [shownMessages]);
+
+  // 贴着底部时跟着新话往下走：不抢帧，绘制完再滚反而顺。
+  // 但跟随只认「真的长了东西」：来了新的一条，或者流式回复正在长（busy）。
+  // SDK 的 store 在恢复完还会再抖好几下（种子补刀、60ms 节流快照、状态补丁），
+  // 每抖一次都平滑滚一遍的话 —— 图片、图、工具卡正陆续撑开高度，
+  // 屏幕上就是一段接一段往下溜的「滑动动画」，聊天明明已经加载完了。
+  const prevLastId = useRef("");
+  useEffect(() => {
+    const id = messages.length ? messages[messages.length - 1].id : "";
+    const grew = id !== prevLastId.current;
+    prevLastId.current = id;
+    if (!stick.current || jumpBottom.current) return;
+    if (!grew && !busy) return;
+    const el = stream.current;
+    if (!el) return;
+    // 距离保险：要滚超过两屏，多半不是「跟着新话走」而是哪里错了位 ——
+    // 瞬移到位，绝不把这么长的路演成动画
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > el.clientHeight * 2)
+      el.scrollTop = el.scrollHeight;
+    else bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, busy]);
+
+  /**
+   * 一键滑到底：翻旧账翻远了，点一下回到最新那条。
+   *
+   * 先把 stick 立回来（从这一下起又跟着新话走），再滚过去 ——
+   * 顺序反了的话，滚动途中来一条新话，跟随 effect 会因为 stick 还是假的而不接，
+   * 人就被撂在半路。关掉动效的人不该再等一段滑动动画，直接瞬移到位。
+   */
+  const jumpToBottom = useCallback(() => {
+    const el = stream.current;
+    if (!el) return;
+    stick.current = true;
+    setAtBottom(true);
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: motion ? "smooth" : "auto",
+    });
+  }, [motion]);
 
   // 输入框随内容长高，超过 160px 由 CSS 接管滚动
   useEffect(() => {
@@ -1154,10 +1551,17 @@ function Shell({
   const submit = () => {
     const raw = input.trim();
     // 把指令名敲全了再按回车，和从菜单里挑一条是同一条路 —— 两条出口分开写，
-    // 迟早会长成两种行为（菜单里切了模式、手打却发了一段话给他）
-    const hit = cmds.find((c) => c.name.toLowerCase() === raw.toLowerCase());
+    // 迟早会长成两种行为（菜单里切了模式、手打却发了一段话给他）。
+    // 名字后面空一格再跟字，是给这条指令的正文（如 /plan 把文档看完）；
+    // 只有声明收参数的（argHint）才认，别的指令后面跟了字就是正经说话，不能吞。
+    const sp = raw.search(/\s/);
+    const name = (sp < 0 ? raw : raw.slice(0, sp)).toLowerCase();
+    const arg = sp < 0 ? "" : raw.slice(sp).trim();
+    const hit = cmds.find(
+      (c) => c.name.toLowerCase() === name && (arg === "" || !!c.argHint),
+    );
     if (hit) {
-      runCommand(hit);
+      runCommand(hit, arg);
       return;
     }
     // 附件正文接在管理员的话前面：模型先看到材料，再看到问题 ——
@@ -1380,6 +1784,28 @@ function Shell({
     wasBusy.current = busy;
   }, [busy, messages, state.voice]);
 
+  /**
+   * 这一眼记回人屋：这台设备最后看的是哪一场、哪间屋 —— 供别的设备下次开机对齐。
+   *
+   * 按「动作发生的那一刻」打时间戳：多端各记各的最后一眼，人屋只留最晚的那笔，
+   * 慢半拍才到的写、旧设备内存里揣着的时刻都顶不掉新记录。写失败在控制台留个痕 ——
+   * 让「没记上」不再是悄无声息的事，排查时有个去处。
+   */
+  const recordView = useCallback((room: string, session: string) => {
+    void api
+      .setActiveRoom(room, session, Date.now())
+      .catch((e: unknown) =>
+        console.warn("[留存] 记最后状态失败：", (e as Error).message),
+      );
+  }, []);
+
+  /**
+   * 这一轮加载里，人有没有亲手动过场/屋。
+   * 动过 = 他的意思比人屋那份记录新，开机对表就该让路 ——
+   * 不能拿一份旧记录把他从刚打开的那一场拽回去。
+   */
+  const userActed = useRef(false);
+
   const newSession = useCallback(async () => {
     // 连点门闩：已经在造新场屋就直接退出，否则两次 createSession 会各造一间互相覆盖
     if (creatingRef.current) return;
@@ -1394,8 +1820,11 @@ function Shell({
       // 没人说过话的场，就不会留下一间看不见也删不掉的空屋。
       const meta = await api.createSession();
       if (meta?.home) {
+        userActed.current = true;
         setActiveSession(meta.id);
         setPendingRoom({ id: meta.id, room: meta.home });
+        // 刚开的这一场也当场记下：多半还没落库（草稿），但那正是「我此刻在看的一眼」
+        recordView(meta.home, meta.id);
       }
       await loadSessions();
       flash("新会话已就位，说第一句就开始");
@@ -1404,7 +1833,7 @@ function Shell({
     } finally {
       creatingRef.current = false;
     }
-  }, [busy, flash, halt, loadSessions]);
+  }, [busy, flash, halt, loadSessions, recordView]);
 
   /**
    * 执行一条快捷指令。
@@ -1417,7 +1846,7 @@ function Shell({
    * 不是 useCallback：它只被事件处理器调用，不进任何依赖数组，
    * 而它要用到后面才定义的 newSession —— 包成 callback 反而会在依赖数组求值时踩到未初始化。
    */
-  const runCommand = (cmd: Cmd) => {
+  const runCommand = (cmd: Cmd, arg = "") => {
     setCmdOff(false);
     if (cmd.kind === "say") {
       // 发出去才清空：他正说着的时候指令发不出去，那行字该留在框里等人再按一次回车
@@ -1433,6 +1862,22 @@ function Shell({
       void newSession();
       return;
     }
+    if (cmd.run === "plan") {
+      runPlan(arg);
+      return;
+    }
+    if (cmd.run === "memory") {
+      void runMemory();
+      return;
+    }
+    if (cmd.run === "tasks") {
+      runTasks();
+      return;
+    }
+    if (cmd.run === "skills") {
+      runSkills();
+      return;
+    }
     // ledger：账本在设置里那一格，人自己写最顺
     setView("settings");
     setSection("ledger");
@@ -1440,11 +1885,114 @@ function Shell({
     flash("写一句就行，底下就是登记框");
   };
 
+  /**
+   * /plan：给这一场定目标 —— 当场写、当场生效，不经过模型。
+   *
+   * 光着敲（或从菜单点）就把计划抽屉摁开，让人手写；后面跟了内容，就把那句话
+   * 直接设成本场目标 —— 「/plan 把文档看完」一句话就够，不用先说一句话让他去调工具。
+   * 但得先有「这一场」：刚点的新建还没落库（草稿态），目标无处可挂，先说一句话把场开起来。
+   */
+  const runPlan = (arg: string) => {
+    // 左边那几块抽屉互斥：开计划抽屉就把另外两块收掉（同 note/memo 芯片的做法）
+    setNoteDrawer(false);
+    setMemoDrawer(false);
+    setDrawer(false);
+    if (!arg) {
+      setPlanDrawer(true);
+      flash("这里就是这一场的计划；想一句话定下，就写 /plan 要干什么");
+      return;
+    }
+    if (!state.activeSession) {
+      setPlanDrawer(true);
+      flash("先说一句话把这一场开起来，再说 /plan 要干什么");
+      return;
+    }
+    void api
+      .saveSessionPlan({
+        room: uiRoom,
+        session: state.activeSession,
+        goal: arg,
+      })
+      .then((p) => {
+        setSessionPlan(p);
+        flash("本场目标已定下");
+      })
+      .catch((e) => flash((e as Error).message));
+  };
+
+  /**
+   * /memory：直接拉记忆库统计，不走模型。
+   * 多行数据用长 flash（10 秒）展示，够人看一眼分布。
+   */
+  const runMemory = async () => {
+    try {
+      const stats = await api.memoryStats();
+      const total = stats.reduce((s, r) => s + r.n, 0);
+      if (!total) {
+        flash("记忆库是空的 —— 还没记过东西");
+        return;
+      }
+      const lines = stats
+        .slice()
+        .sort((a, b) => b.n - a.n)
+        .map((r) => `  ${r.shelf}: ${r.n}`)
+        .join("\n");
+      flashLong(`记忆库共 ${total} 条\n${lines}`);
+    } catch (e) {
+      flash((e as Error).message);
+    }
+  };
+
+  /**
+   * /tasks：直接读 state.tasks，不走模型。
+   * 进行中 + 待办摆出来，已完成的只报个数。
+   */
+  const runTasks = () => {
+    const tasks = state.tasks || [];
+    if (!tasks.length) {
+      flash("没有待办 —— 该做的都做完了");
+      return;
+    }
+    const active = tasks.filter((t) => t.status !== "done");
+    const done = tasks.filter((t) => t.status === "done");
+    const lines = active
+      .map((t) => {
+        const mark = t.status === "doing" ? "🔄" : "📋";
+        return `  ${mark} ${t.title}`;
+      })
+      .join("\n");
+    const tail = done.length ? `\n  ✓ 已完成 ${done.length} 条` : "";
+    flashLong(`待办 ${active.length} 条${tail}\n${lines}`);
+  };
+
+  /**
+   * /skills：直接读 state.skills，不走模型。
+   * 有几个配方、各自叫什么，一眼看完。
+   */
+  const runSkills = () => {
+    const skills = state.skills || {};
+    const names = Object.keys(skills);
+    if (!names.length) {
+      flash("还没存过技能配方 —— 在对话里让他整理出一套做法就能存");
+      return;
+    }
+    const lines = names
+      .map((n) => {
+        const steps = skills[n];
+        const cnt = Array.isArray(steps) ? steps.length : 0;
+        return `  ${n}${cnt ? `（${cnt} 步）` : ""}`;
+      })
+      .join("\n");
+    flashLong(`技能配方 ${names.length} 套\n${lines}`);
+  };
+
   // 切会话分两种走法：宿在人屋的老场，由后端搬消息（存好这一场、把目标那场灌回来）；
   // 场屋里的场不搬 —— 消息住在那间独立的屋子里，换条连接就行，历史按屋灌回。
   // 两种都不能调 clearHistory()，那会顺手把服务端也清掉。
   const switchSession = useCallback(
-    async (id: string, title: string) => {
+    // byUser：这一刀是不是人亲手切的。开机照记录还原时传 false —— 那是照记录走，
+    // 不该反过来再把那份记录推新一版（推新了，别处更晚的一笔反而会被它盖掉）。
+    async (id: string, title: string, byUser = true) => {
       if (id === activeSession) return;
       if (busy) halt(); // 同上：切走之前先收干净，别让回答串场
       setPending([]); // 待发的附件跟人走，不跟着会话走
@@ -1460,6 +2008,12 @@ function Shell({
       // 老场宿在人屋时，后端要先清空再整场灌回，那段时间界面本来是一片空白
       beginSwitch(id, title, "switch");
       setActiveSession(id);
+      if (byUser) {
+        // 这一眼当场记下（按点击时刻打戳）—— 不等换场落地、不等开机对表。
+        // 记的是「我选了这场」这件事本身；别的设备要的也正是这个先后。
+        userActed.current = true;
+        recordView(sessions.find((x) => x.id === id)?.home || agentName, id);
+      }
       try {
         const s = sessions.find((x) => x.id === id);
         if (s?.home) {
@@ -1492,6 +2046,7 @@ function Shell({
       halt,
       loadSessions,
       pendingRoom,
+      recordView,
       restoreQueued,
       sessions,
     ],
@@ -1528,16 +2083,148 @@ function Shell({
         if (s.id === activeSession) {
           const target = list?.find((x) => x.id === r.active);
           jumpBottom.current = true; // 落到新场最新一条的末尾，不从开头翻起
-          setActiveRoom(target?.home || agentName);
+          const room = target?.home || agentName;
+          setActiveRoom(room);
           setActiveSession(r.active);
+          // 删掉眼前这场等于人被挪到了别处 —— 当场记下，别让别的设备还照旧记录找回来
+          userActed.current = true;
+          recordView(room, r.active);
         }
         flash("已删除");
       } catch (e) {
         flash((e as Error).message);
       }
     },
-    [activeSession, agentName, flash, loadSessions],
+    [activeSession, agentName, flash, loadSessions, recordView],
   );
+
+  /**
+   * 开机落点 · 状态恢复的唯一入口。
+   *
+   * 两条路以前各跑各的：后端同步 effect 一拿到 state 就把人屋的 activeSession
+   * 画出来，独立恢复器等清单到位后再照 lastRoom/lastSession 记录跳一次 ——
+   * 刷新后先加载出错误的一场、又跳到另一场，正是这两条打架的表现。
+   * 现在合一：这里拍板之前正文空着（见 shown 的 !startupDone 闸），
+   * 拍板之后才放行后端同步接手「之后的变化」。登记（recordView 打戳写回）不变。
+   *
+   * 闸：state 到了、连接确实挂上了目标屋（agent.name === activeRoom，光看 state
+   * 会被旧屋迟到的推送骗过去）、每次加载只跑一次（viewRestored ref）。
+   *
+   * **只在真要还原时才等清单**（以前是无条件等）：开机直连在场屋上、没记过落点、
+   * 或记的就是眼下这一场 —— 这些情况都没有可还原的分叉，当场拍板，不再被会话清单
+   * 拖住那一次网络往返。真正要跳去别的一场时，才需要清单判它还在不在、宿在哪间。
+   *
+   * 让路：人已经亲手切过场/屋（userActed）就照本地的来 —— 他那一下比记录新。
+   * 清单没拿到（sessionsOk 为假）时不跑判定：空列表会把活着的记录误判成「已删」，
+   * 顺手抹掉别处那一笔。
+   */
+  const viewRestored = useRef(false);
+  /**
+   * 开机直接落在本地记的目标场屋上（没走人屋）时，记下这间屋。
+   * 清单回来后拿它核对一次：这一场是不是已经不在册了（多半别的设备删了）——
+   * 是的话退回人屋（见下面的兜底 effect）。
+   */
+  const bootFieldRoom = useRef("");
+  useEffect(() => {
+    if (viewRestored.current) return;
+    if (!agent.state) return;
+    if (!agent.identified || agent.name !== activeRoom) return;
+    const settle = () => setStartupDone(true);
+    // 开机就直连在目标场屋上：手上的正文就是那一场，不必等清单，当场拍板。
+    if (agent.name !== agentName) {
+      viewRestored.current = true;
+      bootFieldRoom.current = agent.name;
+      return settle();
+    }
+    // 他已经亲手动过场/屋：不还原，也不去动他那份记录（见 recordView 的注释）
+    if (userActed.current) {
+      viewRestored.current = true;
+      return settle();
+    }
+    // 没记过落点，或记的就是眼下这一场：没有可还原的，清单也不必等
+    if (
+      !state.lastRoom ||
+      !state.lastSession ||
+      state.lastSession === state.activeSession
+    ) {
+      viewRestored.current = true;
+      return settle();
+    }
+    // 记的那一场和眼下这场不一样：得等清单，才知道它还在不在、宿在哪间场屋
+    if (!sessionsLoaded) return;
+    viewRestored.current = true;
+    if (!sessionsOk) return settle();
+    const d = resolveStartView({
+      baseRoom: agentName,
+      lastRoom: state.lastRoom,
+      lastSession: state.lastSession,
+      sessions,
+      currentSession: state.activeSession,
+    });
+    if (d.action === "switch") {
+      // 照记录走的一刀不算「人亲手动的」（byUser=false）：别把这份记录又推新一版。
+      // 切完即拍板：switching 压着后端同步（见上面那条 effect 的换场放行闸），
+      // 新屋把目标场推回来之前不会有人半路插播旧指向
+      void switchSession(d.session, d.title, false);
+      settle();
+    } else {
+      if (d.stale) {
+        // 记的那一场已经没了：清掉，免得每次开机都拿一个死 id 去试。
+        // 走 recordView 带时间戳 —— 别拿这一清把别处更晚的一笔顺手抹了
+        recordView("", "");
+      }
+      // none：没记过 / 已经就在那一场 —— 落点就是人屋此刻的会话，放行同步
+      settle();
+    }
+  }, [
+    sessionsLoaded,
+    sessionsOk,
+    agent.state,
+    agent.identified,
+    agent.name,
+    activeRoom,
+    agentName,
+    state.lastRoom,
+    state.lastSession,
+    state.activeSession,
+    sessions,
+    switchSession,
+    recordView,
+  ]);
+
+  // 落点记本机：只在拍板之后、且不在换场空窗里写 —— 换场中间 activeRoom 与
+  // activeSession 会有一小段对不上，写进去就是脏记录。下次开机按它直连（见 localStartRoom）。
+  useEffect(() => {
+    if (!startupDone || switching || pendingRoom) return;
+    if (!activeSession) return;
+    writeLocalView(agentName, activeRoom, activeSession);
+  }, [startupDone, switching, pendingRoom, activeRoom, activeSession, agentName]);
+
+  // 直连场屋的兜底核对：清单回来发现这一场已经不在册（多半别的设备删了它），
+  // 退回人屋 —— 本机记的那一笔就不该再当真。只在「开机直连」这一路启用，
+  // 免得对正常换场过来的场屋也横生枝节。
+  useEffect(() => {
+    const room = bootFieldRoom.current;
+    if (!room || activeRoom !== room) return;
+    if (!startupDone || !sessionsLoaded || !sessionsOk) return;
+    if (switching || pendingRoom) return;
+    const sid = state.activeSession;
+    if (!sid || sessions.some((s) => s.id === sid)) return;
+    bootFieldRoom.current = "";
+    setActiveRoom(agentName);
+    flash("这一场已经不在了，回到默认会话");
+  }, [
+    startupDone,
+    sessionsLoaded,
+    sessionsOk,
+    switching,
+    pendingRoom,
+    activeRoom,
+    agentName,
+    state.activeSession,
+    sessions,
+    flash,
+  ]);
 
   const toggleVisibility = useCallback(
     async (s: SessionMeta) => {
@@ -1613,8 +2300,15 @@ function Shell({
   }, [flash, isAdmin]);
 
   const logout = useCallback(async () => {
-    await api.logout();
-    onLock();
+    // 登出意图本地先行：断网时服务端那声「再见」送不到，也照样锁屏 ——
+    // 点了退出却毫无反应、会话还开着，比服务端少记一笔登出危险得多
+    try {
+      await api.logout();
+    } catch {
+      // 本地已经要锁了，网络失败就静默吞掉，不再打断锁屏这一步
+    } finally {
+      onLock();
+    }
   }, [onLock]);
 
   /**
@@ -1627,13 +2321,34 @@ function Shell({
     (a) => a.sessionId === state.activeSession,
   );
 
+  /**
+   * 正在送答案的那几张卡（按 id 记）：ref 管同步防重、state 管界面禁用。
+   *
+   * 为什么非要有这道闩：CF 打盹或网络慢时，点了按钮半天没动静，人自然连点几下 ——
+   * 而每多一点就到服务端一次：第一次喂进挂起的工具，之后几次只能拿到 409、
+   * 被退回当普通消息发出去。于是凭空多出几条新消息，还会把刚起的生成掐断重来，
+   * 会话就这么卡住。请求飞的这段时间按钮全禁掉，并明说「正在送」——
+   * 让「点了没反应」变成「在动」。
+   */
+  const sendingAsk = useRef<Set<string>>(new Set());
+  const [sendingAsks, setSendingAsks] = useState<string[]>([]);
+  const markSending = (id: string, on: boolean) => {
+    if (on) sendingAsk.current.add(id);
+    else sendingAsk.current.delete(id);
+    setSendingAsks([...sendingAsk.current]);
+  };
+
   /** 收起一张提问卡（先不答）：空答案 resolve 挂起的工具，让他自己拿主意继续 */
   const dropAsk = useCallback(
     async (id: string) => {
+      if (sendingAsk.current.has(id)) return;
+      markSending(id, true);
       try {
         await api.answerAsk(id, "", activeRoom);
       } catch (e) {
         flash((e as Error).message);
+      } finally {
+        markSending(id, false);
       }
     },
     [flash, activeRoom],
@@ -1644,26 +2359,43 @@ function Shell({
    * 模型带着答案在同一轮工作流里接着跑，不把回答当成一条新消息打断节奏。
    * 服务端已顺带收卡（state 经 WS 广播刷新），不再重复打一次收卡请求。
    * 挂起已经不在（超时/重启）就退回老路：当普通消息发。
+   * 同一张卡在请求落地前只认第一次点击（见 sendingAsk）——连点会送出复数回答。
    */
   const answerAsk = async (a: AskEntry, text: string) => {
+    if (sendingAsk.current.has(a.id)) return;
+    markSending(a.id, true);
     try {
       await api.answerAsk(a.id, text, activeRoom);
     } catch {
       if (busy) halt();
       // 服务端那边卡照收（过期的那种也收），所以不再补一次收卡请求
       if (!send(text, undefined, true)) return;
+    } finally {
+      markSending(a.id, false);
     }
   };
 
   return (
     <>
       <Backdrop />
+      {/* 主题壁纸：铺哪张随当前视图走；没铺的视图回落到全局那张（见 lib/theme 的 backgroundFor） */}
+      <ThemeBackdrop
+        scope={
+          view === "chat"
+            ? "chat"
+            : view === "note"
+              ? "notes"
+              : view === "settings"
+                ? "settings"
+                : "global"
+        }
+      />
 
       {view === "chat" && (
         // 笔记抽屉一拉开，左边的菜单栏就让位：两块都贴左边，并排站着只会叠在一起，
         // 而本子摊开的时候人要的是整块地方，不是「菜单栏边上挤出一条」
         <div
-          className={`chat-app${noteDrawer || memoDrawer ? " note-open" : ""}`}
+          className={`chat-app${noteDrawer || memoDrawer || planDrawer ? " note-open" : ""}`}
         >
           <ChatSidebar
             sessions={sessions}
@@ -1722,6 +2454,23 @@ function Shell({
             />
           )}
 
+          {/* 本场计划抽屉：这一场要干什么，摆在眼前、顺手能改。
+              只管这一场（不设时间）—— 到点提醒在「提醒」里，是另一回事 */}
+          {isAdmin && (
+            <SessionPlanDrawer
+              open={planDrawer}
+              onClose={() => setPlanDrawer(false)}
+              room={uiRoom}
+              session={state.activeSession}
+            />
+          )}
+          {planDrawer && (
+            <div
+              className="sidebar-mask"
+              onClick={() => setPlanDrawer(false)}
+            />
+          )}
+
           <main className="chat-main">
             <header className="chat-header">
               <button
@@ -1729,6 +2478,7 @@ function Shell({
                 onClick={() => {
                   setNoteDrawer(false);
                   setMemoDrawer(false);
+                  setPlanDrawer(false);
                   setDrawer(true);
                 }}
                 title="会话列表"
@@ -1772,9 +2522,10 @@ function Shell({
                       onClick={() => {
                         setDrawer(false);
                         setMemoDrawer(false);
+                        setPlanDrawer(false);
                         setNoteDrawer((v) => !v);
                       }}
-                      title="翻开笔记本（你翻着哪一篇，ericher 看得到）"
+                      title={`翻开笔记本（你翻着哪一篇，${persona.name} 看得到）`}
                     >
                       <Icon name="edit" size={15} />
                       <span>笔记</span>
@@ -1785,6 +2536,7 @@ function Shell({
                       onClick={() => {
                         setDrawer(false);
                         setNoteDrawer(false);
+                        setPlanDrawer(false);
                         setMemoDrawer((v) => !v);
                       }}
                       title="翻看他回头整理过的那些（他休息时会自己回顾）"
@@ -1804,6 +2556,22 @@ function Shell({
                 )}
               </div>
             </header>
+
+            {/* 本场计划常驻条：这一场要干什么，明面摆在消息列表顶上（点开改）。
+                没设过（无目标也无步骤）时它自己整条不渲染，不留空壳占地方。
+                换场空窗里不摆：那会儿手上这份还是上一场的 */}
+            {isAdmin && !switching && !pendingRoom && (
+              <SessionPlanBar
+                goal={sessionPlan.goal}
+                tasks={sessionPlan.tasks}
+                onOpen={() => {
+                  setDrawer(false);
+                  setNoteDrawer(false);
+                  setMemoDrawer(false);
+                  setPlanDrawer(true);
+                }}
+              />
+            )}
 
             <section
               className={`messages-area${dragOver ? " dropping" : ""}`}
@@ -1827,6 +2595,20 @@ function Shell({
                 void addFiles(e.dataTransfer.files);
               }}
             >
+              {/* 窗口上头还压着老消息：摆一条活路。点一下放一层；
+                  顺手向上滑到顶也会自动放 —— 短消息撑不满一屏时，光靠滑可能永远到不了顶 */}
+              {olderCount > 0 && (
+                <button
+                  className="older-btn"
+                  onClick={() => {
+                    const el = stream.current;
+                    if (el) growAnchor.current = el.scrollHeight;
+                    setWinSize((s) => s + MSG_WIN);
+                  }}
+                >
+                  更早 {olderCount} 条
+                </button>
+              )}
               {/* 只兜消息列表：某一条消息的渲染出了问题，输入框还得能用 ——
                   不然人连「说一句告诉它坏在哪」的机会都没有 */}
               <Shield what="消息">
@@ -1835,15 +2617,63 @@ function Shell({
                   streaming={busy}
                   role={role}
                   thoughts={thoughts}
+                  turnErrors={(state.turnErrors ?? []).filter(
+                    (e) =>
+                      !e.sessionId ||
+                      !state.activeSession ||
+                      e.sessionId === state.activeSession,
+                  )}
                   speakingId={speakingId}
                   room={uiRoom}
+                  showDetail={isAdmin}
                   onSpeak={speakMsg}
                   onRetry={retryMsg}
                   onFlash={flash}
                 />
               </Shield>
+              {stallReport && (
+                <div className="stall-card">
+                  <div className="stall-head">
+                    <Icon name="alert-circle" size={14} />
+                    <span>停滞了 — 可能卡住了</span>
+                    <button
+                      className="stall-x"
+                      onClick={() => setStallReport(null)}
+                      aria-label="关掉"
+                    >
+                      <Icon name="x" size={12} />
+                    </button>
+                  </div>
+                  <div className="stall-body">
+                    <p>
+                      会话停在「{stallReport.lastMsgRole}」这条，
+                      {stallReport.msgCount} 条消息 · {stallReport.thoughtCount}{" "}
+                      句想法
+                    </p>
+                    {!!stallReport.toolStates.length && (
+                      <p>工具状态：{stallReport.toolStates.join(" · ")}</p>
+                    )}
+                    <p className="stall-hint">
+                      可能是 CF 打盹、上游断流、或工具卡死 ——
+                      等一会儿可能自己恢复；不行就按停止重来
+                    </p>
+                  </div>
+                </div>
+              )}
               {dragOver && (
                 <div className="drop-hint">松手，我看看这是什么</div>
+              )}
+              {/* 翻旧账翻远了：右下角浮出一枚「滑到底」。贴着最新那条时它自己收起来，
+                  免得挡着刚写的话。sticky 让它钉在可视区下沿，不随内容滚走 */}
+              {!atBottom && shownMessages.length > 0 && (
+                <button
+                  className="jump-bottom"
+                  onClick={jumpToBottom}
+                  title="回到最新"
+                  aria-label="滑到底部"
+                >
+                  <Icon name="chevron-down" size={18} />
+                </button>
               )}
               <div ref={bottom} />
             </section>
@@ -1883,6 +2713,7 @@ function Shell({
                     <span className="ask-title">他做到这儿，想问你一句</span>
                     <button
                       className="ask-x"
+                      disabled={sendingAsks.includes(a.id)}
                       onClick={() => void dropAsk(a.id)}
                       title="先不答，让他自己拿主意"
                       aria-label="先不答"
@@ -1898,6 +2729,7 @@ function Shell({
                         <button
                           key={o}
                           className="ask-option"
+                          disabled={sendingAsks.includes(a.id)}
                           onClick={() => answerAsk(a, o)}
                         >
                           {o}
@@ -1906,15 +2738,23 @@ function Shell({
                     </div>
                   )}
                   {/* 自写答案就地发：选项不贴合时不用挪到底下的输入栏再答一遍 */}
-                  <AskInlineInput onSend={(text) => answerAsk(a, text)} />
+                  <AskInlineInput
+                    disabled={sendingAsks.includes(a.id)}
+                    onSend={(text) => answerAsk(a, text)}
+                  />
                   {/* 这句只写在贴着输入框的那张上：在下面打字，回的就是它 ——
-                      每张都写一遍的话，人分不清那句话到底落给哪一张 */}
-                  {a.id === pendingAsks[pendingAsks.length - 1].id && (
-                    <p className="ask-hint">
-                      {a.options.length
-                        ? "挑一个，或在框里自己写"
-                        : "在框里写一句就行"}
-                    </p>
+                      每张都写一遍的话，人分不清那句话到底落给哪一张。
+                      正在送的那张把提示换成「正在送」，让等待看得见 */}
+                  {sendingAsks.includes(a.id) ? (
+                    <p className="ask-hint">正在送过去…</p>
+                  ) : (
+                    a.id === pendingAsks[pendingAsks.length - 1].id && (
+                      <p className="ask-hint">
+                        {a.options.length
+                          ? "挑一个，或在框里自己写"
+                          : "在框里写一句就行"}
+                      </p>
+                    )
                   )}
                 </div>
               ))}
@@ -2037,7 +2877,7 @@ function Shell({
                   placeholder={
                     listening
                       ? "在听…"
-                      : "和 ericher 说点什么…（打 / 看能做什么）"
+                      : `和 ${persona.name} 说点什么…（打 / 看能做什么）`
                   }
                   autoComplete="off"
                 />
@@ -2048,7 +2888,7 @@ function Shell({
                     title={
                       listening
                         ? "说完了，点一下停"
-                        : "说给 ericher 听（用说的发，他就用说的回）"
+                        : `说给 ${persona.name} 听（用说的发，他就用说的回）`
                     }
                   >
                     <Icon name={listening ? "stop" : "mic"} size={17} />
@@ -2093,7 +2933,7 @@ function Shell({
             {/* 换场/初次接入时的毛玻璃：底下的正文这会儿还是上一场（或空着），
                 与其让人以为「点了没反应」，不如明说正在换。遮罩期间下面的
                 消息区不接点击 —— 那会儿点什么都点不到正确的场上 */}
-            {(switching || !agent.state) && (
+            {(switching || !agent.state || !startupDone) && (
               <div className="chat-switching" role="status" aria-live="polite">
                 <div className="chat-switching-card">
                   <span className="spinner" />

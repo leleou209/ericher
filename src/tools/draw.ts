@@ -5,6 +5,9 @@
 //
 // 这里是三条并列的路子，各管一件事：
 //   draw       —— 插画、封面、配图。文生图模型出的，有质感、有情绪，但不可控。
+//                 带上 reference 就是图生图（见 supportsReference）：保留参考图里
+//                 人物/主体的特征再按描述出新图 —— 「还是这个人换个场景」「照这张图改」
+//                 都走它；不带就是纯文生图。
 //   diagram    —— 示意图、流程图、架构图、时序图、图表。她写 mermaid 源码，渲染器摆线。
 //                 为什么不再让她手写 SVG：坐标是 token 黑洞（一张图几千个字，还容易被
 //                 输出上限拦腰截断），摆出来的对齐和间距也不如渲染器。mermaid 源码几十行、
@@ -33,11 +36,12 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { insertMemory, searchMemories } from "../agent/memory";
 import { guestHasTool } from "../agent/guestTypes";
-import type { DrawConfig, DrawTier } from "../agent/drawConfigs";
+import type { DrawConfig, DrawFormat, DrawTier } from "../agent/drawConfigs";
 import { usage } from "../agent/usage";
 import { sessionKey } from "../fileAccess";
 import type { ToolCtx } from "./types";
 import { loadImage, mayViewKey } from "./vision";
+import { publicFetch } from "./search";
 
 /**
  * 高质量档与兜底档原来是写死的常量（硅基流动 / 智谱的端点、模型名、降级链），
@@ -58,6 +62,13 @@ const SF_SIZES = {
   tall: "768x1024",
 } as const;
 
+/** MiniMax 不认像素尺寸，只认宽高比 */
+const MM_RATIOS = {
+  square: "1:1",
+  wide: "16:9",
+  tall: "9:16",
+} as const;
+
 /** mermaid 源码上限。源码本该是「几十行」的量级；到 100KB 已经不是图，是往里塞东西了 */
 const MMD_CAP = 100_000;
 
@@ -73,8 +84,11 @@ export function drawTools(ctx: ToolCtx): ToolSet {
 
   const draw = tool({
     description:
-      "调用生图模型画一张有质感的艺术图：插画、封面、配图、场景、角色。这条走的是文生图模型 —— " +
-      "质感、光线、情绪都拿手，但内容不可控，画不了需要精确对位的结构。" +
+      "调用生图模型画一张有质感的艺术图：插画、封面、配图、场景、角色。" +
+      "不带参考图就是文生图 —— 质感、光线、情绪都拿手，但内容不可控，画不了需要精确对位的结构。" +
+      "带上 reference 是图生图：保留参考图里人物/主体的长相和画意，按你的描述出新图 —— " +
+      "「还是这个人换个场景」「照这张图改一下」都走它。要改哪里（背景、动作、加东西）写进 prompt，" +
+      "要保留的也一并写全；这是照着参考图重生一张，不是像素级 P 图，原图的小细节会变。" +
       "要讲清楚关系和结构（流程图、架构图、时序图、逻辑网络、对比表格），用 diagram 亲自画演示图。" +
       "英文提示词出图更稳，画风、构图、光线都写进去。默认那档便宜够用；画日系动漫、二次元人物、立绘，" +
       "或者他说要「好看点」的时候，把 quality 提到 high，那档贵一点但明显更像样。" +
@@ -84,6 +98,14 @@ export function drawTools(ctx: ToolCtx): ToolSet {
         .string()
         .describe(
           "画面描述。写清主体、风格、构图、光线、色调；英文效果通常更好，也可以中英混写",
+        ),
+      reference: z
+        .string()
+        .optional()
+        .describe(
+          "参考图的云盘文件名（形如 f/default/draw-1730000000000-9f2c1eab.png，画过的、" +
+            "存进记忆的、发过的都在）。给了它就是图生图：照着一张图改、或要人物前后一致时用；" +
+            "纯画新图不要给",
         ),
       shape: z
         .enum(["square", "wide", "tall"])
@@ -105,11 +127,25 @@ export function drawTools(ctx: ToolCtx): ToolSet {
             "别每张都存——配图不是藏品，图多了记忆库就成了图床",
         ),
     }),
-    execute: async ({ prompt, shape, keep, quality }) => {
+    execute: async ({ prompt, shape, keep, quality, reference }) => {
       attempts += 1;
       const { w, h } = SIZES[shape];
       const size = `${w}x${h}`;
       const errors: string[] = [];
+
+      // 参考图（图生图）先备好原件：key 是她嘴上说的，可能被诱导指向别间屋的图 ——
+      // 过一遍房间划界再取（和 view_image 同一扇门），越界的当没看见
+      let ref: string | null = null;
+      const refKey = (reference || "").trim();
+      if (refKey) {
+        if (!mayViewKey(ctx, refKey))
+          return `这张参考图我看不了：${refKey}（不在我能看的范围里）`;
+        const img = await loadImage(ctx.env, refKey);
+        if (!img.ok) return img.why;
+        // MiniMax 的 image_file 认 data URI（官方口径：data:image/jpeg;base64,{data} 或公网 URL）。
+        // 云盘那条 /api/files 要带登录态，人家的服务器拉不动，只能递原件
+        ref = `data:${img.mediaType};base64,${img.data}`;
+      }
 
       let bytes: ArrayBuffer | null = null;
       let meta = "";
@@ -128,6 +164,7 @@ export function drawTools(ctx: ToolCtx): ToolSet {
           ctx.env,
           tiers[t],
           prompt,
+          ref,
           shape,
           w,
           h,
@@ -450,14 +487,30 @@ async function drawWith(
   env: Env,
   cfg: DrawConfig,
   prompt: string,
+  ref: string | null,
   shape: keyof typeof SIZES,
   w: number,
   h: number,
   errors: string[],
 ): Promise<{ bytes: ArrayBuffer; meta: string } | null> {
+  // 带了参考图就必须图生图：这家吃不下就直说、跳过这档，别把参考图默默扔了
+  // 当纯文生图画 —— 没有参考的那张根本不是他要的
+  if (ref && !supportsReference(cfg.format)) {
+    errors.push(`${cfg.label}：这家不支持参考图（图生图），跳过`);
+    return null;
+  }
   if (cfg.format === "workers-ai")
     return workersAiDraw(env, cfg, prompt, w, h, errors);
-  return externalDraw(env, cfg, prompt, shape, errors);
+  return externalDraw(env, cfg, prompt, ref, shape, errors);
+}
+
+/**
+ * 哪些格式吃得下参考图：只有 MiniMax（subject_reference 人物主体参考）。
+ * 其余几家（workers-ai / siliconflow / zhipu）的出图端点只认文字，
+ * 智谱的 GLM-Image 模型虽有图生图能力，开放 API 也还没开这个入参。
+ */
+export function supportsReference(format: DrawFormat): boolean {
+  return format === "minimax";
 }
 
 /**
@@ -504,16 +557,60 @@ async function workersAiDraw(
 }
 
 /**
- * 外部两家（siliconflow / zhipu）共用的调用路径：端点、模型清单、key 变量名
- * 全部来自配置。两家的差异只剩三处入参/回包形状，都在下面按 format 分岔：
+ * 端点留空时的默认出图地址（与 web 面板的格式预设一致，见
+ * web/src/lib/presets.ts 的 DRAW_FORMAT_DEFAULTS）；配了就用配的。
+ */
+const DRAW_DEFAULT_ENDPOINTS: Record<DrawFormat, string> = {
+  "workers-ai": "",
+  siliconflow: "https://api.siliconflow.cn/v1/images/generations",
+  zhipu: "https://open.bigmodel.cn/api/paas/v4/images/generations",
+  minimax: "https://api.minimax.cn/v1/image_generation",
+};
+
+/**
+ * 外部三家（siliconflow / zhipu / minimax）共用的调用路径：端点、模型清单、
+ * key 变量名全部来自配置。三家的差异只剩入参/回包形状，都在下面按 format 分岔：
  *   siliconflow —— image_size 入参、回 images[].url（临时桶，一小时过期，
  *                  拿到就得当场下进自己的云盘，见 fetchImage）；
- *   zhipu       —— size 入参、回 data[].url 或 b64_json。
+ *   zhipu       —— size 入参、回 data[].url 或 b64_json；
+ *   minimax     —— aspect_ratio 入参、回 data.image_base64（或 image_urls，
+ *                  24 小时过期），见 pickImage。图生图也只此一家：带参考图时
+ *                  多塞一个 subject_reference，见 requestBody。
  */
+
+/**
+ * 三家的请求体（纯函数，好测）。参考图只在 minimax 那档有落点：
+ * subject_reference 带一张图（data URI 或公网 URL），保留参考图里人物/主体的
+ * 特征再按 prompt 出新图 —— 官方限单图参考（数组长度 1），类型目前只有 character。
+ */
+export function requestBody(
+  format: DrawFormat,
+  model: string,
+  prompt: string,
+  size: string,
+  ref: string | null,
+): Record<string, unknown> {
+  if (format === "siliconflow")
+    return { model, prompt, image_size: size, batch_size: 1 };
+  if (format === "minimax")
+    return {
+      model,
+      prompt,
+      aspect_ratio: size,
+      response_format: "base64",
+      n: 1,
+      ...(ref
+        ? { subject_reference: [{ type: "character", image_file: ref }] }
+        : {}),
+    };
+  return { model, prompt, size };
+}
+
 async function externalDraw(
   env: Env,
   cfg: DrawConfig,
   prompt: string,
+  ref: string | null,
   shape: keyof typeof SIZES,
   errors: string[],
 ): Promise<{ bytes: ArrayBuffer; meta: string } | null> {
@@ -522,27 +619,27 @@ async function externalDraw(
     errors.push(`${cfg.label}：${cfg.keySecret || "key 变量名"} 没配`);
     return null;
   }
-  if (!cfg.endpoint) {
+  // 端点留空 = 用这一家的默认地址（和读音那条线的兜底一个规矩）
+  const endpoint = cfg.endpoint.trim() || DRAW_DEFAULT_ENDPOINTS[cfg.format];
+  if (!endpoint) {
     errors.push(`${cfg.label}：出图端点没配`);
     return null;
   }
   const size =
     cfg.format === "siliconflow"
       ? SF_SIZES[shape]
-      : `${SIZES[shape].w}x${SIZES[shape].h}`;
+      : cfg.format === "minimax"
+        ? MM_RATIOS[shape]
+        : `${SIZES[shape].w}x${SIZES[shape].h}`;
   for (const model of cfg.models) {
     try {
-      const r = await fetch(cfg.endpoint, {
+      const r = await fetch(endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: "Bearer " + apiKey,
         },
-        body: JSON.stringify(
-          cfg.format === "siliconflow"
-            ? { model, prompt, image_size: size, batch_size: 1 }
-            : { model, prompt, size },
-        ),
+        body: JSON.stringify(requestBody(cfg.format, model, prompt, size, ref)),
       });
       if (!r.ok) {
         errors.push(
@@ -552,12 +649,9 @@ async function externalDraw(
       }
       const j = (await r.json()) as {
         images?: Array<{ url?: unknown }>;
-        data?: Array<{ url?: unknown; b64_json?: unknown }>;
+        data?: unknown;
       };
-      const first =
-        cfg.format === "siliconflow"
-          ? { url: j.images?.[0]?.url, b64: undefined }
-          : { url: j.data?.[0]?.url, b64: j.data?.[0]?.b64_json };
+      const first = pickImage(cfg.format, j);
       const bytes = await fetchImage(first.url, first.b64);
       if (!bytes) {
         errors.push(`${cfg.label}/${model}：没拿到图`);
@@ -568,7 +662,10 @@ async function externalDraw(
         cfg.format === "siliconflow"
           ? (model.split("/").pop() ?? model)
           : model;
-      return { bytes, meta: `${short} · ${cfg.label} · ${size}` };
+      return {
+        bytes,
+        meta: `${short} · ${cfg.label} · ${size}${ref ? " · 图生图" : ""}`,
+      };
     } catch (e) {
       errors.push(
         `${cfg.label}/${model}：${(e as Error).message.slice(0, 120)}`,
@@ -576,6 +673,29 @@ async function externalDraw(
     }
   }
   return null;
+}
+
+/**
+ * 三家的回包形状不一样，这里统一挑出第一张图（临时地址或 base64 二选一）：
+ * siliconflow 回 images[].url；zhipu 回 data[].url / b64_json；
+ * minimax 回 data.image_base64（base64 优先，url 形式 24 小时就过期）。
+ */
+function pickImage(
+  format: DrawFormat,
+  j: { images?: Array<{ url?: unknown }>; data?: unknown },
+): { url: unknown; b64: unknown } {
+  if (format === "siliconflow")
+    return { url: j.images?.[0]?.url, b64: undefined };
+  if (format === "minimax") {
+    const d = j.data as
+      | { image_base64?: unknown[]; image_urls?: unknown[] }
+      | undefined;
+    return { url: d?.image_urls?.[0], b64: d?.image_base64?.[0] };
+  }
+  const d = (
+    j.data as Array<{ url?: unknown; b64_json?: unknown }> | undefined
+  )?.[0];
+  return { url: d?.url, b64: d?.b64_json };
 }
 
 /** base64 → 字节。Worker 里没有 Buffer，只能一个字符一个码地还回去 */
@@ -592,7 +712,9 @@ async function fetchImage(
   b64: unknown,
 ): Promise<ArrayBuffer | null> {
   if (typeof url === "string" && url) {
-    const r = await fetch(url);
+    // 这个地址来自第三方供应商的回包，不能当可信输入：过一遍白名单（逐跳校验），
+    // 免得被诱导去读内网 / 云元数据端点（与 search 那侧同一条护栏）
+    const r = await publicFetch(url);
     if (!r.ok) return null;
     const buf = await r.arrayBuffer();
     return buf.byteLength ? buf : null;

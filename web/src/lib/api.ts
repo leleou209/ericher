@@ -24,6 +24,7 @@ import type {
   Sensitivity,
   SessionMeta,
   SessionMemoryGroup,
+  SessionTask,
   Shelf,
   TagGate,
   TagStat,
@@ -38,7 +39,25 @@ import type {
   PublicPost,
   WriteReport,
   UsageReport,
+  MatrixPage,
+  MatrixPages,
+  MatrixPageDetail,
+  MatrixPackResult,
+  MatrixLink,
+  MatrixLinks,
+  MatrixNav,
+  MatrixStat,
+  MatrixTheme,
+  MatrixSites,
+  ApprovedSite,
+  LinkPlace,
 } from "./types";
+import {
+  defaultTheme,
+  type ThemeConfig,
+  type ThemeConfigPatch,
+  type ThemeSet,
+} from "./theme";
 
 interface ApiOk<T> {
   ok: true;
@@ -319,6 +338,15 @@ export const api = {
   /** 切换会话会把这一场的消息灌回对话，返回切换后的元信息 */
   switchSession: (id: string) =>
     req<SessionMeta | null>("/api/sessions/switch", json("POST", { id })),
+  /**
+   * 记「最后看的是哪间屋、哪一场」—— 多端对齐用。
+   * 写口恒落人屋（后端那间），所以连着场屋时也能发；下次开机别的设备读它回到同一场。
+   *
+   * at 是这次动作发生的那一刻（毫秒时间戳），默认取调用此刻。后端只收更晚的那笔，
+   * 所以调用方要在「人真按下/真切了」的那一瞬打戳，别拖到之后才补。
+   */
+  setActiveRoom: (room: string, session: string, at = Date.now()) =>
+    req<ChatState>("/api/active-room", json("POST", { room, session, at })),
   renameSession: (id: string, title: string) =>
     req<SessionMeta | null>(
       "/api/sessions/rename",
@@ -381,10 +409,16 @@ export const api = {
   // ── 笔记本：管理员和 ericher 共用的本子（仅管理员）──
   // room：本子跟着场走（每场自带资产）——连在哪间场屋上，读写的就是哪一间的本子；
   // 空着 = 本人那间人屋的本子
-  notes: (q?: string, tag?: string, room?: string) =>
-    req<NoteMeta[]>(
-      `/api/notes?${q ? `q=${encodeURIComponent(q)}&` : ""}${tag ? `tag=${encodeURIComponent(tag)}` : ""}${room ? `room=${encodeURIComponent(room)}` : ""}`,
-    ),
+  notes: (q?: string, tag?: string, room?: string) => {
+    // 拼参交给 URLSearchParams：手拼时 q 为空、tag+room 同时有值会拼成
+    // `?tag=xroom=y`（少了 &），统一拼参后分隔符不再靠手写
+    const p = new URLSearchParams();
+    if (q) p.set("q", q);
+    if (tag) p.set("tag", tag);
+    if (room) p.set("room", room);
+    const s = p.toString();
+    return req<NoteMeta[]>(`/api/notes${s ? `?${s}` : ""}`);
+  },
   readNote: (id: string, room?: string) =>
     req<Note | null>(
       `/api/notes/read?id=${encodeURIComponent(id)}${room ? `&room=${encodeURIComponent(room)}` : ""}`,
@@ -415,6 +449,28 @@ export const api = {
     ),
   restoreNote: (id: string, seq: number, room?: string) =>
     req<Note | null>("/api/notes/restore", json("POST", { id, seq, room })),
+
+  // ── 本场计划：这一场的目标与步骤（仅管理员）──
+  // 它和下面的提醒不是一回事：提醒是「会话外、到点响」（reminders 表），
+  // 这里是「会话内、不排期」（sessions.goal + session_tasks 表）——
+  // 只管把这一场要干什么钉在眼前，不会替谁排队。
+  // room + session 两个都要：room 说它在哪间屋，session 说它是哪一场
+  // （一间屋能装好几场，老场都住在人屋）。
+  sessionPlan: (room: string, session: string) =>
+    req<{ goal: string; tasks: SessionTask[] }>(
+      `/api/session-plan?room=${encodeURIComponent(room)}&session=${encodeURIComponent(session)}`,
+    ),
+  /** 写本场计划：只传要改的那一格（goal / tasks），没传的那格原样不动 */
+  saveSessionPlan: (input: {
+    room: string;
+    session: string;
+    goal?: string;
+    tasks?: SessionTask[];
+  }) =>
+    req<{ goal: string; tasks: SessionTask[] }>(
+      "/api/session-plan",
+      json("POST", input),
+    ),
 
   // ── 提醒（主动能力：到点 ericher 自己回来找你）──
   reminders: () => req<Reminder[]>("/api/reminders"),
@@ -508,6 +564,143 @@ export const api = {
         date: string;
       } | null;
     }>(await req<unknown>("/api/update-check"), "检查更新失败"),
+
+  // ── 网页矩阵 ──
+  /**
+   * 一次性总览：版本 / 构建 / 云盘 / 矩阵规模 / 外观开关。
+   * 设置页状态卡与工作台头部用它；未登录时抛错，调用方自己降级。
+   */
+  matrixStat: async () =>
+    bizOk<MatrixStat>(
+      await req<unknown>("/api/matrix/stat"),
+      "读取网页矩阵运行状态失败",
+    ),
+  /** 全部矩阵页（层级树按 path 拼）与配置版本 */
+  matrixPages: async () =>
+    bizOk<MatrixPages>(
+      await req<unknown>("/api/matrix/pages"),
+      "读取网页矩阵页面失败",
+    ),
+  /** 单页正文：编辑时取回原件 */
+  matrixPage: async (id: string) =>
+    bizOk<MatrixPageDetail>(
+      await req<unknown>(`/api/matrix/page?id=${encodeURIComponent(id)}`),
+      "读取页面失败",
+    ),
+  /**
+   * 新建 / 保存一页。用 FormData 一把带齐元信息与正文：
+   * meta（JSON 串）必有；正文按来源三选一 —— file（上传）/ text（粘贴）/ key（云盘）。
+   * 外站链接不出正文；编辑旧页不带正文时沿用原正文。
+   */
+  matrixSave: async (form: FormData) =>
+    bizOk<{ page: MatrixPage }>(
+      await req<unknown>("/api/matrix/save", { method: "POST", body: form }),
+      "保存页面失败",
+    ),
+  matrixDelete: async (id: string) =>
+    bizOk<{ id: string }>(
+      await req<unknown>("/api/matrix/delete", json("POST", { id })),
+      "删除页面失败",
+    ),
+  /** 全局悬浮菜单开关：所有页面统一挂的那个左上角浮窗 */
+  matrixNav: async (on: boolean) =>
+    bizOk<{ nav: MatrixNav }>(
+      await req<unknown>("/api/matrix/nav", json("POST", { on })),
+      "保存悬浮菜单设置失败",
+    ),
+  /** 全局外观：注入物的主色与按钮形态（整份覆盖） */
+  matrixTheme: async (theme: MatrixTheme) =>
+    bizOk<{ theme: MatrixTheme }>(
+      await req<unknown>("/api/matrix/theme", json("POST", theme)),
+      "保存矩阵外观失败",
+    ),
+  /** 外站认定表：列在表里的域名才允许从内站过去（整份覆盖） */
+  matrixSites: async () =>
+    bizOk<MatrixSites>(
+      await req<unknown>("/api/matrix/sites"),
+      "读取外站认定表失败",
+    ),
+  matrixSaveSites: async (sites: ApprovedSite[]) =>
+    bizOk<MatrixSites>(
+      await req<unknown>("/api/matrix/sites", json("POST", { sites })),
+      "保存外站认定表失败",
+    ),
+  /** 全部通路（页面之间的有向连线；页面 = 节点，按钮 = 边） */
+  matrixLinks: async () =>
+    bizOk<MatrixLinks>(
+      await req<unknown>("/api/matrix/links"),
+      "读取网页矩阵通路失败",
+    ),
+  /**
+   * 建 / 改一条通路。后端按 (from,to) 这对 upsert：同一对只留一条，
+   * 改文字 / 落点就是拿同一对再发一次。
+   */
+  matrixLink: async (input: {
+    from: string;
+    to: string;
+    label?: string;
+    place?: LinkPlace;
+    order?: number;
+  }) =>
+    bizOk<{ link: MatrixLink }>(
+      await req<unknown>("/api/matrix/link", json("POST", input)),
+      "连线失败",
+    ),
+  /** 断开一条通路；不存在也算成功（幂等） */
+  matrixUnlink: async (from: string, to: string) =>
+    bizOk<unknown>(
+      await req<unknown>("/api/matrix/unlink", json("POST", { from, to })),
+      "断开通路失败",
+    ),
+  /**
+   * 导出整套矩阵为一个 zip。这里不走 req —— 那条路只认 JSON，
+   * 而这里是二进制流。失败时后端回的是 JSON（{ok:false,error}），照旧把话说出来。
+   * missing 是「有页、正文却没进包」的页面路径（后端用回执头带出来）——
+   * 这种包装不回来，导出的人得当场知道。
+   */
+  matrixPackExport: async (): Promise<{ blob: Blob; missing: string[] }> => {
+    const r = await fetch("/api/matrix/pack");
+    if (r.status === 401) onUnauthorized?.();
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      let err = "";
+      try {
+        err = (JSON.parse(text) as ApiErr).error || "";
+      } catch {
+        /* 不是 JSON 就当没有说明 */
+      }
+      throw new Error(err || `${r.status} 导出失败`);
+    }
+    const raw = r.headers.get("X-Matrix-Pack-Missing-Paths") || "";
+    let missing: string[] = [];
+    if (raw) {
+      try {
+        missing = decodeURIComponent(raw).split(",").filter(Boolean);
+      } catch {
+        /* 头坏了就当没有 —— 不因为一条说明把导出整件事作废 */
+      }
+    }
+    return { blob: await r.blob(), missing };
+  },
+  /**
+   * 装备一个矩阵包：**整体替换**线上那套 —— 旧正文全清、旧配置整个换掉。
+   * 后端动手前会先把当前这套留一份底，装错了能回滚。
+   */
+  matrixPackEquip: async (file: File) =>
+    bizOk<MatrixPackResult>(
+      await req<unknown>("/api/matrix/pack", {
+        method: "POST",
+        headers: { "Content-Type": "application/zip" },
+        body: file,
+      }),
+      "装备矩阵包失败",
+    ),
+  /** 回滚：把上一次装备前的留底再装回去（同样整体替换） */
+  matrixPackRollback: async () =>
+    bizOk<MatrixPackResult>(
+      await req<unknown>("/api/matrix/pack/rollback", { method: "POST" }),
+      "回滚失败",
+    ),
 
   // ── 模型目录（供应商 + 模型条目两级；仅管理员）──
   /**
@@ -686,6 +879,89 @@ export const api = {
       "保存搜索配置失败",
     ),
 
+  // ── 主题（门面装点；读是免鉴权的，写只有管理员）──
+  themeGet: async (): Promise<ThemeConfig> => {
+    const r = bizOk<{ theme?: ThemeConfig }>(
+      await req<unknown>("/api/theme"),
+      "读取主题失败",
+    );
+    return r?.theme ?? defaultTheme();
+  },
+  // 注意：PATCH 走 writeState，回执是 {ok, data: ThemeConfig}，
+  // req() 解包后拿到的是裸 ThemeConfig（不是 {theme}），别再套一层。
+  themePatch: (input: ThemeConfigPatch) =>
+    bizOk<ThemeConfig>(
+      req<unknown>("/api/theme", json("PATCH", input)),
+      "保存主题失败",
+    ),
+  /** 传一张素材（背景/头像/弹页图/花纹/图标）；同名重传就是换图 */
+  themeUploadAsset: (name: string, bytes: Blob) =>
+    bizOk<{ ref: string; size: number }>(
+      req<unknown>(
+        `/api/theme/assets?name=${encodeURIComponent(name)}`,
+        { method: "POST", body: bytes },
+      ),
+      "上传素材失败",
+    ),
+  /**
+   * 从云盘导一张图进主题公开区：服务端复制一份（原文件不动），
+   * 回来还是 `asset:<文件名>` 引用，和直接上传一个口径。
+   */
+  themeImportDrive: (key: string) =>
+    bizOk<{ ref: string; size: number }>(
+      req<unknown>("/api/theme/import", json("POST", { key })),
+      "从云盘导入失败",
+    ),
+  /**
+   * 一键装备主题包（zip）：theme.json 清单 + assets/。
+   * 服务端会把包留一份进云盘 betpag 文件夹，回来带归档 key。
+   */
+  themeEquipPack: (bytes: Blob, name?: string) =>
+    bizOk<{ theme: ThemeConfig; assets: number; driveKey: string }>(
+      req<unknown>(
+        `/api/theme/pack${name ? `?name=${encodeURIComponent(name)}` : ""}`,
+        { method: "POST", body: bytes },
+      ),
+      "装备主题包失败",
+    ),
+  /** 导出当前主题包（zip 下载） */
+  themeExportPack: async (): Promise<Blob> => {
+    const r = await fetch("/api/theme/pack");
+    if (!r.ok) {
+      const j = (await r.json().catch(() => null)) as { error?: unknown } | null;
+      throw new Error(
+        typeof j?.error === "string" && j?.error ? j.error : "导出主题包失败",
+      );
+    }
+    return r.blob();
+  },
+
+  // ── 自定义主题存档（把当前整份配置存成一份带名字的档）──
+  /** 列全部存档，新的在前 */
+  themeSets: async () =>
+    bizOk<{ sets: ThemeSet[] }>(
+      await req<unknown>("/api/theme/sets"),
+      "读取自定义主题失败",
+    ),
+  /** 把当前主题存成一份档（含素材的整包） */
+  themeSaveSet: async (name: string) =>
+    bizOk<{ set: ThemeSet; sets: ThemeSet[] }>(
+      await req<unknown>("/api/theme/sets", json("POST", { name })),
+      "存档主题失败",
+    ),
+  /** 换回某份存档：整份替换当前主题 */
+  themeApplySet: async (id: string) =>
+    bizOk<{ theme: ThemeConfig; assets: number; set: ThemeSet }>(
+      await req<unknown>("/api/theme/sets/apply", json("POST", { id })),
+      "换装自定义主题失败",
+    ),
+  /** 删一份存档（云盘里的包体一并清走） */
+  themeDeleteSet: async (id: string) =>
+    bizOk<{ sets: ThemeSet[] }>(
+      await req<unknown>("/api/theme/sets/delete", json("POST", { id })),
+      "删除自定义主题失败",
+    ),
+
   /** 今日写额度：谁在吃那 10 万行 */
   writes: () => req<WriteReport>("/api/writes"),
   /** 额度总览：SQL 读写 + AI neurons + Vectorize + 官方校准 */
@@ -731,7 +1007,12 @@ export const api = {
    * 不点名就会去人屋里找一场没人说话的对话干着急。
    */
   stop: (room?: string) => req<boolean>("/api/stop", json("POST", { room })),
-  clear: () => req<{ ok: boolean }>("/api/clear", { method: "POST" }),
+  /**
+   * 清空「当前这场」的消息与压缩摘要。room 点名要清哪间屋 —— 矩阵工作台那间
+   * 场屋不在人屋里，连接也不挂在人屋上，不点名清的会是人的那场。不带 = 人屋。
+   */
+  clear: (room?: string) =>
+    req<{ ok: boolean }>("/api/clear", json("POST", { room })),
 
   // ── 消息反馈（赞 / 踩 / 评论）──
   // room：反馈跟着场走。消息实际住在一场一间的场屋里，连接挂在场屋上；不带 room

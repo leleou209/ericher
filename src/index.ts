@@ -24,6 +24,11 @@ import {
 } from "./auth";
 import { COMMON_TYPE_ID } from "./agent/userCards";
 import { compareSemver } from "./version";
+import {
+  handleMatrixApi,
+  serveMatrixPage,
+  type MatrixViewer,
+} from "./matrix/core";
 
 // wrangler.jsonc 的 class_name 需要能从 main 模块解析到 CoworkAgent
 export { CoworkAgent } from "./agent/cowork";
@@ -42,11 +47,24 @@ import {
   safeFolder,
   safeKeyPath,
   scopedKey,
+  themePackKey,
 } from "./fileAccess";
+import {
+  referencedAssets,
+  type ThemeConfig,
+  type ThemeConfigPatch,
+} from "./agent/themeConfig";
+import {
+  packThemePack,
+  safeAssetName,
+  unpackThemePack,
+  type UnpackedThemePack,
+} from "./agent/themePack";
 import { fetchOfficialUsage } from "./analytics";
 import {
   canSynthesize,
   effectiveVoice,
+  invalidateTtsCache,
   synthesize,
   ttsOptions,
 } from "./audio/tts";
@@ -67,6 +85,8 @@ const USER_ROUTES = new Set([
   "/api/flag",
   "/api/sessions",
   "/api/sessions/switch",
+  // 多端对齐：记「最后看的是哪间屋、哪一场」—— 来客也该有自己的最后一场
+  "/api/active-room",
   "/api/memory/public",
   // 公开墙是贴给进门的人看的：读墙放给所有登录角色（贴/摘的门槛在下面按方法判）
   "/api/posts",
@@ -107,6 +127,8 @@ const KNOWN_KEY_SECRETS = [
   "GEMINI_KEY",
   "GLM_KEY",
   "SILICONFLOW_KEY",
+  // MiniMax（M Plan）：聊天/语音/绘图三条线共用这一把
+  "MINIMAX_KEY",
   // 搜索通道的两把：少了它们，搜索配置面板的下拉里永远列不出自己的 key，
   // 一旦在面板里重选保存，keySecret 就被洗成别家/清空 —— key 明明还在
   // env 里，调度却永远落到免费通道（还悄无声息，查起来最费人）
@@ -141,7 +163,10 @@ function explain(e: unknown): string {
   if (/rows read in Durable Objects free tier/i.test(msg)) {
     return "今天的读取额度用完了（Cloudflare 免费层每天 500 万行，北京时间早上 8 点重置）。明早就恢复。";
   }
-  return msg;
+  // 没认出来的错误不把原文直通用户：R2/DO 的报错里带着 key、内部状态，
+  // 那是给排查看的日志不是给用户看的话 —— 原文进日志，用户只拿一句人话
+  console.error(e);
+  return "服务器开小差了，请稍后再试";
 }
 
 /** 统一的失败响应：错误文案先过一遍 explain，别让平台原文直接露给用户 */
@@ -565,6 +590,346 @@ function guessType(key: string): string {
   return IMG_TYPE[ext] || "application/octet-stream";
 }
 
+// ── 全局美术主题：读免鉴权（全局可见），写只有管理员（handleApi 总闸）──
+//
+// 主题素材住在 R2 公开区 f/public/theme/ 下，主题文档里只存 `asset:<文件名>`
+// 引用 —— 公开前缀人人读得，正好对上「皮肤不受身份限制地全局可见」。
+// 图片/动图都当静态字节下发，动图（gif）浏览器自己会动，不用任何特判。
+
+/** 主题素材的 R2 前缀 */
+const THEME_ASSET_PREFIX = `${PUBLIC_PREFIX}theme/`;
+
+function themeAssetKey(name: string): string {
+  return THEME_ASSET_PREFIX + safeAssetName(name);
+}
+
+/** 读主题：门口/Gate 未登录也要拿得到皮肤，这条不进鉴权闸 */
+async function handleThemeGet(env: Env): Promise<Response> {
+  try {
+    return Response.json({ ok: true, theme: await agentStub(env).getTheme() });
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/** 主题素材本体（图片/动图）：免鉴权下发，公开缓存 */
+async function handleThemeAsset(
+  env: Env,
+  rawName: string,
+): Promise<Response> {
+  let name: string;
+  try {
+    name = themeAssetKey(rawName);
+  } catch {
+    return new Response("Not found", { status: 404 });
+  }
+  const obj = await env.MEMORY_BUCKET.get(name);
+  if (!obj) return new Response("Not found", { status: 404 });
+  const contentType = obj.httpMetadata?.contentType || guessType(name);
+  return new Response(obj.body, {
+    headers: fileResponseHeaders(contentType, true),
+  });
+}
+
+/**
+ * 传一份主题素材（图片/动图）进公开区。文件名就是主题里的引用名（asset:<文件名>），
+ * 同名重传 = 换图。只收原始字节（body 就是文件本体，?name= 给文件名）——
+ * 主题素材没有「半个文件」的中间态，multipart 在这里纯属绕路。
+ */
+async function handleThemeAssetUpload(
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  try {
+    const rawName = new URL(req.url).searchParams.get("name") || "";
+    if (!rawName)
+      return Response.json(
+        { ok: false, error: "缺少文件名（?name=…）" },
+        { status: 400 },
+      );
+    const key = themeAssetKey(rawName);
+    const bytes = await req.arrayBuffer();
+    if (!bytes.byteLength)
+      return Response.json(
+        { ok: false, error: "缺少文件内容" },
+        { status: 400 },
+      );
+    if (bytes.byteLength > MAX_UPLOAD_SIZE)
+      return Response.json(
+        { ok: false, error: `文件过大，最大 ${MAX_UPLOAD_SIZE / 1024 / 1024}MB` },
+        { status: 413 },
+      );
+    await env.MEMORY_BUCKET.put(key, bytes, {
+      httpMetadata: { contentType: guessType(key) },
+    });
+    return Response.json({
+      ok: true,
+      ref: `asset:${key.slice(THEME_ASSET_PREFIX.length)}`,
+      size: bytes.byteLength,
+    });
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/**
+ * 来源 key → 稳定短哈希。撞名时拼进别名用：同一条云盘文件反复导入
+ * 永远算出同一个名字，不会越导越长。
+ */
+function sourceHash(key: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36).slice(0, 6);
+}
+
+/**
+ * 从云盘导一份图进主题公开区。云盘文件可能是私有的（来客读不到），而主题要
+ * 免鉴权全局可见 —— 所以导入是「复制一份进 f/public/theme/」，主题里存的还是
+ * asset: 引用，绝不把私有云盘 key 直接写进公开的皮肤里（那是把私房照挂上墙）。
+ * 文件名以云盘原名为准；和已有素材撞名且来路不同时换一个按来源 key 算的稳定别名，
+ * 免得导入悄悄换掉主题里别处正在用的另一张图。
+ */
+async function handleThemeImport(req: Request, env: Env): Promise<Response> {
+  try {
+    const body = (await req.json()) as Record<string, unknown>;
+    const key = typeof body.key === "string" ? body.key : "";
+    if (!key)
+      return Response.json(
+        { ok: false, error: "缺少云盘文件（key）" },
+        { status: 400 },
+      );
+    const src = await env.MEMORY_BUCKET.get(key);
+    if (!src)
+      return Response.json(
+        { ok: false, error: "云盘里没有这个文件" },
+        { status: 404 },
+      );
+    if (src.size > MAX_UPLOAD_SIZE)
+      return Response.json(
+        {
+          ok: false,
+          error: `文件过大，最大 ${MAX_UPLOAD_SIZE / 1024 / 1024}MB`,
+        },
+        { status: 413 },
+      );
+    let name = safeAssetName(key);
+    const clash = await env.MEMORY_BUCKET.get(themeAssetKey(name));
+    if (clash && clash.customMetadata?.sourceKey !== key) {
+      const dot = name.lastIndexOf(".");
+      name = `${dot > 0 ? name.slice(0, dot) : name}-${sourceHash(key)}${
+        dot > 0 ? name.slice(dot) : ""
+      }`;
+    }
+    const target = themeAssetKey(name);
+    await env.MEMORY_BUCKET.put(target, src.body, {
+      httpMetadata: {
+        contentType: src.httpMetadata?.contentType || guessType(target),
+      },
+      // 记下来路：再导同一条云盘文件就地换图，不另起名字
+      customMetadata: { sourceKey: key },
+    });
+    return Response.json({
+      ok: true,
+      ref: `asset:${target.slice(THEME_ASSET_PREFIX.length)}`,
+      size: src.size,
+    });
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/**
+ * 装一份已经解开的包：素材进公开区 → 整份替换主题。
+ * 「上传装备」和「换回自定义存档」两条路共用这一把刀 —— 收口都在 unpackThemePack。
+ */
+async function applyUnpackedTheme(
+  pack: UnpackedThemePack,
+  env: Env,
+): Promise<ThemeConfig> {
+  for (const [name, data] of pack.assets) {
+    await env.MEMORY_BUCKET.put(themeAssetKey(name), data, {
+      httpMetadata: { contentType: guessType(name) },
+    });
+  }
+  return agentStub(env).replaceTheme(pack.theme);
+}
+
+/**
+ * 装备主题包：解 zip（theme.json 清单 + assets/ 素材）→ 素材进公开区 →
+ * 整份替换主题。清单收口在 unpackThemePack（不许路径穿越、引用悬空当场报），
+ * 落库前再过 normalizeTheme 收口 —— 包里带什么花活，进库的都是全形状主题。
+ * 包本体不丢：解包通过就留一份进云盘的 betpag 文件夹，回头能翻、能再传。
+ */
+async function handleThemePackEquip(
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  try {
+    const bytes = new Uint8Array(await req.arrayBuffer());
+    if (!bytes.byteLength)
+      return Response.json(
+        { ok: false, error: "缺少压缩包" },
+        { status: 400 },
+      );
+    if (bytes.byteLength > MAX_UPLOAD_SIZE)
+      return Response.json(
+        { ok: false, error: `包体过大，最大 ${MAX_UPLOAD_SIZE / 1024 / 1024}MB` },
+        { status: 413 },
+      );
+    const pack = unpackThemePack(bytes);
+    // 解包过关才算正经包：坏包不进档案，betpag 里住的都是装得上的
+    const driveKey = themePackKey(
+      new URL(req.url).searchParams.get("name") || "",
+    );
+    await env.MEMORY_BUCKET.put(driveKey, bytes, {
+      httpMetadata: { contentType: "application/zip" },
+    });
+    return Response.json({
+      ok: true,
+      theme: await applyUnpackedTheme(pack, env),
+      driveKey,
+      // 前端拿它显示「装了 N 个素材」，缺了就是一行 undefined
+      assets: pack.assets.size,
+    });
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/** 打包当前主题（清单 + 它引用的素材）成 zip 字节。存档与导出共用 */
+async function packCurrentTheme(env: Env): Promise<Uint8Array> {
+  const theme = await agentStub(env).getTheme();
+  const assets = new Map<string, Uint8Array>();
+  for (const name of referencedAssets(theme)) {
+    const obj = await env.MEMORY_BUCKET.get(themeAssetKey(name));
+    if (obj) assets.set(name, new Uint8Array(await obj.arrayBuffer()));
+  }
+  return packThemePack(theme, assets);
+}
+
+/** 自定义主题存档：列全部 */
+async function handleThemeSetsList(env: Env): Promise<Response> {
+  try {
+    return Response.json({ ok: true, sets: await agentStub(env).listThemeSets() });
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/**
+ * 把当前主题存成一份带名字的档：打包 → 落云盘 betpag → 记一行。
+ * 包体自包含素材，所以哪怕后来素材被换被删，这份档翻出来照样装得上。
+ */
+async function handleThemeSetSave(req: Request, env: Env): Promise<Response> {
+  try {
+    const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!name)
+      return Response.json(
+        { ok: false, error: "先给这套配置起个名字" },
+        { status: 400 },
+      );
+    const zip = await packCurrentTheme(env);
+    // 包底按「名字 + 一串随机码」落盘：同名的档可以存好几份（改完外观再存一次
+    // 是常态），若只按名字拼 key，后存的那份会静静顶掉前一份的包体 ——
+    // 两份档指同一份底，换装拿到的是别人的内容、删掉一份另一份也废了。
+    const packKey = themePackKey(
+      `${name.slice(0, 40)}-${crypto.randomUUID().slice(0, 8)}`,
+    );
+    await env.MEMORY_BUCKET.put(packKey, zip, {
+      httpMetadata: { contentType: "application/zip" },
+    });
+    // 包体先落云盘、再记账；记账这一关可能过不去（名额满了、名字不合法），
+    // 那就把刚落下的包体收回来 —— 一份包五六个 MB，留在盘里没人认领
+    const set = await agentStub(env)
+      .addThemeSet({ name, packKey, bytes: zip.byteLength })
+      .catch(async (e: unknown) => {
+        await env.MEMORY_BUCKET.delete(packKey);
+        throw e;
+      });
+    return Response.json({
+      ok: true,
+      set,
+      sets: await agentStub(env).listThemeSets(),
+    });
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/** 换回某份存档：读回包体、解包、装上去 —— 和装备主题包同一条路 */
+async function handleThemeSetApply(req: Request, env: Env): Promise<Response> {
+  try {
+    const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+    const id = typeof body.id === "string" ? body.id : "";
+    if (!id)
+      return Response.json({ ok: false, error: "缺少存档 id" }, { status: 400 });
+    const set = await agentStub(env).getThemeSet(id);
+    if (!set)
+      return Response.json(
+        { ok: false, error: "这份存档不在了" },
+        { status: 404 },
+      );
+    const obj = await env.MEMORY_BUCKET.get(set.packKey);
+    if (!obj)
+      return Response.json(
+        { ok: false, error: "存档的包体在云盘里找不到了" },
+        { status: 404 },
+      );
+    const pack = unpackThemePack(new Uint8Array(await obj.arrayBuffer()));
+    return Response.json({
+      ok: true,
+      theme: await applyUnpackedTheme(pack, env),
+      assets: pack.assets.size,
+      set,
+    });
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/** 删一份存档：连它在云盘里的包体一并清走（那份底只属于这份档） */
+async function handleThemeSetDelete(req: Request, env: Env): Promise<Response> {
+  try {
+    const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+    const id = typeof body.id === "string" ? body.id : "";
+    if (!id)
+      return Response.json({ ok: false, error: "缺少存档 id" }, { status: 400 });
+    const removed = await agentStub(env).removeThemeSet(id);
+    if (!removed)
+      return Response.json(
+        { ok: false, error: "这份存档不在了" },
+        { status: 404 },
+      );
+    await env.MEMORY_BUCKET.delete(removed.packKey);
+    return Response.json({
+      ok: true,
+      sets: await agentStub(env).listThemeSets(),
+    });
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/** 导出主题包：当前主题 + 它引用的素材打成 zip，存下来就是一份能再装备的包 */
+async function handleThemePackExport(env: Env): Promise<Response> {
+  try {
+    const zip = await packCurrentTheme(env);
+    return new Response(zip, {
+      headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition": 'attachment; filename="ericher-theme.zip"',
+        "Cache-Control": "private, no-store",
+      },
+    });
+  } catch (e) {
+    return fail(e);
+  }
+}
+
 /** R2 对象 → 前端文件行。树形是前端按 key 路径自己拼的，这里只给原料 */
 function toFileRow(o: R2Object): {
   key: string;
@@ -572,6 +937,28 @@ function toFileRow(o: R2Object): {
   uploaded: Date;
 } {
   return { key: o.key, size: o.size, uploaded: o.uploaded };
+}
+
+/**
+ * 翻页把清单取全。单次 list 只回 500 条，不跟 cursor 的话超出的文件在
+ * 云盘树里无声无息地消失；但也不能无节制地翻 —— 超大桶会把一次请求拖死，
+ * 翻满 LIST_MAX_PAGES 还没完就停，把 truncated 交给调用方在返回里明说。
+ */
+const LIST_MAX_PAGES = 20;
+
+async function listAll(
+  bucket: R2Bucket,
+  opts: { prefix?: string },
+): Promise<{ objects: R2Object[]; truncated: boolean }> {
+  const objects: R2Object[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < LIST_MAX_PAGES; page++) {
+    const list = await bucket.list({ prefix: opts.prefix, cursor, limit: 500 });
+    objects.push(...list.objects);
+    if (!list.truncated) return { objects, truncated: false };
+    cursor = list.cursor;
+  }
+  return { objects, truncated: true };
 }
 
 /**
@@ -586,31 +973,31 @@ async function handleList(req: Request, env: Env): Promise<Response> {
       return Response.json({ ok: false, error: "云盘未配置" }, { status: 500 });
     const role = (await authRole(req, env)) ?? "user";
     if (role === "admin") {
-      const list = await bucket.list({ limit: 500 });
+      const all = await listAll(bucket, {});
       return Response.json({
-        files: list.objects.map(toFileRow),
-        count: list.objects.length,
+        files: all.objects.map(toFileRow),
+        count: all.objects.length,
         scope: "",
+        truncated: all.truncated,
       });
     }
     const room = await agentNameFor(req, env, role);
     // 自己那间的：人屋本尊 + 他名下各场屋的产物（场屋 key 前缀是「人屋--场id」）
     const [own, pub] = await Promise.all([
       Promise.all(
-        roomKeyPrefixes(room).map((prefix) =>
-          bucket.list({ prefix, limit: 500 }),
-        ),
+        roomKeyPrefixes(room).map((prefix) => listAll(bucket, { prefix })),
       ),
-      bucket.list({ prefix: PUBLIC_PREFIX, limit: 500 }),
+      listAll(bucket, { prefix: PUBLIC_PREFIX }),
     ]);
     const objects = [...own.flatMap((r) => r.objects), ...pub.objects];
     return Response.json({
       files: objects.map(toFileRow),
       count: objects.length,
       scope: roomKeyPrefix(room),
+      truncated: own.some((r) => r.truncated) || pub.truncated,
     });
   } catch (e) {
-    return Response.json({ error: (e as Error).message }, { status: 500 });
+    return fail(e);
   }
 }
 
@@ -633,6 +1020,34 @@ async function handleMkdir(req: Request, env: Env): Promise<Response> {
   } catch (e) {
     return fail(e);
   }
+}
+
+/**
+ * 删/移主题素材前对照当前主题的引用。主题文档里存的是 `asset:<文件名>`，
+ * 素材一没了引用就悬空，导出主题包会永久报错 —— 那不是「回头再补」能救的。
+ * 命中就回 409，让用户先在主题面板里换掉引用再动文件。
+ * 只有要动的 key 真落在主题素材前缀下才去 getTheme：它走 DO 往返，
+ * 日常云盘删改不该替主题检查买单。
+ */
+async function themeRefGuard(
+  env: Env,
+  keys: string[],
+  action: string,
+): Promise<Response | null> {
+  const names = keys
+    .filter((k) => k.startsWith(THEME_ASSET_PREFIX))
+    .map((k) => k.slice(THEME_ASSET_PREFIX.length));
+  if (!names.length) return null;
+  const used = new Set(referencedAssets(await agentStub(env).getTheme()));
+  const hits = names.filter((n) => used.has(n));
+  if (!hits.length) return null;
+  return Response.json(
+    {
+      ok: false,
+      error: `主题正在引用：${hits.join("、")} —— 先在主题面板里换掉，再来${action}。`,
+    },
+    { status: 409 },
+  );
 }
 
 /**
@@ -674,26 +1089,49 @@ async function handleMove(req: Request, env: Env): Promise<Response> {
       );
     const obj = await bucket.get(src);
     if (obj) {
-      await bucket.put(dst, obj.body, { httpMetadata: obj.httpMetadata });
+      // 被主题引用着的素材不许搬：搬走引用就悬空，导出永久报错
+      const guard = await themeRefGuard(env, [src], "搬");
+      if (guard) return guard;
+      // 撞名就地换掉目标是不可恢复的（源也跟着删了）—— 先拦下来让人改名
+      if (await bucket.head(dst))
+        return Response.json(
+          { ok: false, error: `目标已存在：${dst}（换个名字或先删旧的）` },
+          { status: 409 },
+        );
+      await bucket.put(dst, obj.body, {
+        httpMetadata: obj.httpMetadata,
+        // customMetadata（主题导入记的 sourceKey 来路）要跟着走：move 是 copy+delete，
+        // 不捎上就被剥掉，导入去重会把同一条云盘文件当成两个来路
+        customMetadata: obj.customMetadata,
+      });
       await bucket.delete(src);
       return Response.json({ ok: true, moved: 1 });
     }
     const srcPrefix = `${src}/`;
-    let moved = 0;
+    // 先把整夹的 key 攒齐、逐个过主题引用检查，再动手 ——
+    // 边列边搬的话撞到引用中途停手，就剩半个文件夹散在外头
+    const keys: string[] = [];
     let cursor: string | undefined;
     do {
       const list = await bucket.list({ prefix: srcPrefix, cursor, limit: 500 });
-      for (const o of list.objects) {
-        const one = await bucket.get(o.key);
-        if (!one) continue;
-        await bucket.put(`${dst}/${o.key.slice(srcPrefix.length)}`, one.body, {
-          httpMetadata: one.httpMetadata,
-        });
-        await bucket.delete(o.key);
-        moved++;
-      }
+      keys.push(...list.objects.map((o) => o.key));
       cursor = list.truncated ? list.cursor : undefined;
     } while (cursor);
+    const guard = await themeRefGuard(env, keys, "搬");
+    if (guard) return guard;
+    let moved = 0;
+    for (const key of keys) {
+      const one = await bucket.get(key);
+      if (!one) continue;
+      await bucket.put(`${dst}/${key.slice(srcPrefix.length)}`, one.body, {
+        httpMetadata: one.httpMetadata,
+        customMetadata: one.customMetadata,
+      });
+      await bucket.delete(key);
+      moved++;
+    }
+    // 子文件撞名不做逐个 head 预检：上传的文件名都带「时间戳-随机段」，基本撞不上；
+    // 真撞上的只有 .keep 占位（空壳，覆盖无损失）—— 为它把往返翻倍不值当
     if (!moved)
       return Response.json(
         { ok: false, error: `没有这个文件或文件夹：${src}` },
@@ -721,17 +1159,19 @@ async function handleDelete(req: Request, env: Env): Promise<Response> {
       const base = safeKeyPath(body.folder);
       assertInScope(base, scope);
       const prefix = base.endsWith("/") ? base : `${base}/`;
-      let deleted = 0;
+      // 先列全、逐个过主题引用检查，再删 —— 边列边删撞到引用中途停手，
+      // 就剩半个文件夹的残骸
+      const keys: string[] = [];
       let cursor: string | undefined;
       do {
         const list = await bucket.list({ prefix, cursor, limit: 500 });
-        for (const o of list.objects) {
-          await bucket.delete(o.key);
-          deleted++;
-        }
+        keys.push(...list.objects.map((o) => o.key));
         cursor = list.truncated ? list.cursor : undefined;
       } while (cursor);
-      return Response.json({ ok: true, deleted });
+      const guard = await themeRefGuard(env, keys, "删");
+      if (guard) return guard;
+      for (const key of keys) await bucket.delete(key);
+      return Response.json({ ok: true, deleted: keys.length });
     }
     if (typeof body.key !== "string" || !body.key.trim())
       return Response.json(
@@ -747,6 +1187,9 @@ async function handleDelete(req: Request, env: Env): Promise<Response> {
       // 过不了校验的老名字按原样删，范围检查在下面兜底
     }
     assertInScope(key, scope);
+    // 被主题引用着的素材不许删：删了引用就悬空，导出永久报错
+    const guard = await themeRefGuard(env, [key], "删");
+    if (guard) return guard;
     await bucket.delete(key);
     return Response.json({ ok: true });
   } catch (e) {
@@ -778,6 +1221,51 @@ async function renewIfNeeded(
   const headers = new Headers(res.headers);
   headers.append("Set-Cookie", sessionCookie(fresh, cookieSecure(req)));
   return new Response(res.body, { status: res.status, headers });
+}
+
+/**
+ * 首段属于主包自己的路径：矩阵不认领这些，照旧交给应用 / 静态资源。
+ *
+ * api（接口）、agents（智能体运行时）、assets（前端产物）、index（首页文件）
+ * 是保留字；assistant 是接待台本体的固定落点 —— 公开访客访问 `/` 会被 302 到
+ * 入口页，总得有个地方能走回助手与登录门，外挂层的「回助手」就指向它。
+ * 带「.」的首段（favicon.ico、logo.png 之类）也当静态文件放行。
+ * 其余路径（含根 `/`）交给矩阵先认领，认领不了（返回 null）再回落应用。
+ */
+function isReservedPath(pathname: string): boolean {
+  const first = pathname.split("/")[1] ?? "";
+  if (!first) return false;
+  return first.includes(".") || RESERVED_MATRIX_FIRST.has(first);
+}
+const RESERVED_MATRIX_FIRST = new Set([
+  "api",
+  "agents",
+  "assets",
+  "index",
+  "assistant",
+]);
+
+/** 当前请求的矩阵访客身份：没带票就是过路人（public） */
+async function matrixViewerOf(
+  req: Request,
+  env: Env,
+): Promise<MatrixViewer> {
+  const info = await verifyTokenInfo(env, authToken(req));
+  if (!info) return { role: "public" };
+  return { role: info.role, type: info.type, card: info.card };
+}
+
+/** 矩阵包推送：Authorization: Bearer <MATRIX_PUSH_TOKEN>（常量时间比较） */
+function matrixPushAllowed(req: Request, env: Env): boolean {
+  const token = (env.MATRIX_PUSH_TOKEN || "").trim();
+  if (!token) return false;
+  const got = (req.headers.get("authorization") || "").trim();
+  const expected = `Bearer ${token}`;
+  if (got.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < got.length; i++)
+    diff |= got.charCodeAt(i) ^ expected.charCodeAt(i);
+  return diff === 0;
 }
 
 async function handleApi(
@@ -864,6 +1352,12 @@ async function handleApi(
       hasDoubaoVoice: !!env.DOUBAO_TTS_KEY,
     });
   }
+
+  // 网页矩阵的管理面（页面增删改、正文读写）：主包只做「管理员」这道闸
+  // （上面的非管理员拦截已经放行到这里的一定是 admin），真正的活交给矩阵模块 ——
+  // 配置与正文都归它管。
+  if (p.startsWith("/api/matrix/"))
+    return handleMatrixApi(req, env, p, { role: "admin" });
 
   if (p === "/api/upload" && m === "POST") return handleUpload(req, env);
   // 附件分析：先把文件传上来（/api/upload），再拿 key 来换一段模型能读的话。
@@ -1407,7 +1901,13 @@ async function handleApi(
   // 顺序即优先级，没有「生效中」的概念；和模型目录一样只存 secret 变量名。
   if (p === "/api/tts-configs" && m === "GET") {
     try {
-      return Response.json({ ok: true, configs: await agent.ttsConfigs() });
+      // keySecrets 同模型目录：只回变量名清单给下拉框，key 本体不出 secrets
+      const known = env as unknown as Record<string, unknown>;
+      return Response.json({
+        ok: true,
+        configs: await agent.ttsConfigs(),
+        keySecrets: KNOWN_KEY_SECRETS.filter((k) => !!known[k]),
+      });
     } catch (e) {
       return fail(e);
     }
@@ -1434,7 +1934,10 @@ async function handleApi(
             voice: typeof body.voice === "string" ? body.voice : undefined,
             style: typeof body.style === "string" ? body.style : undefined,
           }),
-        ),
+        ).then((r) => {
+          invalidateTtsCache();
+          return r;
+        }),
       );
     } catch (e) {
       return fail(e);
@@ -1459,7 +1962,10 @@ async function handleApi(
             voice: str("voice"),
             style: str("style"),
           }),
-        ),
+        ).then((r) => {
+          invalidateTtsCache();
+          return r;
+        }),
       );
     } catch (e) {
       return fail(e);
@@ -1469,7 +1975,12 @@ async function handleApi(
     const id = url.searchParams.get("id") || "";
     if (!id)
       return Response.json({ ok: false, error: "缺少 id" }, { status: 400 });
-    return writeState(Promise.resolve(agent.removeTtsConfig(id)));
+    return writeState(
+      Promise.resolve(agent.removeTtsConfig(id)).then((r) => {
+        invalidateTtsCache();
+        return r;
+      }),
+    );
   }
 
   // ── 绘图配置目录（draw_configs）：出图三档各用哪家，只有管理员能碰 ──
@@ -1536,6 +2047,36 @@ async function handleApi(
     }
   }
 
+  // ── 全局美术主题（theme_config）：皮肤/名字头像/弹页/主题包，只有管理员能碰 ──
+  // 读是免鉴权的（fetch 入口 GET /api/theme / /api/theme-asset/），走到这里的
+  // 只有写。表归主人那间，所以写也点名主人房（agentStub 默认就它），
+  // 不跟请求者自己那间走 —— 主题是全屋一份的，不是每人一份。
+  if (p === "/api/theme" && m === "PATCH") {
+    try {
+      const body = (await req.json()) as Record<string, unknown>;
+      return writeState(agentStub(env).patchTheme(body as ThemeConfigPatch));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+  if (p === "/api/theme/assets" && m === "POST")
+    return handleThemeAssetUpload(req, env);
+  if (p === "/api/theme/import" && m === "POST")
+    return handleThemeImport(req, env);
+  if (p === "/api/theme/pack" && m === "POST")
+    return handleThemePackEquip(req, env);
+  if (p === "/api/theme/pack" && m === "GET")
+    return handleThemePackExport(env);
+  // 自定义主题存档：把当前配置存成一份带名字的档、换回来、删掉
+  if (p === "/api/theme/sets" && m === "GET")
+    return handleThemeSetsList(env);
+  if (p === "/api/theme/sets" && m === "POST")
+    return handleThemeSetSave(req, env);
+  if (p === "/api/theme/sets/apply" && m === "POST")
+    return handleThemeSetApply(req, env);
+  if (p === "/api/theme/sets/delete" && m === "POST")
+    return handleThemeSetDelete(req, env);
+
   // 人设与回想两份提示词的出厂默认值，供管理员面板「恢复默认」用。
   // 工具那一份不在这里 —— 它拆成了逐工具的稿子，出厂稿随名册走（见 /api/tool-groups）。
   if (p === "/api/prompt" && m === "GET")
@@ -1586,6 +2127,29 @@ async function handleApi(
       if (!id)
         return Response.json({ ok: false, error: "缺少 id" }, { status: 400 });
       return writeState(agent.switchSession(id));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+  // 多端最后状态对齐：记下「他最后看的是哪间屋、哪一场」。
+  // 写口恒落人屋（agent 就是 token 派生出的那间）—— 连着场屋时发的这条也写到人屋，
+  // 正是要的效果：人屋是每台设备开机先连的地方，靠这两格把新设备送回最后那一间。
+  // 写在 state（非 PATCHABLE），前端只经这条专用门改，不让它自己挑屋。
+  if (p === "/api/active-room" && m === "POST") {
+    try {
+      const { room, session, at } = (await req.json()) as {
+        room?: unknown;
+        session?: unknown;
+        at?: unknown;
+      };
+      return writeState(
+        agent.setLastView(
+          typeof room === "string" ? room : "",
+          typeof session === "string" ? session : "",
+          // 前端在动作那一刻打的时间戳；没带（老前端）就传 0，由 DO 回落到此刻
+          typeof at === "number" && Number.isFinite(at) ? at : 0,
+        ),
+      );
     } catch (e) {
       return fail(e);
     }
@@ -1796,6 +2360,46 @@ async function handleApi(
       return writeState(
         Promise.resolve(
           agentStub(env, targetRoom(room)).restoreNoteRevision(id, seq),
+        ),
+      );
+    } catch (e) {
+      return fail(e);
+    }
+  }
+
+  // ── 本场计划：这一场的目标与步骤。和笔记一样不进 USER_ROUTES，只给管理员 ──
+  // 两个定参缺一不可：
+  //   room    —— 计划跟着场走，连在哪间场屋上就读写哪一间（同笔记的定参）；
+  //   session —— 一间屋能装好几场（老场都住在人屋），不点明是哪一场就会串台。
+  // 会话内计划 vs 会话外提醒是两回事：提醒在后端是 reminders 表（到点响），
+  // 这里是 sessions.goal + session_tasks 表（不排期、不响，只钉住这一场的注意力）。
+  if (p === "/api/session-plan" && m === "GET") {
+    return readState(
+      Promise.resolve(
+        agentStub(env, targetRoom(url.searchParams.get("room"))).sessionPlan(
+          url.searchParams.get("session") || "",
+        ),
+      ),
+    );
+  }
+  if (p === "/api/session-plan" && m === "POST") {
+    try {
+      const body = (await req.json()) as Record<string, unknown>;
+      return writeState(
+        Promise.resolve(
+          agentStub(env, targetRoom(body.room)).saveSessionPlan({
+            session: typeof body.session === "string" ? body.session : "",
+            // 没给这一格就不动它：只改目标的手改不该顺手把步骤清空
+            goal: typeof body.goal === "string" ? body.goal : undefined,
+            tasks: Array.isArray(body.tasks)
+              ? (body.tasks as {
+                  title: string;
+                  desc: string;
+                  status: "todo" | "doing" | "done";
+                  created: string;
+                }[])
+              : undefined,
+          }),
         ),
       );
     } catch (e) {
@@ -2257,8 +2861,12 @@ async function handleApi(
     console.warn("[stop] 收到打断请求", { room });
     return readState(agentStub(env, room).stopGenerating());
   }
+  // 清空当前这场（消息与压缩摘要一起清）。
+  // room：同 /api/stop —— 连接可能挂在场屋上（矩阵工作台那间就是），REST 要清哪间得点名；
+  // 不带 body 照旧清人屋那场，老客户端不受影响
   if (p === "/api/clear" && m === "POST") {
-    await agent.resetActiveSession();
+    const body = (await req.json().catch(() => ({}))) as { room?: unknown };
+    await agentStub(env, targetRoom(body.room)).resetActiveSession();
     return Response.json({ ok: true });
   }
 
@@ -2411,6 +3019,28 @@ export default {
       }
     }
 
+    // ── 主题：读全局可见（门口/Gate 未登录也要看得到皮肤），写在 handleApi 里 ──
+    if (p === "/api/theme" && req.method === "GET") return handleThemeGet(env);
+    if (p.startsWith("/api/theme-asset/") && req.method === "GET") {
+      let name = p.slice("/api/theme-asset/".length);
+      try {
+        name = decodeURIComponent(name);
+      } catch {
+        // 不是合法编码就按原样查（handleServe 对 key 同款兜底）
+      }
+      return handleThemeAsset(env, name);
+    }
+
+    // 矩阵包推送入口：给「本地/自动化把一个矩阵包直接推上云」留的一条道。
+    // 只有配了 MATRIX_PUSH_TOKEN 才启用；未配（默认）时这里整个不生效，
+    // 推包仍只有工作台那一处。仅认这一条路由，且必须是 POST。
+    if (
+      p === "/api/matrix/pack" &&
+      req.method === "POST" &&
+      matrixPushAllowed(req, env)
+    )
+      return handleMatrixApi(req, env, p, { role: "admin" });
+
     if (p.startsWith("/api/")) {
       const role = await authRole(req, env);
       if (!role) return unauthorized();
@@ -2449,6 +3079,14 @@ export default {
     } catch (e) {
       // 唤醒失败（最常见的是配额用尽）：回一句人话，别让前端一直卡在「连接中」
       return fail(e);
+    }
+
+    // 网页矩阵：非保留路径先请矩阵认领 —— 它认领了（认得出这个层级路径、
+    // 或按入口页规则要 302）就回正文，认领不了（返回 null）就落到下面交还应用。
+    // 根 `/` 也走这条：公开访客在此被 302 去入口页，登录用户与管理员则回落接待台。
+    if (!isReservedPath(p)) {
+      const res = await serveMatrixPage(req, env, await matrixViewerOf(req, env), p);
+      if (res) return res;
     }
 
     return env.ASSETS.fetch(req);

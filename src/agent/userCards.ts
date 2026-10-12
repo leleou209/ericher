@@ -12,11 +12,12 @@
 // 跟着所属类型档走 —— 档位勾了记事本 / 云盘 / 公开，卡的主人才能开。
 
 import { timingSafeEqual } from "../auth";
-import { hashPassword } from "./guestTypes";
+import { COMMON_TYPE_ID, hashPassword } from "./guestTypes";
 import type { SqlTag } from "./state";
 
-/** 内置通用档在卡表里的档位 id：走前台口令进来的卡都归这档（权益全开） */
-export const COMMON_TYPE_ID = "common";
+// 内置通用档的档位 id 定义在 guestTypes.ts（它现在是名册里真实的一行）；
+// 卡这边照旧从这里取，免得两处各写一份字面量。
+export { COMMON_TYPE_ID };
 
 interface UserCardRow {
   id: string;

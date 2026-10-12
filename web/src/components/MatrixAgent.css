@@ -1,0 +1,185 @@
+/* ── 网页矩阵工作台 · 右侧助手栏 ─────────────────────────────
+   一栏对话，跟左导航配成一对：那边挑视图，这边说事情。
+   借接待台那套纸面与发丝线，不另起一套皮 —— 消息本身就用 .msg-* 那批现成样式。 */
+
+.wba {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--yuzhe-surface);
+}
+
+.wba-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--yuzhe-line);
+}
+
+/* 和 .wb-mark 同一个记号：左上角一枚小方块 */
+.wba-mark {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  background: var(--yuzhe-ink-strong);
+}
+
+.wba-brand {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
+}
+
+.wba-name {
+  font-size: 13px;
+  color: var(--yuzhe-ink-strong);
+}
+
+/* 常驻的渲染方指纹：一行小字，长了就掐掉，标题里说全 */
+.wba-sub {
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wba-x {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: var(--yuzhe-r-s);
+  background: transparent;
+  color: var(--yuzhe-ink-faint);
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+
+.wba-x:hover {
+  background: var(--yuzhe-bg-hover);
+  color: var(--yuzhe-ink-strong);
+}
+
+.wba-x:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.wba-x:disabled:hover {
+  background: transparent;
+  color: var(--yuzhe-ink-faint);
+}
+
+/* 换了渲染方：一条独立的提醒带，点掉就收 */
+.wba-note {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--yuzhe-line-soft);
+  background: var(--yuzhe-bg-soft);
+  font-size: 12px;
+  color: var(--yuzhe-ink-dim);
+}
+
+.wba-note span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wba-note-x {
+  flex: none;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--yuzhe-ink);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  text-decoration-color: var(--yuzhe-line);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.wba-note-x:hover {
+  color: var(--yuzhe-ink-strong);
+  text-decoration-color: var(--yuzhe-ink-strong);
+}
+
+/* 消息流自己滚：整栏锁高，只有这一段落滚 */
+.wba-stream {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 4px;
+}
+
+/* 栏子窄，那 860px 的中轴在这儿没有意义 —— 铺满即可 */
+.wba-stream .msg-list {
+  max-width: none;
+}
+
+.wba-empty {
+  margin: 0;
+  padding: 6px 2px;
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--yuzhe-ink-faint);
+}
+
+/* 一闪而过的提示：贴着输入区上方，别挤走消息 */
+.wba-flash {
+  flex: 0 0 auto;
+  margin: 0 12px 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-bg-soft);
+  font-size: 12px;
+  color: var(--yuzhe-ink-dim);
+}
+
+.wba-input {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--yuzhe-line);
+}
+
+/* 强度那一格（与接待台同一件事，只是只影响这一间屋）：
+   贴在输入框左头、跟输入框底对齐，长宽都不抢地方 */
+.wba-think {
+  flex: none;
+  margin-bottom: 1px;
+}
+
+/* 输入框只有一行的样子：回车发、Shift+回车换行（长到 140px 就自己滚）。
+   选择器带上 textarea：styles.css 里 `textarea.field` 给的 72px 最小高与
+   纵向可拖会被它压过去，得比它更具体才拦得住 */
+.wba-input textarea.wba-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 36px;
+  max-height: 140px;
+  padding: 7px 10px;
+  resize: none;
+  line-height: 1.55;
+  font-size: 13.5px;
+}
+
+.wba-input .btn {
+  flex: none;
+}

@@ -1,0 +1,175 @@
+/* ── 网页矩阵工作台：独立整页 ─────────────────────────────
+   矩阵是个外挂工作台（配置多、层级深、有图谱与预览），塞在设置抽屉里会被压扁，
+   所以单开一页。风格先钉在接待台的默认纸面上 —— 之后要加 mod 再说。
+   连具体样式都尽量借全局 token，不另起一套皮。 */
+
+.wb {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--yuzhe-bg);
+}
+
+/* z-index 抬起来：预览那一面把页面铺满整屏（z-index 0），顶栏要浮在它上面当上层 */
+.wb-bar {
+  position: relative;
+  z-index: 3;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--yuzhe-line);
+  background: var(--yuzhe-surface);
+}
+
+/* 收起导航：上层整个退场，连顶栏也不留 —— 整幅高度都归舞台。
+   预览面最吃这一条（顶栏不退，被预览的那页就铺不满整屏） */
+.wb-bare .wb-bar {
+  display: none;
+}
+
+/* 左上角那枚方块：跟矩阵按钮同一种「白纸黑字」的记号 */
+.wb-mark {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--yuzhe-ink-strong);
+}
+
+.wb-brand {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
+}
+
+.wb-name {
+  font-size: 14px;
+  color: var(--yuzhe-ink-strong);
+}
+
+.wb-sub {
+  font-size: 12px;
+}
+
+.wb-spacer {
+  flex: 1 1 auto;
+}
+
+.wb-chip {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--yuzhe-line);
+  color: var(--yuzhe-ink-dim);
+  white-space: nowrap;
+}
+
+.wb-chip.on {
+  color: var(--yuzhe-ink);
+  border-color: var(--yuzhe-line-strong);
+}
+
+.wb-chip.off {
+  color: var(--yuzhe-danger);
+  border-color: var(--yuzhe-danger);
+}
+
+/* 面板自己滚：整页锁死，内部滚动，跟接待台一个路子。
+   滚动已经交给面板（.mx-shell 里各视图自己滚），这里只管锁高，别再叠一层滚动。 */
+.wb-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.wb-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 右侧助手栏：与舞台并排，单独一条竖栏。
+   z-index 抬起来同左导轨 —— 预览那一面把整页铺满（z-index 0）时，这栏要浮在它上面。 */
+.wb-agent {
+  position: relative;
+  z-index: 3;
+  flex: 0 0 auto;
+  width: 340px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--yuzhe-line);
+  background: var(--yuzhe-surface);
+}
+
+/* 收起来 = 藏起来，不是拆掉：连接、消息、没发出去的字都留在原地，
+   展开是露出来而不是重来一遍（拆掉的话每回展开都要重连 + 重取历史，看着就是白一下） */
+.wb-agent.off {
+  display: none;
+}
+
+/* 窗口不够宽时先让这条竖栏窄下来：舞台（图谱、预览）更吃宽度 */
+@media (max-width: 1180px) {
+  .wb-agent {
+    width: 300px;
+  }
+}
+
+@media (max-width: 980px) {
+  .wb-agent {
+    width: 264px;
+  }
+}
+
+/* 助手栏收起来后留的浮标：钉**右下**角，让开左下角那枚「导航 | 编辑」。
+   整枚能拖（与 .mx-fab 同一套），所以 touch-action 让开给拖拽 */
+.wb-agent-fab {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 70;
+  display: inline-flex;
+  align-items: stretch;
+  padding: 2px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: 999px;
+  background: var(--yuzhe-surface);
+  box-shadow: var(--yuzhe-shadow);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.wb-agent-fab.dragging {
+  cursor: grabbing;
+}
+
+.wb-boot,
+.wb-deny {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.wb-deny-card {
+  max-width: 380px;
+  padding: 28px 32px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-l);
+  background: var(--yuzhe-surface);
+  text-align: center;
+}
+
+.wb-deny-card h1 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.wb-deny-card p {
+  margin: 0 0 18px;
+}

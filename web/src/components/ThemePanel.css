@@ -1,0 +1,905 @@
+/* 主题工坊（ThemePanel）的专属样式。
+   视觉贴着 Pages.css 的 settings-card 体系走：白纸卡片、发丝线、--yuzhe-* 变量，
+   只补主题编辑需要的新零件（预览砖、分段选择、图片位、弹页条……）。 */
+
+/* ── 顶部状态条：报错 / 成功 / 未保存提醒 ── */
+.tp-status {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.tp-status:empty {
+  display: none;
+}
+
+.tp-dirty {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-bg-soft);
+  color: var(--yuzhe-ink-dim);
+  font-size: 12.5px;
+}
+
+/* ── 卡内字段块 ── */
+.tp-field {
+  margin-top: 14px;
+}
+
+/* 小字说明：灰色、贴着控件 */
+.tp-note {
+  margin: 6px 0 0;
+  color: var(--yuzhe-ink-faint);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+/* ── 分段单选（基调 / 动效档）：像一排小纸签，选中的描黑边 ── */
+.tp-seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tp-seg-item {
+  cursor: pointer;
+}
+
+.tp-seg-item input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.tp-seg-item span {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: 999px;
+  background: var(--yuzhe-surface);
+  color: var(--yuzhe-ink-dim);
+  font-size: 13px;
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.tp-seg-item:hover span {
+  border-color: var(--yuzhe-line-strong);
+  color: var(--yuzhe-ink);
+}
+
+.tp-seg-item:has(input:checked) span {
+  border-color: var(--yuzhe-black);
+  background: var(--yuzhe-black);
+  color: var(--yuzhe-on-black);
+}
+
+.tp-seg-item:has(input:disabled) {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* ── 三级调色器：三根滑杆（色相/浓度/深浅）+ 三块小样 ── */
+.tp-tint {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--yuzhe-line-soft);
+  border-radius: var(--yuzhe-r-l);
+  background: var(--yuzhe-bg-soft);
+}
+
+.tp-tint-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.tp-tint-label {
+  flex: none;
+  width: 34px;
+  color: var(--yuzhe-ink-dim);
+  font-size: 12px;
+}
+
+.tp-tint-row input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  height: 10px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: 999px;
+  appearance: none;
+  cursor: pointer;
+}
+
+.tp-tint-row input[type="range"]::-webkit-slider-thumb {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--yuzhe-surface);
+  border-radius: 50%;
+  background: var(--yuzhe-black);
+  box-shadow: var(--yuzhe-shadow);
+  appearance: none;
+  cursor: pointer;
+}
+
+.tp-tint-row input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--yuzhe-surface);
+  border-radius: 50%;
+  background: var(--yuzhe-black);
+  cursor: pointer;
+}
+
+.tp-tint-val {
+  flex: none;
+  width: 44px;
+  text-align: right;
+  color: var(--yuzhe-ink-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tp-tint-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.tp-tint-swatch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--yuzhe-ink-faint);
+  font-size: 12px;
+}
+
+.tp-tint-swatch i {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 24px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-s);
+  font-style: normal;
+  font-family: var(--font-display);
+  font-size: 12px;
+}
+
+/* ── 图片位编辑件（input + 上传 + 清除）── */
+.tp-image-field {
+  align-items: stretch;
+}
+
+.tp-upload {
+  flex: none;
+  padding: 7px 12px;
+  border-radius: var(--yuzhe-r-m);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.tp-upload:has(input:disabled) {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* ── 预览砖：背景位/图片位铺出来什么样，一眼看到 ── */
+.tp-preview {
+  position: relative;
+  width: 120px;
+  height: 76px;
+  flex: none;
+  overflow: hidden;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-bg-soft);
+}
+
+.tp-preview.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--yuzhe-ink-faint);
+  font-size: 11.5px;
+}
+
+.tp-preview-img {
+  position: absolute;
+  inset: 0;
+  background-repeat: no-repeat;
+}
+
+/* 压暗层单独盖一张黑纱，和模糊（filter）互不干扰 */
+.tp-preview-dim {
+  position: absolute;
+  inset: 0;
+  background: var(--yuzhe-black);
+  pointer-events: none;
+}
+
+/* ── ericher 形象 ── */
+.tp-avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.tp-avatar-row .tp-image-field {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.tp-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  flex: none;
+  overflow: hidden;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: 50%;
+  background: var(--yuzhe-bg-soft);
+  color: var(--yuzhe-ink-faint);
+}
+
+.tp-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* ── 背景落点：每个 scope 一块，落点之间压一条发丝线，像小样册一页页隔开 ── */
+.tp-scope {
+  padding: 14px 0;
+  border-top: 1px solid var(--yuzhe-line-soft);
+}
+
+.tp-scope-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.tp-scope-name {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--yuzhe-ink-strong);
+}
+
+.tp-scope-src {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  color: var(--yuzhe-ink-faint);
+  font-size: 11.5px;
+}
+
+.tp-scope-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.tp-scope-fields {
+  flex: 1 1 380px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 压暗 / 模糊滑杆 */
+.tp-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tp-slider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--yuzhe-ink-dim);
+}
+
+.tp-slider span {
+  flex: none;
+  width: 32px;
+}
+
+.tp-slider input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--yuzhe-black);
+}
+
+.tp-slider b {
+  flex: none;
+  width: 46px;
+  text-align: right;
+  font-weight: 500;
+  color: var(--yuzhe-ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── panelBg / buttonPattern 的效果小样 ── */
+.tp-swatch-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.tp-swatch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 140px;
+  height: 56px;
+  flex: none;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-bg-soft);
+  color: var(--yuzhe-ink-faint);
+  font-size: 11.5px;
+}
+
+.tp-swatch-tile {
+  background-repeat: repeat;
+  background-size: 140px;
+}
+
+.tp-swatch-row .tp-note {
+  flex: 1 1 240px;
+  margin: 0;
+  min-width: 0;
+}
+
+/* ── 图标覆盖列表 ── */
+.tp-icon-list {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tp-icon-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--yuzhe-line-soft);
+}
+
+.tp-icon-list li:first-child {
+  border-top: none;
+}
+
+.tp-icon-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  overflow: hidden;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-bg-soft);
+  color: var(--yuzhe-ink-faint);
+}
+
+.tp-icon-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.tp-icon-name {
+  flex: none;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: var(--yuzhe-ink);
+}
+
+.tp-icon-src {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--yuzhe-ink-faint);
+  font-size: 11.5px;
+}
+
+/* ── 消息栏风格：三张小预览卡，选中的描黑边 ── */
+.tp-msg-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.tp-msg-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 218px;
+  padding: 12px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-l);
+  background: var(--yuzhe-surface);
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.tp-msg-card:hover {
+  border-color: var(--yuzhe-line-strong);
+}
+
+.tp-msg-card.on {
+  border-color: var(--yuzhe-black);
+  box-shadow: inset 0 0 0 1px var(--yuzhe-black);
+}
+
+.tp-msg-card input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.tp-msg-card:has(input:disabled) {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.tp-msg-demo {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--yuzhe-line-soft);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-bg-soft);
+}
+
+.tp-msg {
+  max-width: 88%;
+  padding: 5px 9px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--yuzhe-ink);
+}
+
+.tp-msg.them {
+  align-self: flex-start;
+  background: var(--yuzhe-surface);
+  border: 1px solid var(--yuzhe-line);
+}
+
+.tp-msg.me {
+  align-self: flex-end;
+  background: var(--yuzhe-black);
+  color: var(--yuzhe-on-black);
+}
+
+/* 气泡：圆角 + 小尾巴方向 */
+.tp-demo-bubble .tp-msg.them {
+  border-radius: 12px 12px 12px 3px;
+}
+
+.tp-demo-bubble .tp-msg.me {
+  border-radius: 12px 12px 3px 12px;
+}
+
+/* 卡片：方角 + 描边 + 投影 */
+.tp-demo-card .tp-msg {
+  border-radius: 4px;
+  border: 1px solid var(--yuzhe-line);
+  background: var(--yuzhe-surface);
+  color: var(--yuzhe-ink);
+  box-shadow: var(--yuzhe-shadow);
+}
+
+.tp-demo-card .tp-msg.me {
+  border-color: var(--yuzhe-line-strong);
+}
+
+/* 极简：去掉泡底，纯文字 */
+.tp-demo-minimal .tp-msg {
+  padding: 2px 0;
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: var(--yuzhe-ink);
+}
+
+.tp-demo-minimal .tp-msg.me {
+  color: var(--yuzhe-ink-dim);
+}
+
+.tp-msg-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tp-msg-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--yuzhe-ink-strong);
+}
+
+.tp-msg-meta .tp-note {
+  margin: 0;
+}
+
+/* ── 自定义 CSS ── */
+.tp-textarea {
+  min-height: 72px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.tp-code {
+  min-height: 128px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.7;
+  tab-size: 2;
+}
+
+/* ── 触发式弹页：一条弹页一块 ── */
+.tp-popup {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  margin-top: 12px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-l);
+  background: var(--yuzhe-bg-soft);
+}
+
+.tp-popup-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.tp-popup-head .btn {
+  margin-left: auto;
+}
+
+.tp-id {
+  padding: 2px 8px;
+  border: 1px solid var(--yuzhe-line-soft);
+  border-radius: 999px;
+  background: var(--yuzhe-surface);
+  color: var(--yuzhe-ink-faint);
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+}
+
+.tp-num {
+  flex: 0 0 96px;
+  width: 96px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 弹页动作按钮：文字 + 去向两格，右侧删 ── */
+.tp-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--yuzhe-line-soft);
+}
+
+.tp-actions-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tp-action-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tp-action-label {
+  flex: 0 0 140px;
+  width: 140px;
+}
+
+.tp-action-to {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* ── 云盘选图器：浮一层挑图，点一张导进主题公开区 ── */
+.tp-drive-btn {
+  flex: none;
+  white-space: nowrap;
+}
+
+.tp-drive-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--yuzhe-black) 42%, transparent);
+}
+
+.tp-drive {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(640px, 100%);
+  max-height: min(72vh, 640px);
+  padding: 18px;
+  overflow: hidden;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-l);
+  background: var(--yuzhe-surface);
+  box-shadow: var(--yuzhe-shadow);
+}
+
+.tp-drive-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tp-drive-head h4 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--yuzhe-ink-strong);
+}
+
+.tp-drive .tp-note {
+  margin: 0;
+}
+
+.tp-drive-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 10px;
+}
+
+.tp-drive-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-bg-soft);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s ease;
+}
+
+.tp-drive-item:hover:not(:disabled) {
+  border-color: var(--yuzhe-line-strong);
+}
+
+.tp-drive-item:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.tp-drive-thumb {
+  width: 100%;
+  height: 96px;
+  object-fit: cover;
+  border-radius: var(--yuzhe-r-s, 6px);
+  background: var(--yuzhe-bg-soft);
+}
+
+.tp-drive-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--yuzhe-ink-dim);
+  font-size: 11.5px;
+}
+
+/* ── 圈定区域（头像裁剪） ─────────────────────────────── */
+
+.tp-crop {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(560px, 100%);
+  max-height: min(80vh, 720px);
+  padding: 18px;
+  overflow: hidden;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-l);
+  background: var(--yuzhe-surface);
+  box-shadow: var(--yuzhe-shadow);
+}
+
+.tp-crop-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--yuzhe-line-soft);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-bg-soft);
+  /* 拖框时别让页面跟着滚 */
+  touch-action: none;
+}
+
+/* 紧贴图片的定位参照：选框的百分比坐标全对着它算 */
+.tp-crop-canvas {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+}
+
+.tp-crop-canvas img {
+  display: block;
+  max-width: 100%;
+  max-height: 48vh;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.tp-crop-frame {
+  position: absolute;
+  border: 1.5px solid var(--yuzhe-black);
+  /* 框外整片压暗，脸亮在框里 */
+  box-shadow: 0 0 0 9999px color-mix(in srgb, var(--yuzhe-black) 42%, transparent);
+  cursor: move;
+}
+
+.tp-crop-handle {
+  position: absolute;
+  right: -7px;
+  bottom: -7px;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--yuzhe-black);
+  border-radius: 3px;
+  background: var(--yuzhe-surface);
+  cursor: nwse-resize;
+}
+
+.tp-crop-actions {
+  display: flex;
+  gap: 10px;
+}
+
+/* ── 自定义主题存档：一行一份，名字 + 时间/大小 + 动作 ── */
+.tp-sets {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tp-set {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-surface);
+}
+
+.tp-set-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.tp-set-name {
+  font-size: 13.5px;
+  color: var(--yuzhe-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tp-set-meta {
+  font-size: 12px;
+  color: var(--yuzhe-ink-faint);
+}
+
+.tp-set-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ── 外观四页：比别处松一档 ──
+   原先所有东西挤在一个页面里，卡片内边距、按钮与边框贴得太近；摊成四页后
+   每页内容少了，把留白放开来读着才不局促。只作用于外观页（.tp-appear），
+   别的设置页间距照旧。 */
+.tp-appear .settings-card {
+  margin-bottom: 20px;
+  padding: 22px 24px;
+}
+
+.tp-appear .card-header {
+  margin-bottom: 20px;
+}
+
+.tp-appear .tp-field {
+  margin-top: 18px;
+}
+
+.tp-appear .tp-status {
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.tp-appear .toggle-row {
+  padding: 15px 0;
+}
+
+.tp-appear .tp-seg {
+  gap: 10px;
+}
+
+.tp-appear .tp-seg-item span {
+  height: 32px;
+  padding: 0 16px;
+}
+
+/* 控件块与底部「保存」之间本来就贴边，给一条缝 */
+.tp-appear .toggle-list + .row-actions,
+.tp-appear .tp-field + .row-actions,
+.tp-appear .tp-sets + .row-actions {
+  margin-top: 16px;
+}
+
+.tp-appear .row-actions {
+  gap: 10px;
+}
