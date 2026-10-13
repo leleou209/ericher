@@ -1028,7 +1028,29 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     this.eventsReady = true;
   }
 
+  /**
+   * 冷启动记账。
+   *
+   * onStart 每一次「冷唤醒」都会重跑 —— 空闲驱逐、代码更新、运行时重启，全都算。
+   * 把最近的启动时刻记进 DO 存储（驱逐不丢），顺带打一行日志：两个时刻一减，
+   * 就知道是「一天两次的例行重启」还是「被频繁驱逐」—— 这两件事的处理方式完全不同。
+   * 只记账，不改任何行为。
+   */
+  private async recordBoot(): Promise<void> {
+    const now = Date.now();
+    const prev = (await this.ctx.storage.get<number[]>("bootAt")) ?? [];
+    const last = prev.length ? prev[prev.length - 1] : 0;
+    // -1 = 头一回，没有「距上次」可言
+    const gap = last ? Math.round((now - last) / 60_000) : -1;
+    await this.ctx.storage.put("bootAt", [...prev, now].slice(-20));
+    console.log(
+      `[boot] 冷启动第 ${prev.length + 1} 次` +
+        (gap < 0 ? "（首次）" : `，距上次 ${gap} 分钟`),
+    );
+  }
+
   async onStart(): Promise<void> {
+    await this.recordBoot();
     ensureMemorySchema(this.db);
     this.ensureFeedback();
     this.ensureSessions();

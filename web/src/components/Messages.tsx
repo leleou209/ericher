@@ -1421,6 +1421,7 @@ export function Messages({
   turnErrors,
   speakingId,
   room,
+  roomReady = true,
   showDetail,
   onSpeak,
   onRetry,
@@ -1436,6 +1437,11 @@ export function Messages({
   speakingId?: string;
   /** 当前连着的屋。反馈（赞/踩/标重/评论）都得跟着它走 —— 消息住在场屋里 */
   room?: string;
+  /**
+   * 连接是真挂在 `room` 这间屋上了没有。换场那一下 room 立刻就变了，
+   * 而 socket 还在旧屋上 —— 这时候去拉反馈是白跑一趟（还正撞上屋在唤醒，最慢）。
+   */
+  roomReady?: boolean;
   /** 管理员才看得到原始报文；来客只看人话 */
   showDetail: boolean;
   onSpeak?: (id: string, text: string) => void;
@@ -1465,23 +1471,44 @@ export function Messages({
    * 每次重取都认给新的队尾，报错卡就一路往下漂，新消息全跑它上面去了。
    */
   const demoted = useRef(new Set<string>());
+  /**
+   * 反馈拉取的请求定序：换屋那一下先发的那一趟还在飞，慢响应回来不许盖掉新屋的账。
+   * 换屋时当场把账清空（连同还在飞的那趟一起作废），等新屋的那趟回来再画 ——
+   * 否则上一屋的赞/踩/标重会先套到新屋的消息上，看着像消息被标错了。
+   */
+  const fbSeq = useRef(0);
   useEffect(() => {
     claimed.current.clear();
     demoted.current.clear();
     setErrOpen(false);
+    fbSeq.current++;
+    setFeedback({ votes: {}, comments: {}, flags: [] });
   }, [room]);
 
   const reload = useCallback(() => {
+    const seq = ++fbSeq.current;
     api
       .feedback(room)
-      .then(setFeedback)
+      .then((f) => {
+        if (seq === fbSeq.current) setFeedback(f);
+      })
       .catch(() => {});
   }, [room]);
 
-  // 消息数变化（新消息落库）与流式结束都要重拉：徽标跟着消息走
+  /**
+   * 消息数变化（新消息落库）与流式结束都要重拉：徽标跟着消息走。
+   *
+   * 但换场那一下这几件事是挤在一起来的 —— 换屋、消息到、state 到 —— 一板一眼地
+   * 各拉一次，就是一串同样的往返；而且第一发正好打在「屋刚被唤醒」那一刻，最慢，
+   * 结果还会被后面那发盖掉，纯属白等。所以两道闸：
+   *   1. 屋子没真连上不拉（roomReady）—— 那会儿拉的还是上一间屋的账；
+   *   2. 短窗口内的多次触发并成一次 —— 消息到与 state 到本来就是一前一后。
+   */
   useEffect(() => {
-    reload();
-  }, [reload, messages.length, streaming]);
+    if (!roomReady) return;
+    const t = window.setTimeout(reload, 200);
+    return () => window.clearTimeout(t);
+  }, [roomReady, reload, messages.length, streaming]);
 
   const onVote = useCallback(
     async (id: string, value: 1 | -1) => {

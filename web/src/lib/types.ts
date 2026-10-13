@@ -826,12 +826,20 @@ export type SettingsKey =
 /** 一页的身份档：公开 / 持票来客 / 管理员 / 指定来客档位白名单 */
 export type MatrixAccess = "public" | "visitor" | "admin" | "types";
 
+/**
+ * 节点类型：这个点是网页、是门卫、还是助手本体。
+ * 老配置里没有这一格，读的时候一律按 page（见 src/matrix/core.ts 的 parseKind）。
+ */
+export type MatrixNodeKind = "page" | "gate" | "assistant" | "app";
+
 /** 矩阵里的一页：一条层级路径 + 一档身份 + 一段正文（或一条外站链接） */
 export interface MatrixPage {
   id: string;
   path: string;
   title: string;
   access: MatrixAccess;
+  /** 节点类型，缺省 = page */
+  kind?: MatrixNodeKind;
   types?: string[];
   sandbox?: boolean;
   entry?: boolean;

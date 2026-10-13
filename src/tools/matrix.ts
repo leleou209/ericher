@@ -82,9 +82,17 @@ function extPath(pages: MatrixPage[], host: string): string {
   return `${base}-${Date.now().toString(36)}`;
 }
 
+/** 节点类型在工具输出里的叫法（page 是默认，不特意标出来） */
+const KIND_TEXT: Record<string, string> = {
+  gate: "门卫",
+  assistant: "助手",
+  app: "功能块",
+};
+
 /** 一页的现状一行（给 list 用） */
 function pageLine(p: MatrixPage): string {
   const tags: string[] = [p.access];
+  if (p.kind && p.kind !== "page") tags.push(KIND_TEXT[p.kind] ?? p.kind);
   if (p.entry) tags.push("入口页");
   if (p.sandbox) tags.push("沙箱");
   if (p.css) tags.push("有本页CSS");
@@ -106,9 +114,10 @@ export function matrixTools(ctx: ToolCtx) {
       description:
         "网页矩阵（接待台对面那些页面）。action=list 看现状（页面/通路/外观/外站认定）；" +
         "create 建一页（必填 path + title + html）；" +
-        "edit 改一页（用 id 或 path 指定，可改 title/html/css/access/entry/sandbox/newPath）；" +
+        "edit 改一页（用 id 或 path 指定，可改 title/html/css/kind/access/entry/sandbox/newPath）；" +
         "bind 连一条通路（from 指向 to；to 是站内 path/id 或一条完整外站网址，落点用 place 速记）；" +
         "style 改全站外观（accent 主色 / button 按钮形态）。\n" +
+        "kind 决定这一格是什么：page 网页（默认，带正文）/ gate 门卫（自己不出正文，站上去就是去验票，验完去它的第一条出线）/ assistant 助手（站上去送去 /assistant）/ app 功能块（还没实作）。\n" +
         "守则：外站能不能去由「认定表」说话 —— 我不往表里加域名，只在已认定的范围内连线，表外的一律如实说明「访客会被门卫页拦下」；" +
         "javascript: / data: / blob: 这类伪协议任何动作都不放行。动手前先 list 看清现有路径，别撞已有路径。",
       inputSchema: z
@@ -126,6 +135,12 @@ export function matrixTools(ctx: ToolCtx) {
             .optional()
             .describe("create 必填、edit 可换：整篇正文 HTML"),
           css: z.string().optional().describe("本页 CSS（只在这一页生效）"),
+          kind: z
+            .enum(["page", "gate", "assistant", "app"])
+            .optional()
+            .describe(
+              "节点类型：page 网页（默认，带正文）/ gate 门卫（自己不出正文，站上去就是去验票，验完去它的第一条出线）/ assistant 助手（站上去送去 /assistant）/ app 功能块（还没实作）",
+            ),
           access: z
             .enum(["public", "visitor", "admin", "types"])
             .optional()
@@ -167,11 +182,13 @@ export function matrixTools(ctx: ToolCtx) {
           if (a.action === "create") {
             need(!!(a.path || "").trim(), "path", "create 必填：路径");
             need(!!(a.title || "").trim(), "title", "create 必填：标题");
-            need(
-              !!(a.html || "").trim() || !!(a.external || "").trim(),
-              "html",
-              "create 必填：正文 HTML（外站页则改填 external）",
-            );
+            // 门卫/助手/功能块自己不出正文，所以只有建网页才要 html
+            if (!a.kind || a.kind === "page")
+              need(
+                !!(a.html || "").trim() || !!(a.external || "").trim(),
+                "html",
+                "create 必填：正文 HTML（外站页则改填 external）",
+              );
           }
           if (a.action === "edit" || (a.action === "bind" && !a.from))
             need(!!(a.ref || a.path || "").trim(), "ref", `${a.action} 必填：用 id 或 path 指定页面`);
@@ -234,6 +251,7 @@ export function matrixTools(ctx: ToolCtx) {
             const page = await savePageCore(ctx.env, {
               path,
               title: a.title,
+              kind: a.kind,
               access: a.access ?? "public",
               types: a.types,
               entry: a.entry === true,
@@ -244,7 +262,11 @@ export function matrixTools(ctx: ToolCtx) {
             });
             return `建好了：/${page.path}（${page.title}）id=${page.id}${
               page.entry ? "，已设为入口页" : ""
-            }${page.external ? `，外站 → ${page.external}` : ""}`;
+            }${page.external ? `，外站 → ${page.external}` : ""}${
+              page.kind && page.kind !== "page"
+                ? `，类型：${KIND_TEXT[page.kind] ?? page.kind}`
+                : ""
+            }`;
           }
 
           // ── 改页 ──
@@ -259,6 +281,7 @@ export function matrixTools(ctx: ToolCtx) {
               id: cur.id,
               path: norm(a.newPath || cur.path),
               title: a.title ?? cur.title,
+              kind: a.kind ?? cur.kind,
               access: a.access ?? cur.access,
               types: a.types ?? cur.types,
               entry: a.entry ?? cur.entry === true,
@@ -271,6 +294,7 @@ export function matrixTools(ctx: ToolCtx) {
               a.html !== undefined && "正文",
               a.css !== undefined && "本页CSS",
               a.title !== undefined && "标题",
+              a.kind !== undefined && "类型",
               a.access !== undefined && "可见范围",
               a.newPath !== undefined && "路径",
               a.entry !== undefined && "入口页",

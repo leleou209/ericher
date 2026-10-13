@@ -31,6 +31,17 @@ export interface MatrixEnv {
 /** 四档身份：公开 / 持票来客 / 管理员 / 指定来客档位白名单 */
 type Access = "public" | "visitor" | "admin" | "types";
 
+/**
+ * 节点类型：矩阵里的一个点是什么东西。
+ * 点是网页、是门卫、还是助手本体，决定「站到它会发生什么」——
+ * 有了它，那张图才说得清方向：入口 → 展示页 → 门卫 → 内区 → 助手 / 功能块。
+ */
+export type MatrixNodeKind =
+  | "page" // 一页网页（默认）：带正文，或引用云盘文件，或是一条外站链接
+  | "gate" // 门卫：自己不出正文，站到它就把人送去验票，验完去它的第一条出边
+  | "assistant" // 助手：站到它就把人送去接待台本体
+  | "app"; // 功能块：由内建的处理单元出内容（还没接，先占这一格）
+
 export interface MatrixPage {
   /** 随机码，正文存 matrix/page/<id>.html */
   id: string;
@@ -38,6 +49,8 @@ export interface MatrixPage {
   path: string;
   title: string;
   access: Access;
+  /** 节点类型；缺省 = page。老配置里没有这一格，读的时候一律按网页算 */
+  kind?: MatrixNodeKind;
   /** access === "types" 时的档位白名单（来客类型 id） */
   types?: string[];
   /** 页面级沙箱，默认关 */
@@ -129,6 +142,8 @@ const CONFIG_TTL_MS = 5_000;
 const MAX_SITES = 200;
 /** 门卫页（去外站前的那道闸）的固定落点：保留路径，不做页面 */
 const GATE_PATH = "_gate";
+/** 验票页（进内区前的那道闸）的固定落点：保留路径，不做页面 */
+const TICKET_PATH = "_ticket";
 /** 保留字：这些首段归主包（应用、静态资源、助手固定落点），矩阵不认领 */
 const RESERVED_FIRST = new Set([
   "api",
@@ -136,8 +151,9 @@ const RESERVED_FIRST = new Set([
   "assets",
   "index",
   "assistant",
-  // 门卫页的固定落点：它得独占，不能被某个矩阵页面占去 —— 占去就等于把闸门交给页面
+  // 两道闸的固定落点：它们得独占，不能被某个矩阵页面占去 —— 占去就等于把闸门交给页面
   GATE_PATH,
+  TICKET_PATH,
 ]);
 /** 助手（接待台本体）的固定落点：外挂层的「回助手」与各静态页的回头链接都指它 */
 const ASSISTANT_PATH = "/assistant";
@@ -396,19 +412,29 @@ function buildStyle(t: MatrixTheme): string {
     `<style id="mx-style">` +
     `:root{--mx-accent:${t.accent};--mx-radius:8px;--mx-ink:#111;` +
     `--mx-line:rgba(0,0,0,.14);--mx-font:14px/1.6 system-ui,-apple-system,'Segoe UI',sans-serif;}` +
+    // 白纸黑字兜个底：页面自己不写背景时，画布会交给浏览器 —— 开着自动深色的
+    // 那边把画布涂黑，而正文颜色还是默认的黑，于是黑底黑字、整页像空白。
+    // 底色与字色成对写死就翻不出这种局面（真被自动深色反相，也是一对一起反）。
+    // color-scheme:light 顺带把表单控件按浅色画。页面自己的 CSS 排在这段之后，
+    // 想换深色主题照样盖得住。
+    `html{background:#fff;color:var(--mx-ink);color-scheme:light;}` +
     `a.mx-link,a.mx-link:visited{color:var(--mx-accent);text-decoration:none;}` +
     `a.mx-link:hover{text-decoration:underline;}` +
     `.mx-btn,.mx-btn:visited{display:inline-flex;align-items:center;color:var(--mx-accent);` +
     `font:var(--mx-font);text-decoration:none;}` +
     `.mx-btn:hover{text-decoration:none;}` +
     BUTTON_CSS[t.button] +
-    // 悬浮菜单：钉在左上角、半透明，不抢正文的视线，也不跟着滚动跑
+    // 悬浮菜单：默认钉在左上角、半透明，不抢正文的视线，也不跟着滚动跑。
+    // 但它是能拖的（见 buildNavDrag）—— 正文里被它压住的那块，挪开就是了
     `.mx-nav{position:fixed;left:12px;top:12px;z-index:2147483646;max-width:264px;` +
     `background:rgba(255,255,255,.78);color:var(--mx-ink);border:1px solid var(--mx-line);` +
     `border-radius:10px;padding:6px 10px;box-shadow:0 2px 12px rgba(0,0,0,.14);font:var(--mx-font);}` +
     // 折叠开关：真身藏起来（别占位、别挡点击），键盘 Tab 过去还能按空格开合
     `.mx-nav-cb{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;}` +
-    `.mx-nav-sum{display:block;cursor:pointer;font-weight:600;}` +
+    // 摘要那行既是开合的开关，也是整块菜单的抓手 —— 光标给「抓」
+    `.mx-nav-sum{display:block;cursor:grab;font-weight:600;user-select:none;}` +
+    `.mx-nav.mx-drag{opacity:.92;}` +
+    `.mx-nav.mx-drag .mx-nav-sum{cursor:grabbing;}` +
     `.mx-nav-sum::after{content:"▾";margin-left:6px;color:#999;font-size:11px;}` +
     `.mx-nav-body{display:none;}` +
     `.mx-nav-cb:checked~.mx-nav .mx-nav-body{display:block;}` +
@@ -448,6 +474,63 @@ function buildStyle(t: MatrixTheme): string {
 }
 
 /**
+ * 悬浮菜单的拖拽：按住摘要那行，整块菜单跟着手走，落点记在本地。
+ *
+ * 菜单默认还是钉在左上角，只是终于挪得动了 —— 正文里被它压住的那块，从前只能
+ * 靠折叠让开，现在直接拖走。落点按浏览器记（localStorage），下次进来还在原处。
+ *
+ * 一小段自足的内联脚本：不外链、不依赖任何东西（矩阵页要能断网打开）。
+ * 摘要那行本来就是开合的开关，所以拖过之后紧跟的那一下 click 得吞掉 ——
+ * 不然松手时顺手就把菜单开合了（跟工作台里那些浮窗一个道理）。
+ * 沙箱页的源是不透明的，localStorage 会抛：读写都裹了 try，抛了就退成「不记」。
+ */
+function buildNavDrag(): string {
+  return (
+    `<script>(function(){` +
+    `var n=document.querySelector('.mx-nav'),` +
+    `s=n&&n.querySelector('.mx-nav-sum');` +
+    `if(!s)return;` +
+    `var K='matrix:nav:pos',T=3,d=null,mv=0,w=0,h=0,sx=0,sy=0,ox=0,oy=0;` +
+    `function size(){w=n.offsetWidth;h=n.offsetHeight;}` +
+    `function place(x,y){` +
+    `n.style.left=Math.max(4,Math.min(innerWidth-w-4,x))+'px';` +
+    `n.style.top=Math.max(4,Math.min(innerHeight-h-4,y))+'px';` +
+    `n.style.right='auto';n.style.bottom='auto';` +
+    `n.style.maxWidth=Math.min(264,innerWidth-24)+'px';}` +
+    // 恢复上次挪到的地方；读不出来（没拖过 / 沙箱页）就保持 CSS 的左上角
+    `try{var p=JSON.parse(localStorage.getItem(K)||'null');` +
+    `if(p&&isFinite(p.x)&&isFinite(p.y)){size();place(p.x,p.y);}}catch(e){}` +
+    `s.style.touchAction='none';` +
+    `s.addEventListener('pointerdown',function(e){` +
+    `if(e.button)return;` +
+    `var r=n.getBoundingClientRect();` +
+    `size();d=e.pointerId;mv=0;sx=e.clientX;sy=e.clientY;ox=r.left;oy=r.top;` +
+    `try{s.setPointerCapture(e.pointerId);}catch(x){}});` +
+    `s.addEventListener('pointermove',function(e){` +
+    `if(d===null)return;` +
+    // 先挪够阈值才认作「在拖」：点一下是开合，不是拖
+    `if(!mv){if(Math.abs(e.clientX-sx)<T&&Math.abs(e.clientY-sy)<T)return;` +
+    `mv=1;n.className+=' mx-drag';}` +
+    `place(ox+e.clientX-sx,oy+e.clientY-sy);});` +
+    `function end(){` +
+    `if(d===null)return;` +
+    `try{s.releasePointerCapture(d);}catch(x){}` +
+    `d=null;n.className=n.className.replace(' mx-drag','');` +
+    `if(mv){try{localStorage.setItem(K,JSON.stringify({` +
+    `x:parseFloat(n.style.left),y:parseFloat(n.style.top)}));}catch(x){}}}` +
+    `s.addEventListener('pointerup',end);` +
+    `s.addEventListener('pointercancel',end);` +
+    // mv 留到下一次按下才复位：这一下 click 正是「刚拖完」的那一下
+    `s.addEventListener('click',function(e){` +
+    `if(mv){e.preventDefault();e.stopPropagation();}},true);` +
+    `addEventListener('resize',function(){` +
+    `size();if(n.style.left)place(parseFloat(n.style.left),` +
+    `parseFloat(n.style.top));});` +
+    `})();</script>`
+  );
+}
+
+/**
  * 全局悬浮菜单：站在哪一页都能看到「我还能去哪儿」。
  *
  * 列的是当前身份**能访问的全部页面**（外站也列，标一下），当前这页不重复列 ——
@@ -456,6 +539,8 @@ function buildStyle(t: MatrixTheme): string {
  * 开合用一个藏起来的复选框配摘要那行的 <label>，零脚本。默认开还是合按屏宽分工：
  * 宽屏摊开（页面留白得自己让开它），窄屏先收成一行摘要 —— 手机上摊开的菜单
  * 铺满一整条，等于在正文顶上压了块挡板，而访客第一眼要看的是页而不是菜单。
+ *
+ * 唯一那段脚本在 buildNavDrag：按住摘要那行能把它整块挪开（从前只能折叠让位）。
  */
 function buildNav(
   viewer: MatrixViewer,
@@ -491,7 +576,9 @@ function buildNav(
     `</div>` +
     `<div class="mx-nav-foot"><a class="mx-link" href="${ASSISTANT_PATH}">回助手</a></div>` +
     `</div>` +
-    `</div>`
+    `</div>` +
+    // 拖拽脚本紧跟着菜单：就在同一段里，解析到这儿菜单已经在了
+    buildNavDrag()
   );
 }
 
@@ -700,6 +787,168 @@ async function serveGate(
   return html(gatePage({ from, host, to, note: site.note }), noStore);
 }
 
+// ── 验票：进内区前的那道闸 ──────────────────────────────
+//
+// 矩阵页自己不认身份，只有 access 那四档决定「给不给看」。所以没票的人在门口
+// 只会撞上一句「不对你开放」，而矩阵里原本没有任何能拿到票的地方 —— 票是接待台
+// 那边发的（见 index.ts 的 /api/auth 与 /api/card/login）。
+//
+// 这一页把那两个口子搬进矩阵来：验过之后照着 next 原路回去，票就是进门时那张
+// cookie，跟从接待台进来完全一样。于是「公开展示区 → 验票 → 内区」这条链才走得通。
+
+/** 验票页的样式：借门卫页那一套（按钮、说明那几笔现成的），再补表单自己的 */
+const TICKET_STYLE =
+  GATE_STYLE +
+  ".tk-r{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;}" +
+  ".tk-tab{display:flex;gap:6px;justify-content:center;margin:0 0 16px;}" +
+  ".tk-tab label{padding:5px 12px;border:1px solid #e3e3e6;border-radius:999px;" +
+  "font-size:12.5px;color:#555;cursor:pointer;}" +
+  "#tk-m1:checked~.tk-tab label[for=tk-m1]," +
+  "#tk-m2:checked~.tk-tab label[for=tk-m2]{border-color:#111;color:#111;}" +
+  ".tk-in{display:block;width:100%;box-sizing:border-box;margin:0 0 10px;" +
+  "padding:9px 12px;border:1px solid #d9d9de;border-radius:8px;font-size:14px;" +
+  "background:#fff;color:#111;}" +
+  ".tk-in:focus{outline:none;border-color:#111;}" +
+  // 昵称那一格只在「身份卡」模式下露出来：两个口子要的东西不一样
+  ".tk-name{display:none;}" +
+  "#tk-m2:checked~form .tk-name{display:block;}" +
+  ".tk-go{display:block;width:100%;padding:9px 0;border:none;border-radius:8px;" +
+  "background:#111;color:#fff;font-size:14px;cursor:pointer;}" +
+  ".tk-go:disabled{opacity:.55;cursor:default;}" +
+  ".tk-err{margin:10px 0 0;color:#c9362c;font-size:12.5px;min-height:17px;}";
+
+/**
+ * 验票页：一张白卡片，两个口子（门禁密码 / 身份卡），验过跳 next。
+ * 一小段内联脚本，不外链任何东西 —— 跟矩阵页一样，除了验票那一下本身，别的都能离线。
+ */
+function ticketPage(next: string): string {
+  // 嵌进脚本里，所以按 JSON 编码再把 < 挑掉，免得路径里带出 </script>
+  const nextJson = JSON.stringify(next).replace(/</g, "\\u003c");
+  const script =
+    "(function(){var f=document.getElementById('tk-form')," +
+    "p=document.getElementById('tk-pw'),n=document.getElementById('tk-name')," +
+    "b=document.getElementById('tk-go'),e=document.getElementById('tk-err')," +
+    `m1=document.getElementById('tk-m1'),NEXT=${nextJson};` +
+    "function post(u,d){return fetch(u,{method:'POST'," +
+    "headers:{'Content-Type':'application/json'},body:JSON.stringify(d)})" +
+    ".then(function(r){return r.json().catch(function(){return {};});});}" +
+    "function rest(){b.disabled=false;b.textContent='进去';}" +
+    "f.addEventListener('submit',function(ev){ev.preventDefault();" +
+    "e.textContent='';b.disabled=true;b.textContent='验票中…';" +
+    "var card=!m1.checked;" +
+    "post(card?'/api/card/login':'/api/auth'," +
+    "card?{name:n.value,password:p.value}:{pw:p.value})" +
+    ".then(function(j){if(j&&j.ok){location.href=NEXT;return;}" +
+    "e.textContent=(j&&j.error)||'没验过去，再试一次。';rest();})" +
+    ".catch(function(){e.textContent='连不上，检查网络再试。';rest();});});})();";
+
+  return (
+    `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>验票</title><style>${TICKET_STYLE}</style></head>` +
+    `<body style="${PAGE_SHELL_STYLE}"><main style="${PAGE_CARD_STYLE}">` +
+    `<h1 style="margin:0 0 10px;font-size:18px;">验个票再进去</h1>` +
+    `<p class="gate-msg">里面那几页要先认一下人。验过之后照原路回去。</p>` +
+    `<input class="tk-r" type="radio" name="tk-m" id="tk-m1" checked>` +
+    `<input class="tk-r" type="radio" name="tk-m" id="tk-m2">` +
+    `<div class="tk-tab">` +
+    `<label for="tk-m1">门禁密码</label><label for="tk-m2">身份卡</label>` +
+    `</div>` +
+    `<form id="tk-form">` +
+    `<input class="tk-in tk-name" id="tk-name" autocomplete="username" ` +
+    `placeholder="昵称（身份卡上写着的）">` +
+    `<input class="tk-in" id="tk-pw" type="password" ` +
+    `autocomplete="current-password" placeholder="密码">` +
+    `<button class="tk-go" id="tk-go" type="submit">进去</button>` +
+    `<p class="tk-err" id="tk-err"></p>` +
+    `</form>` +
+    `<p style="margin:14px 0 0;font-size:13px;">` +
+    `<a href="${ASSISTANT_PATH}" style="color:#555;text-decoration:none;">回助手</a>` +
+    `</p></main>` +
+    `<script>${script}</script>` +
+    `</body></html>`
+  );
+}
+
+/**
+ * 不验票时该去哪：矩阵的**能出正文的**入口页，没有就回助手。
+ * 入口页也可能是门卫/助手/功能块这几类 —— 它们自己不出正文、站上去还会再把人
+ * 送去 /_ticket。要是照旧返回它，验完票落到它头上又被弹回验票页，来回死循环。
+ * 所以只认 kind=page 的入口页（老配置缺 kind 一律按 page 算）。
+ */
+function defaultNextPath(cfg: MatrixConfig): string {
+  const entry = cfg.pages.find(
+    (p) => p.entry && !p.external && p.path && parseKind(p.kind) === "page",
+  );
+  return entry ? `/${entry.path}` : ASSISTANT_PATH;
+}
+
+/**
+ * 门卫验完去哪：它的第一条出边指向的那一页（按 order 排）。
+ * 只挑「网页」那一类：指向另一个门卫等于让人再验一次，转圈；
+ * 指向外站页也不行 —— 那条路径本身不出正文。挑不出来就交给调用方兜底。
+ */
+function firstTargetPath(cfg: MatrixConfig, gate: MatrixPage): string | null {
+  const outs = cfg.links
+    .filter((l) => l.from === gate.id)
+    .sort((a, b) => a.order - b.order || a.label.localeCompare(b.label));
+  for (const l of outs) {
+    const t = cfg.pages.find((p) => p.id === l.to);
+    if (t && t.kind !== "gate" && !t.external && t.path) return t.path;
+  }
+  return null;
+}
+
+/**
+ * 验票页本体。next 只收矩阵自己的路径（validPath 那套文法：站内相对、合法段、
+ * 不占保留字）—— 不这样收，这一页就成了一条开放跳转。
+ */
+async function serveTicket(
+  req: Request,
+  env: MatrixEnv,
+  viewer: MatrixViewer,
+): Promise<Response> {
+  const cfg = await loadConfig(env);
+  const raw = (new URL(req.url).searchParams.get("next") || "").trim();
+  const clean = normPath(`/${raw}`);
+  const next = validPath(clean) ? `/${clean}` : defaultNextPath(cfg);
+  const noStore = { "Cache-Control": "no-store" };
+
+  // 已经有票了就别再拦：他点两次「去验票」不该卡在这儿来回转
+  if (viewer.role !== "public")
+    return new Response(null, {
+      status: 302,
+      headers: { Location: next, ...noStore },
+    });
+
+  return html(ticketPage(next), noStore);
+}
+
+/**
+ * 没票的人撞上「不开放」的那一页：给他一条路，而不是一堵墙。
+ * 有票但档位不够的别再引他去验票 —— 他已经有票了，再验一次只会原地转圈。
+ */
+function closedPage(viewer: MatrixViewer, path: string): string {
+  if (viewer.role !== "public")
+    return staticPage(
+      "这一页不向你开放",
+      "当前身份进不去这一页。换个入口，或回接待台继续。",
+    );
+  const to = `/${TICKET_PATH}?next=${encodeURIComponent(path)}`;
+  return (
+    `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>先验票</title><style>${GATE_STYLE}</style></head>` +
+    `<body style="${PAGE_SHELL_STYLE}"><main style="${PAGE_CARD_STYLE}">` +
+    `<h1 style="margin:0 0 10px;font-size:18px;">这一页要验票</h1>` +
+    `<p style="margin:0 0 18px;color:#555;">认一下人，这一页才开给你。</p>` +
+    `<a class="gate-go" href="${esc(to)}">去验票</a>` +
+    `<p style="margin:16px 0 0;font-size:13px;">` +
+    `<a href="${ASSISTANT_PATH}" style="color:#0b6bcb;text-decoration:none;">回助手</a>` +
+    `</p></main></body></html>`
+  );
+}
+
 // ── 通路注入 ────────────────────────────────────────────
 
 /** 正则字面量转义：锚点名是管理员填的，可能带正则元字符 */
@@ -830,12 +1079,18 @@ function injectLinks(
 
   let out2 = injectFallbackNav(result, fallback);
 
-  // 拖拽落点：让 body 成为定位祖先，再把这撮按钮绝对定位到整页坐标（百分比）。
-  // 不让 body 定位，百分比会按初始包含块（视口高）解析 —— 长页面全挤在首屏。
+  // 拖拽落点：把这撮按钮绝对定位到整页坐标（百分比）。
+  // 定位祖先得是「铺满整页」的那一层，且原点在页顶 —— 于是选 html，给它一屏的
+  // 最小高：短页也撑到一屏，长页本来就是内容高。
+  // 不用 body：它是内容高（短页只有几十像素），百分比会被压进顶部一小条；它还
+  // 自带 8px 外边距，原点对不上。不用初始包含块（视口）：长页面全挤在首屏。
   // 没有 body 时 isPoint 已是 false，它们自然落进上面的兜底栏，无处安放就算了。
   const points = rendered.filter((r) => r.isPoint);
   if (points.length) {
-    out2 = injectAfterBody(out2, "<style>body{position:relative;}</style>");
+    out2 = injectAfterBody(
+      out2,
+      "<style>html{position:relative;min-height:100vh;}</style>",
+    );
     out2 = injectBeforeBodyEnd(out2, points.map((p) => p.html).join(""));
   }
   return out2;
@@ -893,9 +1148,37 @@ async function servePage(
   const page = cfg.pages.find((p) => !p.external && p.path === path);
   if (!page) return null;
 
+  // 进不去：没票的人给一条「去验票」的路，有票但档位不够的如实说
   if (!allowed(page, viewer))
+    return html(closedPage(viewer, path), { "Cache-Control": "no-store" });
+
+  // 门卫：自己不出正文，站到它就把人送去验票 —— 验完去它的第一条出边。
+  // 挑不出出边就不带 next，让验票页自己兜底（落到入口页 / 助手）
+  if (page.kind === "gate") {
+    const to = firstTargetPath(cfg, page);
+    return new Response(null, {
+      status: 302,
+      headers: {
+        Location: `/${TICKET_PATH}${to ? `?next=${encodeURIComponent(to)}` : ""}`,
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+
+  // 助手：这一格就是接待台本体，把人送过去
+  if (page.kind === "assistant")
+    return new Response(null, {
+      status: 302,
+      headers: { Location: ASSISTANT_PATH, "Cache-Control": "no-store" },
+    });
+
+  // 功能块：内建处理单元还没接上，如实说一句，别装作有内容
+  if (page.kind === "app")
     return html(
-      staticPage("不对你开放", "这一页不向当前身份公开。换个入口，或回接待台继续。"),
+      staticPage(
+        "这一格还没接上",
+        "功能块还没实作。先在面板里把它改成网页或门卫。",
+      ),
       { "Cache-Control": "no-store" },
     );
 
@@ -951,6 +1234,7 @@ interface SaveMeta {
   id?: unknown;
   path?: unknown;
   title?: unknown;
+  kind?: unknown;
   access?: unknown;
   types?: unknown;
   sandbox?: unknown;
@@ -961,6 +1245,11 @@ interface SaveMeta {
 
 function parseAccess(v: unknown): Access {
   return v === "visitor" || v === "admin" || v === "types" ? v : "public";
+}
+
+/** 节点类型收口：认不出来的（含老配置的 undefined）一律当普通网页 */
+function parseKind(v: unknown): MatrixNodeKind {
+  return v === "gate" || v === "assistant" || v === "app" ? v : "page";
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -992,6 +1281,8 @@ export interface MatrixSaveInput {
   id?: string;
   path?: string;
   title?: string;
+  /** 节点类型，缺省 page */
+  kind?: string;
   access?: string;
   types?: unknown;
   sandbox?: boolean;
@@ -1025,14 +1316,23 @@ export async function savePageCore(
   const cfg = await loadConfig(env);
 
   const id = typeof input.id === "string" && input.id ? input.id : newId();
+  // id 要直接拼进 R2 key（matrix/page/<id>.html），跟解包同一把尺：只认小写字母与数字。
+  // 不卡的话，管理面带个 `/` 的 id 就能把正文写到桶里别处，导出的包还会因「嵌套
+  // 目录」被解包丢掉正文 —— 存得进、却装不回来
+  if (!PACK_ID_RE.test(id))
+    throw new MatrixInputError("页面 id 不合法（只认小写字母与数字，最长 32 位）");
   const existing = cfg.pages.find((p) => p.id === id);
   // 路径唯一：别的页占了这条路径就不给（外站链接也占位，避免导航里两条同名）
   if (cfg.pages.some((p) => p.id !== id && p.path === path))
     throw new MatrixInputError(`路径 /${path} 已被占用`);
 
+  // 改一页时不带 kind 就沿用旧的：免得只改了标题，门卫悄悄变回网页
+  const kind = parseKind(input.kind ?? existing?.kind);
   const access = parseAccess(input.access);
   const sandbox = input.sandbox === true;
   const entry = input.entry === true;
+  // 只有「网页」这一种才谈得上正文、外链、页级 CSS —— 门卫/助手/功能块自己不出内容
+  const isPage = kind === "page";
 
   // 本页 CSS：过收口，脏写法当场打回，不写进记录
   const css = parseCss(input.css);
@@ -1041,22 +1341,25 @@ export async function savePageCore(
     id,
     path,
     title,
+    kind,
     access: entry ? "public" : access,
     types:
       access === "types" && Array.isArray(input.types)
         ? input.types.map((t) => String(t)).filter(Boolean).slice(0, 50)
         : undefined,
-    // 入口页必须公开且不许勾沙箱：它是所有人的门面，不能自己把自己挡在门外
-    sandbox: entry ? false : sandbox,
+    // 入口页必须公开且不许勾沙箱：它是所有人的门面，不能自己把自己挡在门外。
+    // 非网页类型也没有可沙箱的正文
+    sandbox: entry || !isPage ? false : sandbox,
     entry,
-    external: external || undefined,
-    css,
+    external: isPage ? external || undefined : undefined,
+    css: isPage ? css : undefined,
     updatedAt: Date.now(),
   };
 
   // 正文：外站链接不出正文；否则按 上传文件 / 粘贴文本 / 引用云盘文件 三选一。
-  // 「引用云盘文件」不拷贝正文，只记下 key —— 那边改了页面跟着变（见 servePage）
-  if (!page.external) {
+  // 「引用云盘文件」不拷贝正文，只记下 key —— 那边改了页面跟着变（见 servePage）。
+  // 门卫/助手/功能块不进这一段：它们本来就没有正文
+  if (isPage && !page.external) {
     const file = input.file;
     const text = input.text;
     const driveKey = input.key;
@@ -1091,6 +1394,13 @@ export async function savePageCore(
       page.driveKey = existing.driveKey;
     } else {
       throw new MatrixInputError("缺少页面正文（上传 / 粘贴 / 引用云盘文件 / 填外链）");
+    }
+  } else if (!isPage && existing) {
+    // 从网页改成门卫/助手/功能块：原来那份正文没人认了，顺手清掉
+    try {
+      await env.MEMORY_BUCKET.delete(bodyKey(id));
+    } catch {
+      // 孤儿正文不影响使用，留给后续清理
     }
   }
 
@@ -1128,6 +1438,7 @@ async function handleSave(req: Request, env: MatrixEnv): Promise<Response> {
       id: typeof meta.id === "string" ? meta.id : undefined,
       path: String(meta.path ?? ""),
       title: String(meta.title ?? ""),
+      kind: typeof meta.kind === "string" ? meta.kind : undefined,
       access: typeof meta.access === "string" ? meta.access : undefined,
       types: meta.types,
       sandbox: meta.sandbox === true,
@@ -1312,20 +1623,26 @@ function cleanPackedConfig(raw: unknown): {
 
     const entry = p.entry === true;
     const access = parseAccess(p.access);
+    const kind = parseKind(p.kind);
     pages.push({
       id,
       path,
       title: String(p.title ?? "").slice(0, 80),
+      kind,
       access: entry ? "public" : access,
       types:
         access === "types" && Array.isArray(p.types)
           ? p.types.map((t) => String(t)).filter(Boolean).slice(0, 50)
           : undefined,
-      // 入口页必须公开且不勾沙箱：它是所有人的门面（与保存一页同一套规矩）
-      sandbox: entry ? false : p.sandbox === true,
+      // 入口页必须公开且不勾沙箱：它是所有人的门面（与保存一页同一套规矩）；
+      // 非网页类型没有正文，也就没有外链 / 页级 CSS / 沙箱可言
+      sandbox: entry || kind !== "page" ? false : p.sandbox === true,
       entry,
-      external: String(p.external ?? "").trim() || undefined,
-      css,
+      external:
+        kind === "page"
+          ? String(p.external ?? "").trim() || undefined
+          : undefined,
+      css: kind === "page" ? css : undefined,
       // 引用云盘文件的页照旧引用：矩阵复用云盘那只桶，装到别处这套引用仍然读得到
       driveKey:
         typeof p.driveKey === "string" && p.driveKey ? p.driveKey : undefined,
@@ -1533,6 +1850,17 @@ async function equipMatrixPack(
 }> {
   // 先验后动：unpack 抛错的话，线上一个字节都还没动
   const { cfg, bodies, droppedLinks, droppedSites } = unpackMatrixPack(bytes);
+
+  // 引用云盘文件的页：与「保存一页」同一道收口 —— 那只文件得真在桶里、且不超上限。
+  // 不核的话，包里写个不存在的 key 也能装上线，那一页当场变成「引用的文件不见了」，
+  // 而保存一页走的头一道 head() 明明会把它拦下 —— 两条路同一套规矩
+  for (const p of cfg.pages) {
+    if (!p.driveKey) continue;
+    const src = await env.MEMORY_BUCKET.head(p.driveKey);
+    if (!src) throw packError(`页面 /${p.path} 引用的云盘文件不存在：${p.driveKey}`);
+    if (src.size > MAX_BODY_BYTES)
+      throw packError(`页面 /${p.path} 引用的云盘文件过大（上限 2MB）`);
+  }
 
   // 留底：当前这套导出压进快照槽（空矩阵没什么好留的）
   const current = await loadConfig(env);
@@ -1767,6 +2095,9 @@ export async function serveMatrixPage(
 
   // 门卫页：往站外去的那道闸，自己不是一个页面
   if (normPath(pathname) === GATE_PATH) return serveGate(req, env);
+
+  // 验票页：进内区前的那道闸，自己不是一个页面
+  if (normPath(pathname) === TICKET_PATH) return serveTicket(req, env, viewer);
 
   return servePage(req, env, viewer, pathname);
 }

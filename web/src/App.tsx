@@ -247,7 +247,11 @@ function writeLocalView(agentName: string, room: string, session: string): void 
 /** 开机落点：只认本机记录落在场屋上的那一种 —— 人屋上的老场不占这个便宜 */
 function localStartRoom(agentName: string): string {
   const hint = readLocalView(agentName);
-  return hint && hint.room && hint.room !== agentName ? hint.room : agentName;
+  // 篡改防护：本机这份记录是可以被人手改的，而场屋名必须是「我的人屋名 + -- + 场 id」
+  // （见 auth.ts 的 sessionRoom；人屋名不含 `--`）。前缀对不上的一律不认 ——
+  // 否则改一笔就能让开机直连落到别人的场屋上，退回人屋。
+  if (!hint || !hint.room.startsWith(agentName + "--")) return agentName;
+  return hint.room;
 }
 
 /** 待发的一份附件：已经传到云盘、也已经读好了，只等跟着这条消息一起发出去。
@@ -874,6 +878,8 @@ function Shell({
     id: string;
     title: string;
     mode: "new" | "switch";
+    /** 要去的那间屋：知道了就能先把这一场的东西取回来，别等落地再排队 */
+    room?: string;
   } | null>(null);
   /**
    * 已经点了「新建」、但还没开出来的那一场。
@@ -1102,26 +1108,71 @@ function Shell({
    */
   const uiRoom = pendingRoom ? agentName : activeRoom;
 
-  // 本场计划（目标 + 步骤）存在场屋的表里，state 只给一个 planRev 信号。
-  // 换场、换屋，或他/我改过计划（planRev 变）时都重拉一次。
-  // 换场空窗里先清空：手上这份还是上一场的，摆出来等于把上一场的目标贴到新场头上。
+  /**
+   * 本场计划（目标 + 步骤）存在场屋的表里，state 只给一个 planRev 信号。
+   * 换场、换屋，或他/我改过计划（planRev 变）时都重拉一次。
+   *
+   * 换场空窗里就开拉：目标屋与目标场这时已经知道（switching.room / switching.id），
+   * 等它落地时这份已经在手上 —— 不然要等连接打通之后再排一次队，白多等一个往返，
+   * 那正是切场之后「又卡一下」的来路。计划条在空窗里本来就不渲染（见 SessionPlanBar
+   * 那行的 !switching），所以先取回来不会把上一场的目标贴到新场头上。
+   */
+  const planSeq = useRef(0);
+  /**
+   * 上一次是为谁拉的。抢跑那一次（换场空窗里）还不知道目标的 planRev，
+   * 记成 null；等落地时把版本号认下来就完事 —— 不然「落屋」这一下会
+   * 因为 activeSession / switching / room 先后变化，再补跑两趟一模一样的。
+   */
+  const planFetched = useRef<{
+    room: string;
+    sid: string;
+    rev: number | null;
+  } | null>(null);
   useEffect(() => {
-    if (!isAdmin || switching || pendingRoom || !state.activeSession) {
+    const target = switching
+      ? switching.room
+        ? { room: switching.room, sid: switching.id }
+        : null
+      : state.activeSession && !pendingRoom
+        ? { room: uiRoom, sid: state.activeSession }
+        : null;
+    if (!isAdmin || !target) {
+      // 没有目标（来客、或正站在还没开屋的新建上）：计划整条清掉。
+      // 连同记号与在飞的那趟一起作废 —— 否则先前那一趟的慢响应回来又把清掉的填回去，
+      // 或者同一场再回来时被误判成「已经拉过」而不再重取
+      planFetched.current = null;
+      planSeq.current++;
       setSessionPlan({ goal: "", tasks: [] });
       return;
     }
-    let alive = true;
-    void (async () => {
-      try {
-        const p = await api.sessionPlan(uiRoom, state.activeSession);
-        if (alive) setSessionPlan(p);
-      } catch {
-        /* 拉不到就当这一场没设过：这条只是提示，不该为它打扰人 */
-      }
-    })();
-    return () => {
-      alive = false;
-    };
+    const rev = switching ? null : state.planRev;
+    const prev = planFetched.current;
+    if (
+      prev &&
+      prev.room === target.room &&
+      prev.sid === target.sid &&
+      (prev.rev === null || prev.rev === rev)
+    ) {
+      planFetched.current = { room: target.room, sid: target.sid, rev };
+      return;
+    }
+    planFetched.current = { room: target.room, sid: target.sid, rev };
+    const seq = ++planSeq.current;
+    void api
+      .sessionPlan(target.room, target.sid)
+      .then((p) => {
+        // 只认最后发出的那一份：换得快时，先发的慢响应不许盖掉后发的
+        if (seq === planSeq.current) setSessionPlan(p);
+      })
+      .catch(() => {
+        // 这一趟没拉回来：把「拉过」的记号撤掉、计划清空。
+        // 不撤的话，换场落地那一下会命中上面的去重、当成「已经拉过」而不再重取，
+        // 上一场的计划就一直贴在新场头上了；清空则是「拉不到就当这一场没设过」的如实呈现
+        if (seq === planSeq.current) {
+          planFetched.current = null;
+          setSessionPlan({ goal: "", tasks: [] });
+        }
+      });
   }, [
     isAdmin,
     uiRoom,
@@ -1181,8 +1232,8 @@ function Shell({
    * 保险丝烧断时不再丢掉它：还给输入框（见 restoreQueued），让人一键重试。
    */
   const beginSwitch = useCallback(
-    (id: string, title: string, mode: "new" | "switch") => {
-      setSwitching({ id, title, mode });
+    (id: string, title: string, mode: "new" | "switch", room?: string) => {
+      setSwitching({ id, title, mode, room });
       window.clearTimeout(switchFuse.current);
       switchFuse.current = window.setTimeout(() => {
         setSwitching(null);
@@ -1537,7 +1588,7 @@ function Shell({
           return false;
         }
         queuedSend.current = payload;
-        beginSwitch(pendingRoom.id, "新会话", "new");
+        beginSwitch(pendingRoom.id, "新会话", "new", pendingRoom.room);
         setActiveRoom(pendingRoom.room);
         setPendingRoom(null);
         return true;
@@ -2004,18 +2055,20 @@ function Shell({
         restoreQueued("");
         setPendingRoom(null);
       }
+      const s = sessions.find((x) => x.id === id);
+      const targetRoom = s?.home || agentName;
       // 先把侧栏跳到这一场、把遮罩盖上，再去谈连接和搬运 ——
-      // 老场宿在人屋时，后端要先清空再整场灌回，那段时间界面本来是一片空白
-      beginSwitch(id, title, "switch");
+      // 老场宿在人屋时，后端要先清空再整场灌回，那段时间界面本来是一片空白。
+      // 目标屋一并带上：那几秒里就能把这一场的计划先取回来（见 sessionPlan 那条 effect）
+      beginSwitch(id, title, "switch", targetRoom);
       setActiveSession(id);
       if (byUser) {
         // 这一眼当场记下（按点击时刻打戳）—— 不等换场落地、不等开机对表。
         // 记的是「我选了这场」这件事本身；别的设备要的也正是这个先后。
         userActed.current = true;
-        recordView(sessions.find((x) => x.id === id)?.home || agentName, id);
+        recordView(targetRoom, id);
       }
       try {
-        const s = sessions.find((x) => x.id === id);
         if (s?.home) {
           // 场屋里的场：换连接就好。广播回来时 activeSession 会跟着对上
           jumpBottom.current = true; // 落到这场最新一条的末尾，不从开头翻起
@@ -2316,9 +2369,14 @@ function Shell({
    *
    * 为什么要按会话过滤：卡片是「他正等着」的意思。换了一场话题还看见上一场的追问，
    * 会让人以为那件事还压在自己身上 —— 其实他早跟着新话题往下走了。
+   *
+   * 用侧栏选中的那一场（activeSession）而不是连接上那一场（state.activeSession）：
+   * 刚点「新建对话」那会儿手上还是上一场的连接，后端报的 activeSession 也仍是上一场，
+   * 若照它过滤，空白的新建页上就会冒出上一场的追问，而且发第一句话时还会被当成
+   * 「答过了」顺手收掉（见 submit 里的 nearest）。侧栏选中的新场此刻还没有卡，正好为空。
    */
   const pendingAsks = (state.asks || []).filter(
-    (a) => a.sessionId === state.activeSession,
+    (a) => a.sessionId === activeSession,
   );
 
   /**
@@ -2625,6 +2683,8 @@ function Shell({
                   )}
                   speakingId={speakingId}
                   room={uiRoom}
+                  // 连接真挂在 uiRoom 上了才让它去拉按屋取的东西
+                  roomReady={agent.identified && agent.name === uiRoom}
                   showDetail={isAdmin}
                   onSpeak={speakMsg}
                   onRetry={retryMsg}

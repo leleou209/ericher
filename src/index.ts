@@ -60,6 +60,9 @@ import {
   unpackThemePack,
   type UnpackedThemePack,
 } from "./agent/themePack";
+// 云盘删/移前的矩阵引用检查：与 agent 的 files 工具共用同一把尺子 ——
+// 被矩阵页引用着的云盘文件，走 REST 这条路也不许删/搬，否则页面当场没正文
+import { matrixRefGuard } from "./tools/files";
 import { fetchOfficialUsage } from "./analytics";
 import {
   canSynthesize,
@@ -177,9 +180,14 @@ function fail(e: unknown): Response {
 /** 从 /agents/<类名>/<实例名> 里取出实例名；不是这个形状就返回 null（不拦） */
 function agentNameInPath(pathname: string): string | null {
   const seg = pathname.split("/").filter(Boolean);
-  return seg[0] === "agents" && seg.length >= 3
-    ? decodeURIComponent(seg[2])
-    : null;
+  if (seg[0] !== "agents" || seg.length < 3) return null;
+  // 非法百分号编码会让 decodeURIComponent 抛错，把整条请求 500 掉。退回原样段：
+  // 它对不上 token 派生的屋名，guard 照样会拒，安全侧不留后门
+  try {
+    return decodeURIComponent(seg[2]);
+  } catch {
+    return seg[2];
+  }
 }
 
 /**
@@ -1092,6 +1100,9 @@ async function handleMove(req: Request, env: Env): Promise<Response> {
       // 被主题引用着的素材不许搬：搬走引用就悬空，导出永久报错
       const guard = await themeRefGuard(env, [src], "搬");
       if (guard) return guard;
+      // 被矩阵页引用着的文件同样不许搬：搬走那一页就读不到正文了
+      const mxRef = await matrixRefGuard(bucket, [src], "搬");
+      if (mxRef) return Response.json({ ok: false, error: mxRef }, { status: 409 });
       // 撞名就地换掉目标是不可恢复的（源也跟着删了）—— 先拦下来让人改名
       if (await bucket.head(dst))
         return Response.json(
@@ -1119,6 +1130,8 @@ async function handleMove(req: Request, env: Env): Promise<Response> {
     } while (cursor);
     const guard = await themeRefGuard(env, keys, "搬");
     if (guard) return guard;
+    const mxRef = await matrixRefGuard(bucket, keys, "搬");
+    if (mxRef) return Response.json({ ok: false, error: mxRef }, { status: 409 });
     let moved = 0;
     for (const key of keys) {
       const one = await bucket.get(key);
@@ -1170,6 +1183,9 @@ async function handleDelete(req: Request, env: Env): Promise<Response> {
       } while (cursor);
       const guard = await themeRefGuard(env, keys, "删");
       if (guard) return guard;
+      const mxRef = await matrixRefGuard(bucket, keys, "删");
+      if (mxRef)
+        return Response.json({ ok: false, error: mxRef }, { status: 409 });
       for (const key of keys) await bucket.delete(key);
       return Response.json({ ok: true, deleted: keys.length });
     }
@@ -1190,6 +1206,9 @@ async function handleDelete(req: Request, env: Env): Promise<Response> {
     // 被主题引用着的素材不许删：删了引用就悬空，导出永久报错
     const guard = await themeRefGuard(env, [key], "删");
     if (guard) return guard;
+    // 被矩阵页引用着的文件同样不许删：删了那一页当场没正文
+    const mxRef = await matrixRefGuard(bucket, [key], "删");
+    if (mxRef) return Response.json({ ok: false, error: mxRef }, { status: 409 });
     await bucket.delete(key);
     return Response.json({ ok: true });
   } catch (e) {

@@ -10,6 +10,7 @@ import {
 } from "react";
 import { api, type Role } from "../lib/api";
 import type {
+  MatrixPage,
   ModelEntry,
   ModelProvider,
   ThemeKey,
@@ -354,6 +355,91 @@ function IdentityCard({
   );
 }
 
+/**
+ * 签名块底下摊出来的那份「去哪儿」：矩阵的网页列成一张单子。
+ *
+ * 点一行直接走过去，从接待台一步跨到矩阵里的某一页，不用先绕进工作台再找。
+ * 每次打开现取一次，省得挂了半天还拿着旧名单。
+ *
+ * 只给管理员看：/api/matrix/* 整片都是管理员才进得去的，来客那边签名块是原样。
+ */
+function MatrixMenu({ onClose }: { onClose: () => void }) {
+  const [pages, setPages] = useState<MatrixPage[] | null>(null);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .matrixPages()
+      .then((r) => {
+        if (alive) setPages(r.pages);
+      })
+      .catch((e) => {
+        if (alive) setErr((e as Error).message);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Esc 收摊：这时候焦点多半在单子上，指望不上签名块自己接键盘
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // 入口页打头，其余按路径排 —— 认路的那扇门永远在最上面
+  const ordered = useMemo(
+    () =>
+      [...(pages ?? [])].sort(
+        (a, b) =>
+          Number(!!b.entry) - Number(!!a.entry) || a.path.localeCompare(b.path),
+      ),
+    [pages],
+  );
+
+  return (
+    <>
+      {/* 点别处就收：一层看不见的幕，铺在菜单底下 */}
+      <div className="brand-scrim" onClick={onClose} />
+      <div className="brand-menu">
+        <div className="brand-menu-head">
+          <span className="ttl">矩阵 · 网页</span>
+          <span className="cnt">
+            {pages ? `${pages.length} 页` : err ? "读不到" : "…"}
+          </span>
+        </div>
+        {err ? (
+          <p className="brand-menu-msg">{err}</p>
+        ) : pages && !pages.length ? (
+          <p className="brand-menu-msg">还没有页面，去工作台建一个。</p>
+        ) : (
+          <ul className="brand-menu-list">
+            {ordered.map((p) => (
+              <li key={p.id}>
+                <a
+                  className="brand-menu-item"
+                  href={`/${p.path}`}
+                  title={p.external ? `外站 · ${p.external}` : `/${p.path}`}
+                >
+                  <span className="nm">{p.title || p.path}</span>
+                  <span className="pth">/{p.path}</span>
+                  {p.entry && <span className="mk">入口</span>}
+                  {p.external && <span className="mk">外站</span>}
+                  {p.sandbox && <span className="mk">沙箱</span>}
+                </a>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </>
+  );
+}
+
 export function ChatSidebar({
   sessions,
   active,
@@ -417,6 +503,8 @@ export function ChatSidebar({
   // 签名块上那行名字随主题叫（本文件另有纸色的 theme，换个叫法拿主题域的）
   const { theme: themeConfig } = useTheme();
   const persona = agentDisplay(themeConfig);
+  /** 签名块摊开的矩阵清单开着没有（管理员才有这扇门） */
+  const [matrixOpen, setMatrixOpen] = useState(false);
 
   /**
    * 「他另开了一场」的两种样子：先闪几秒把人叫过来，之后退成一个小点，
@@ -580,15 +668,39 @@ export function ChatSidebar({
     <aside className={`chat-sidebar ${open ? "open" : ""}`}>
       <div className="sidebar-header">
         {/* 签名块：纯黑底上一行白色衬线名字。整套皮的识别记号就这一块。
-            在线状态也住在这里 —— 底下那张 ericher 卡撤掉后，这是唯一的「他在不在」 */}
-        <div className="brand-block">
+            在线状态也住在这里 —— 底下那张 ericher 卡撤掉后，这是唯一的「他在不在」。
+            管理员这儿它还兼一扇门：点开摊出矩阵的页面清单，挑一行就过去 */}
+        <div
+          className={`brand-block${isAdmin ? " launch" : ""}${
+            matrixOpen ? " open" : ""
+          }`}
+          role={isAdmin ? "button" : undefined}
+          tabIndex={isAdmin ? 0 : undefined}
+          aria-expanded={isAdmin ? matrixOpen : undefined}
+          title={isAdmin ? "矩阵页面：点一下挑一个去" : undefined}
+          onClick={isAdmin ? () => setMatrixOpen((o) => !o) : undefined}
+          onKeyDown={
+            isAdmin
+              ? (e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setMatrixOpen((o) => !o);
+                  }
+                }
+              : undefined
+          }
+        >
           <h1 className="brand-name">{persona.name}</h1>
           <span className="brand-sub">接待台</span>
           <span className="brand-status" data-off={online ? "false" : "true"}>
             <span className="status-dot" />
             {online ? "在线" : "连接中"}
           </span>
+          {isAdmin && <span className="brand-caret" aria-hidden="true" />}
         </div>
+        {isAdmin && matrixOpen && (
+          <MatrixMenu onClose={() => setMatrixOpen(false)} />
+        )}
       </div>
 
       {/* 新建对话对谁都开着：来客也是这个家的朋友，他该能自己开一场新的，

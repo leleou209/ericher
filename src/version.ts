@@ -15,7 +15,10 @@ export function compareSemver(a: string, b: string): number {
     .trim()
     .split(".")
     .map((n) => parseInt(n, 10) || 0);
-  for (let i = 0; i < 3; i++) {
+  // 比到两边最长的位数，缺位补 0。不能只比前 3 段：像 0.1.6.5 这种补丁位会
+  // 被当成 0.1.6，停在旧版的用户永远等不到升级提示。
+  const n = Math.max(pa.length, pb.length);
+  for (let i = 0; i < n; i++) {
     const d = (pa[i] || 0) - (pb[i] || 0);
     if (d) return d;
   }

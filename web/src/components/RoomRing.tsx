@@ -120,8 +120,12 @@ export function RoomRing({
   currentId: string;
   /** 点一扇门：走到对面那间 */
   onWalk: (id: string) => void;
-  /** 点中心卡片：打开当前这间的编辑器 */
-  onOpen: (p: MatrixPage) => void;
+  /**
+   * 点中心卡片：打开当前这间的编辑器。
+   * 不传就只是块牌子 —— 预览的小地图不接这个：那儿的中心正好在手边，
+   * 一抬手就点着，白白把人推进编辑器。
+   */
+  onOpen?: (p: MatrixPage) => void;
   /** 点右下角虚位。不传就不画虚位（迷你图用不上） */
   onGhost?: () => void;
   /** false = 纯展示（迷你图），不吃鼠标事件 */
@@ -270,9 +274,12 @@ export function RoomRing({
         </g>
       )}
 
-      {/* 中心：你现在站着的这间房 */}
-      <g className="mr-door-hit" onClick={() => onOpen(me)}>
-        <title>点开编辑器</title>
+      {/* 中心：你现在站着的这间房。没接 onOpen 就是块牌子，不装成能点的样子 */}
+      <g
+        className={onOpen ? "mr-door-hit" : undefined}
+        onClick={onOpen ? () => onOpen(me) : undefined}
+      >
+        {onOpen && <title>点开编辑器</title>}
         <rect
           className={`mr-card${me.entry ? " entry" : ""}`}
           x={CX - CARD_W / 2}

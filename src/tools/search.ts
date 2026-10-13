@@ -25,9 +25,90 @@ const BRAVE_SEARCH = "https://api.search.brave.com/res/v1/web/search";
 const JINA_READER = "https://r.jina.ai/";
 const MAX_CHARS = 6000;
 const UA = "Mozilla/5.0 (compatible; CoworkAgent/2.0)";
+/** 出站请求统一 20 秒超时：第三方接口与逐跳抓取都不许无限期挂着 */
+const OUTBOUND_TIMEOUT_MS = 20_000;
 
 const PRIVATE_HOST =
-  /^(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|169\.254\.|::1$|\[::1\]$|.*\.internal$|.*\.local$|metadata\.google\.internal$)/i;
+  /^(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|169\.254\.|::1$|\[::1\]$|.*\.internal$|.*\.local$|.*\.localhost$|metadata\.google\.internal$)/i;
+
+/**
+ * 浏览器认得的其它 IPv4 写法：十进制整数（`2130706433`）、十六进制（`0x7f000001`）、
+ * 八进制（`017700000001`）、省略末段（`127.1`）。URL 解析器把它们当普通字符串，
+ * 按点分四位写的私网正则一条都拦不住 —— 先还原成点分四位再判。
+ */
+function numericHostOctets(host: string): number[] | null {
+  const parts = host.split(".");
+  if (!parts.length || parts.length > 4) return null;
+  const nums: number[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    let n: number;
+    if (/^0x[0-9a-f]+$/i.test(p)) n = parseInt(p.slice(2), 16);
+    else if (/^0[0-7]+$/.test(p)) n = parseInt(p.slice(1), 8);
+    else if (p === "0") n = 0;
+    else if (/^[1-9][0-9]*$/.test(p)) n = parseInt(p, 10);
+    else return null;
+    // 末段可以吃掉剩下的字节（127.1 -> 127.0.0.1），其余每段必须落在一个字节里
+    if (i < parts.length - 1 && n > 255) return null;
+    nums.push(n);
+  }
+  const last = nums[nums.length - 1];
+  if (last >= 256 ** (5 - nums.length)) return null;
+  let v = last;
+  for (let i = 0; i < nums.length - 1; i++) v += nums[i] * 256 ** (3 - i);
+  return [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
+}
+
+function isPrivateOctets(oct: number[]): boolean {
+  const [a, b] = oct;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254)
+  );
+}
+
+/**
+ * 方括号 IPv6 里的回环 / 未指定 / 链路本地 / 唯一本地 / 组播，以及内嵌私网 IPv4 的
+ * 映射写法。只认最短的 `[::1]` 会被 `[0:0:0:0:0:0:0:1]`、`[fd00::1]`、`[::ffff:127.0.0.1]`
+ * 从边上溜过去 —— 这几类都指向本机或内网，逐个按前缀/内嵌地址判。
+ */
+function isPrivateV6Literal(host: string): boolean {
+  if (!host.startsWith("[") || !host.endsWith("]")) return false;
+  const h = host.slice(1, -1).toLowerCase();
+  if (!h.includes(":")) return false;
+  // 回环 / 未指定，以及把零段补全的 `0:0:0:0:0:0:0:1`
+  if (
+    /^(::|::1)$/.test(h) ||
+    /^(0{1,4}:){7}1$/.test(h)
+  )
+    return true;
+  // 链路本地 fe80::/10、唯一本地 fc00::/7、组播 ff00::/8
+  if (/^(fe[89ab]|f[cd]|ff)/.test(h.split(":")[0])) return true;
+  // 内嵌 IPv4：点分写法（::ffff:127.0.0.1）或十六进制段（::ffff:7f00:1）
+  const dotted = /(?:^|:)((?:\d{1,3}\.){3}\d{1,3})$/.exec(h);
+  if (dotted) {
+    const oct = dotted[1].split(".").map(Number);
+    if (oct.every((n) => n <= 255) && isPrivateOctets(oct)) return true;
+  }
+  const hex = /ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
+  if (hex) {
+    const v = (parseInt(hex[1], 16) << 16) | parseInt(hex[2], 16);
+    if (
+      isPrivateOctets([
+        (v >>> 24) & 255,
+        (v >>> 16) & 255,
+        (v >>> 8) & 255,
+        v & 255,
+      ])
+    )
+      return true;
+  }
+  return false;
+}
 
 /** 协议白名单 + 私网黑名单，防止工具被诱导去读内网 / 云元数据端点 */
 export function assertPublicUrl(raw: string): URL {
@@ -41,7 +122,13 @@ export function assertPublicUrl(raw: string): URL {
     throw new Error("只允许 http/https，拒绝: " + url.protocol);
   }
   const host = url.hostname.toLowerCase();
-  if (PRIVATE_HOST.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
+  const octets = numericHostOctets(host);
+  if (
+    PRIVATE_HOST.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    isPrivateV6Literal(host) ||
+    (octets !== null && isPrivateOctets(octets))
+  ) {
     throw new Error("拒绝访问私网地址: " + host);
   }
   return url;
@@ -197,6 +284,7 @@ async function tavily(
       Authorization: "Bearer " + key,
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(OUTBOUND_TIMEOUT_MS),
   });
   if (!r.ok)
     throw new Error(`Tavily ${r.status}: ${(await r.text()).slice(0, 200)}`);
@@ -256,6 +344,7 @@ async function braveSearch(
       "X-Subscription-Token": key,
       "User-Agent": UA,
     },
+    signal: AbortSignal.timeout(OUTBOUND_TIMEOUT_MS),
   });
   if (!r.ok)
     throw new Error(`Brave ${r.status}: ${(await r.text()).slice(0, 200)}`);
@@ -274,6 +363,7 @@ async function jinaRead(target: string): Promise<string> {
   try {
     const r = await fetch(JINA_READER + target, {
       headers: { "User-Agent": UA, Accept: "text/plain" },
+      signal: AbortSignal.timeout(OUTBOUND_TIMEOUT_MS),
     });
     if (!r.ok) return "";
     return (await r.text()).trim();
@@ -293,8 +383,10 @@ export async function publicFetch(
   init: RequestInit = {},
 ): Promise<Response> {
   let url = assertPublicUrl(target).toString();
+  // 一条超时贯穿整个重定向链：单跳超不超不该由跳数决定，整条链共享这 20 秒
+  const signal = init.signal ?? AbortSignal.timeout(OUTBOUND_TIMEOUT_MS);
   for (let hop = 0; hop < 5; hop++) {
-    const r = await fetch(url, { ...init, redirect: "manual" });
+    const r = await fetch(url, { ...init, redirect: "manual", signal });
     if (r.status >= 300 && r.status < 400) {
       const loc = r.headers.get("location");
       if (!loc) throw new Error(`HTTP ${r.status}（重定向没给目标地址）`);
@@ -424,7 +516,12 @@ async function ddgSearch(
   let lastErr = "";
   for (const ep of endpoints) {
     try {
-      const r = await fetch(ep, { method: "POST", headers, body });
+      const r = await fetch(ep, {
+        method: "POST",
+        headers,
+        body,
+        signal: AbortSignal.timeout(OUTBOUND_TIMEOUT_MS),
+      });
       if (!r.ok) {
         lastErr = `DuckDuckGo ${r.status}`;
         continue;
@@ -444,7 +541,10 @@ async function ddgInstant(query: string): Promise<string> {
   try {
     const r = await fetch(
       `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`,
-      { headers: { "User-Agent": UA } },
+      {
+        headers: { "User-Agent": UA },
+        signal: AbortSignal.timeout(OUTBOUND_TIMEOUT_MS),
+      },
     );
     if (!r.ok) return "";
     const d = (await r.json()) as {
@@ -484,6 +584,7 @@ async function wikiSearch(query: string, limit: number): Promise<FreeHit[]> {
         `&srlimit=${limit}&srsearch=${encodeURIComponent(query)}`;
       const r = await fetch(api, {
         headers: { "User-Agent": UA, Accept: "application/json" },
+        signal: AbortSignal.timeout(OUTBOUND_TIMEOUT_MS),
       });
       if (!r.ok) continue;
       const d = (await r.json()) as {

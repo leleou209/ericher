@@ -98,9 +98,13 @@ export function useDragPos(key: string) {
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    // 触屏手势被系统接管 / 指针丢捕获时收不到 pointerup：不跟上这一下，
+    // dragging 会一直挂着，之后随便挪一下鼠标浮窗就自己跟着走
+    window.addEventListener("pointercancel", up);
     return () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
     };
   }, [clamp, dragging]);
 

@@ -216,6 +216,9 @@ describe("fetchPageText 走 Browser Run 那一档", () => {
 
   it("每次用掉多少浏览器时间都留一行日志（免费档每天 10 分钟，得有账可查）", async () => {
     useBrowser({ html: "<html><body><p>四字正文啊</p></body></html>" });
+    // 直连那档也得钉死：真放它去问 example.com，这轮日志断言就跟着网络和那页的
+    // 长短一起漂 —— 页长一点、直连就够用，浏览器压根不跑，日志自然一行都没有
+    stubFetch();
     const logs = spyLogs();
     await fetchPageText(envOf(withBrowser), "https://example.com");
     const line = logs.lines.filter((l) => l.includes("[browser]"));
@@ -228,6 +231,7 @@ describe("fetchPageText 走 Browser Run 那一档", () => {
   // 日志是留着给人翻的，地址里那条查询串常常挂着令牌，不能跟着进日志
   it("日志里只留站点主机名，不带路径和查询串", async () => {
     useBrowser({ html: "<html><body><p>正文</p></body></html>" });
+    stubFetch(); // 同上：这一档要看到的是浏览器那行，不是直连撞上真网络
     const logs = spyLogs();
     await fetchPageText(
       envOf(withBrowser),

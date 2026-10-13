@@ -74,9 +74,11 @@
   border-right: 1px solid var(--yuzhe-line);
 }
 
-/* 顶部签名块：纯黑底、白色衬线名字，整套皮的记号 */
+/* 顶部签名块：纯黑底、白色衬线名字，整套皮的记号。
+   relative 是给签名块底下那份矩阵清单当定位框的（见 .brand-menu） */
 .sidebar-header {
   flex: none;
+  position: relative;
   padding: 14px 14px 8px;
 }
 
@@ -124,6 +126,145 @@
 
 .brand-status[data-off="true"] {
   color: rgba(245, 245, 245, 0.58);
+}
+
+/* ── 签名块兼的那扇门：点开是矩阵的页面清单 ──
+   管理员才有（.launch），来客那边还是原来那块纯展示的记号。
+   黑块上加一枚小三角当「这儿点得动」的记号，开着的时候它翻过去。 */
+
+.brand-block.launch {
+  position: relative;
+  /* 高过下面那层幕：开着的时候再点它一下，还能收回去 */
+  z-index: 31;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.brand-block.launch:hover {
+  background: #26282c;
+}
+
+.brand-block .brand-caret {
+  width: 0;
+  height: 0;
+  margin-left: 2px;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 4px solid rgba(245, 245, 245, 0.6);
+  transition: transform 0.18s;
+}
+
+.brand-block.open .brand-caret {
+  transform: rotate(180deg);
+}
+
+/* 点别处就收：一层看不见的幕，铺在菜单底下 */
+.brand-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+}
+
+/* 清单本体：白纸、发丝线、衬线名字 —— 跟面板里那套一个家族。
+   从签名块底下摊出来，盖住下面的新建键与导航，所以自己占一层 */
+.brand-menu {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  top: calc(100% - 2px);
+  z-index: 40;
+  max-height: min(62vh, 460px);
+  overflow: auto;
+  padding: 8px;
+  background: var(--yuzhe-surface);
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-l);
+  box-shadow: var(--yuzhe-shadow);
+}
+
+.brand-menu-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 4px;
+  padding: 2px 8px 8px;
+  border-bottom: 1px solid var(--yuzhe-line-soft);
+}
+
+.brand-menu-head .ttl {
+  font-family: var(--font-display);
+  font-size: 14px;
+  color: var(--yuzhe-ink-strong);
+}
+
+.brand-menu-head .cnt {
+  margin-left: auto;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--yuzhe-ink-faint);
+}
+
+.brand-menu-msg {
+  margin: 0;
+  padding: 10px 8px;
+  font-size: 12.5px;
+  color: var(--yuzhe-ink-faint);
+}
+
+.brand-menu-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 一行 = 一扇门：名字在左、路径跟着，悬停整行亮一下 */
+.brand-menu-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: var(--yuzhe-r-m);
+  color: var(--yuzhe-ink);
+  text-decoration: none;
+  transition: background 0.15s;
+}
+
+.brand-menu-item:hover {
+  background: var(--yuzhe-bg-hover);
+}
+
+.brand-menu-item .nm {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  color: var(--yuzhe-ink-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.brand-menu-item .pth {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--yuzhe-ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.brand-menu-item .mk {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-s);
+  font-size: 10.5px;
+  line-height: 1.6;
+  letter-spacing: 0.06em;
+  color: var(--yuzhe-ink-faint);
 }
 
 /* 新建对话：白底发丝线的纸面按钮，黑留给品牌块 */

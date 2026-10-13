@@ -1608,6 +1608,27 @@ button.matrix-fold:hover {
   color: var(--yuzhe-ink);
 }
 
+/* ── 手机上的左导航：从「并排一列」改成「盖上来的一层」 ──
+   208px 的固定栏摆在 390px 的屏上，舞台只剩 126px（320px 屏只剩 56px，
+   左栏本身也被裁成半边字）。所以窄屏下它不再占位，而是浮在舞台上：
+   挑完一面视图就自己收回去（见 MatrixPanel 的 pick），舞台全程满宽。
+   宽度仍用 --mx-rail-w：预览里的小地图照着它让位，同一处口径。 */
+@media (max-width: 640px) {
+  .mx-shell {
+    position: relative;
+  }
+
+  .mx-rail {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: var(--mx-rail-w);
+    z-index: 6;
+    box-shadow: 2px 0 14px rgba(0, 0, 0, 0.12);
+  }
+}
+
 /* 左栏收起来后留的浮标：整页让给舞台，点它把栏叫回来。
    钉在**左下**角 —— 左上角是预览那枚小地图的地盘，两枚都往上挤会叠在一起。
    预览里它会多长出右半边（导航 | 编辑），所以它是个容器、两半各是一枚按钮。
@@ -1718,6 +1739,32 @@ button.matrix-fold:hover {
   flex: 1 1 auto;
   min-width: 0;
   overflow: auto;
+}
+
+/* 窄屏上「左挑右编」摆不开：264px 的树一占，编辑列只剩 100px 出头，
+   里面那行提示被挤成三行，行内标签也全贴着边。改成上下摞 —— 列表满宽
+   （一行才读得全），编辑器落在下面。没在编辑时它只是一行提示，不算占地 */
+@media (max-width: 640px) {
+  .mx-view.mx-list {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .mx-list-tree {
+    /* 不抢满高：列表短的时候，下面那行提示/编辑器就紧跟着它，
+       而不是被撑到屏幕底边上去（长列表照样自己滚，min-height 让得开） */
+    flex: 0 1 auto;
+    min-height: 0;
+  }
+
+  .mx-list-edit {
+    flex: 0 0 auto;
+    max-height: 55%;
+  }
+
+  .mx-list-edit .mx-empty {
+    padding: 10px 0 2px;
+  }
 }
 
 /* 窄屏提醒：图谱 / 预览这两面在手机上摊不开，进去时先说一句。
@@ -1978,6 +2025,11 @@ button.matrix-fold:hover {
   cursor: grab;
   pointer-events: auto;
   touch-action: none;
+  user-select: none;
+  /* 落点校正（measure 回来）时轻轻跟上；拖动中由 .on 关掉，免得拖手拖脚 */
+  transition:
+    left 0.12s ease,
+    top 0.12s ease;
 }
 
 .mp-handle:hover {
@@ -1990,6 +2042,52 @@ button.matrix-fold:hover {
   border-color: var(--yuzhe-ink-strong);
   background: #fff;
   cursor: grabbing;
+  /* 拖的时候要贴着指针走，不能有过渡 */
+  transition: none;
+}
+
+/* 拖动中：指针可能飘到手柄外，光标也一路保持「抓着」 */
+body.mx-dragging,
+body.mx-dragging * {
+  cursor: grabbing !important;
+}
+
+/* 吸附参考线：贴着哪条就露哪条，1px 细线横 / 竖穿过画布。
+   只在拖动中挂着，显隐由拖动直接开合（见 MatrixPreview 的 paint） */
+.mp-guide {
+  position: absolute;
+  display: none;
+  background: var(--yuzhe-ink-strong);
+  opacity: 0.26;
+  pointer-events: none;
+}
+
+.mp-guide-x {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.mp-guide-y {
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+/* 拖动中的落点读数：浮在底边说明条上头，压住手底下的那个坐标 */
+.mp-coord {
+  position: absolute;
+  left: 50%;
+  bottom: 46px;
+  transform: translateX(-50%);
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--yuzhe-black);
+  color: var(--yuzhe-on-black);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .mp-handle-dot {
@@ -2005,9 +2103,11 @@ button.matrix-fold:hover {
   text-overflow: ellipsis;
 }
 
-/* 左上角的小地图：房间环缩成一枚徽章。字太小会糊成一片，干脆只留形状。
+/* 左上角的小地图：房间环缩成一枚缩略图。
    它不只是摆件 —— 环上的每扇门都能点着走，所以缩得别太狠：再小一圈门就
-   只剩几像素高，鼠标也点不准。整枚能拖，光标给 grab */
+   只剩几像素高，鼠标也点不准。整枚能拖，光标给 grab。
+   环上的字照旧跟着等比缩（180px 时只有三四个像素，等于一层灰影）——
+   想知道写的什么，拖右下角那枚手柄放大就是了，不另做悬浮提示 */
 /* 上层没退场时（顶栏 + 左导航都还在），小地图得让开它们；收干净了才回到角上。
    左栏宽度用同一个变量，省得两处各写一个数，改一处忘一处 */
 .mp-mini {
@@ -2048,16 +2148,58 @@ button.matrix-fold:hover {
   cursor: inherit;
 }
 
-.mp-mini-ring .mr-door-title,
-.mp-mini-ring .mr-door-sub,
-.mp-mini-ring .mr-card-title,
-.mp-mini-ring .mr-card-sub {
-  display: none;
-}
+/* 环上的字不再另作处理：SVG 自己等比缩，放大了就看得清。
+   中心那块牌子在小地图里不再挂 mr-door-hit（预览不接「开编辑器」），
+   于是它连 pointer 光标都没有，一抬手点着也只是白点一下 */
 
 .mp-mini-tag {
   font-size: 10px;
   color: var(--yuzhe-ink-dim);
+}
+
+/* 右下角那枚缩放手柄：两道斜线，像纸角被折起来。拖它改小地图大小 */
+.mp-mini-grip {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  touch-action: none;
+  background:
+    linear-gradient(
+      135deg,
+      transparent 46%,
+      var(--yuzhe-line-strong) 46%,
+      var(--yuzhe-line-strong) 54%,
+      transparent 54%
+    ),
+    linear-gradient(
+      135deg,
+      transparent 68%,
+      var(--yuzhe-line-strong) 68%,
+      var(--yuzhe-line-strong) 76%,
+      transparent 76%
+    );
+}
+
+.mp-mini-grip:hover {
+  /* 抓手亮一点，告诉人这儿拽得动 */
+  background:
+    linear-gradient(
+      135deg,
+      transparent 46%,
+      var(--yuzhe-ink-strong) 46%,
+      var(--yuzhe-ink-strong) 54%,
+      transparent 54%
+    ),
+    linear-gradient(
+      135deg,
+      transparent 68%,
+      var(--yuzhe-ink-strong) 68%,
+      var(--yuzhe-ink-strong) 76%,
+      transparent 76%
+    );
 }
 
 /* 导航收起来时上层整个退场：小地图回到角上，页面一丝不挂。
@@ -2080,6 +2222,30 @@ button.matrix-fold:hover {
   box-shadow: var(--yuzhe-shadow);
   font-size: 12px;
   white-space: nowrap;
+}
+
+/* ── 手机上的预览面 ──
+   顶栏不退了（窄屏只剩它当出口），所以小地图得让开那两行顶栏的高度；
+   180px 摆在小屏上又会被推到界外，收窄一档。底边那枚说明条原是居中一条，
+   在手机上正好压在左下「导航 | 编辑」那枚浮标上，抬到浮标上面去。 */
+@media (max-width: 640px) {
+  .mp-mini {
+    left: 8px;
+    top: 86px;
+    width: 142px;
+  }
+
+  .mp-note {
+    bottom: 60px;
+    max-width: calc(100vw - 24px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* 说明条抬到 60 了，读数跟着再往上让一档，别叠在一起 */
+  .mp-coord {
+    bottom: 94px;
+  }
 }
 
 /* ── 手机：单列、留白收一档，登记条贴边 ── */

@@ -17,6 +17,10 @@ describe("版本号比较（检查更新判新旧只认版本号，不认提交�
     expect(compareSemver("0.2.0", "0.2.0")).toBe(0);
     expect(compareSemver("0.2", "0.2.0")).toBe(0);
     expect(compareSemver("", "0.0.0")).toBe(0);
+    // 第四段补丁位也要比：0.1.6.5 比 0.1.6 新，否则停在旧版的用户等不到提示
+    expect(compareSemver("0.1.6.5", "0.1.6")).toBeGreaterThan(0);
+    expect(compareSemver("0.1.6", "0.1.6.5")).toBeLessThan(0);
+    expect(compareSemver("0.1.6.0", "0.1.6")).toBe(0);
   });
 
   it("本地领先（攒批未推）不算落后：远端 <= 本地即视为最新", () => {

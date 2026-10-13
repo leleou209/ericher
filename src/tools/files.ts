@@ -53,7 +53,7 @@ async function matrixDriveRefs(
 }
 
 /** 这批 key 里有没有被矩阵页引用的；有就回绝并说清是谁引用的，没有返回 null */
-async function matrixRefGuard(
+export async function matrixRefGuard(
   bucket: R2Bucket,
   keys: string[],
   action: string,
@@ -141,14 +141,28 @@ export function fileTools(ctx: ToolCtx) {
         const inScope = (k: string) => !scope || k.startsWith(scope);
 
         if (action === "list") {
-          const list = await bucket.list({
-            prefix: scope || undefined,
-            limit: 200,
-          });
-          if (!list.objects.length) return "文件库是空的 📭";
+          // 单次 list 只回一页，超出的文件会无声消失：翻到上限还没列完就如实说只给了前一批
+          const LIST_MAX = 500;
+          const objects: R2Object[] = [];
+          let cursor: string | undefined;
+          let more = false;
+          while (objects.length < LIST_MAX) {
+            const list = await bucket.list({
+              prefix: scope || undefined,
+              cursor,
+              limit: LIST_MAX - objects.length,
+            });
+            objects.push(...list.objects);
+            if (!list.truncated) break;
+            cursor = list.cursor;
+            more = true;
+          }
+          if (!objects.length) return "文件库是空的 📭";
           return (
-            `📦 ${list.objects.length} 个文件：\n` +
-            list.objects
+            `📦 ${objects.length} 个文件${
+              more ? `（文件较多，这里只列了前 ${LIST_MAX} 个，还有更多没列出）` : ""
+            }：\n` +
+            objects
               .map((o, i) => `${i + 1}. ${o.key} (${fmtSize(o.size)})`)
               .join("\n")
           );
@@ -201,6 +215,9 @@ export function fileTools(ctx: ToolCtx) {
             // 被矩阵页引用着的文件不许搬：搬走那一页就读不到正文了
             const refGuard = await matrixRefGuard(bucket, [src], "搬");
             if (refGuard) return refGuard;
+            // 目标撞名就地覆盖是不可恢复的（源也跟着删了）—— 先拦下来让人改名，别静默覆盖
+            if (await bucket.head(dst))
+              return `目标已存在：${dst}（换个名字或先删掉旧的，别静默覆盖）`;
             await bucket.put(dst, obj.body, {
               httpMetadata: obj.httpMetadata,
               // customMetadata（主题导入记的 sourceKey 来路）要跟着走：move 是 copy+delete，

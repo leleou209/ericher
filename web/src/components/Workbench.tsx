@@ -33,7 +33,12 @@ export function Workbench() {
    */
   const [agentOn, setAgentOn] = useState(() => {
     try {
-      return localStorage.getItem("matrix:agent:collapsed") !== "1";
+      const saved = localStorage.getItem("matrix:agent:collapsed");
+      if (saved === "1") return false;
+      if (saved === "0") return true;
+      // 没存过偏好：手机上默认收起 —— 那一栏在窄屏会整屏盖住舞台，
+      // 进来先看见矩阵、需要时再唤出助手，比反过来的意外小
+      return !window.matchMedia("(max-width: 640px)").matches;
     } catch {
       return true;
     }

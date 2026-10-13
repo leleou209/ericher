@@ -24,6 +24,7 @@ import type {
   LinkPlace,
   MatrixAccess,
   MatrixLink,
+  MatrixNodeKind,
   MatrixPage,
   MatrixTheme,
   R2File,
@@ -49,10 +50,25 @@ const ACCESS_LABEL: Record<MatrixAccess, string> = {
 /** 正文来源：keep = 编辑旧页时沿用原正文 */
 type Source = "keep" | "paste" | "upload" | "drive";
 
+/** 节点类型在面板上的叫法：点这一格，站上去会发生什么写在 hint 里 */
+const KIND_LABEL: Record<MatrixNodeKind, string> = {
+  page: "网页",
+  gate: "门卫",
+  assistant: "助手",
+  app: "功能块",
+};
+const KIND_HINT: Record<MatrixNodeKind, string> = {
+  page: "一页网页：带正文，或引用云盘文件，或是一条外站链接。",
+  gate: "一道门：自己不出正文，站到它就是去验票，验完去它的第一条出线。",
+  assistant: "接待台本体：站到它就把人送去 /assistant。",
+  app: "功能块：由内建处理单元出内容（还没实作，先占这一格）。",
+};
+
 interface Draft {
   id?: string;
   path: string;
   title: string;
+  kind: MatrixNodeKind;
   access: MatrixAccess;
   types: string[];
   sandbox: boolean;
@@ -72,6 +88,7 @@ function emptyDraft(): Draft {
   return {
     path: "",
     title: "",
+    kind: "page",
     access: "public",
     types: [],
     sandbox: false,
@@ -90,6 +107,8 @@ function draftOf(p: MatrixPage): Draft {
     id: p.id,
     path: p.path,
     title: p.title,
+    // 老配置里没有这一格：一律按网页算
+    kind: p.kind ?? "page",
     access: p.access,
     types: p.types ?? [],
     sandbox: !!p.sandbox,
@@ -258,10 +277,19 @@ export function MatrixPanel({
     mq.addEventListener("change", on);
     return () => mq.removeEventListener("change", on);
   }, []);
-  /** 左导航收起没有：收起来就只剩一枚浮标，把整页让给舞台 */
+  /** 左导航收起没有：收起来就只剩一枚浮标，把整页让给舞台。
+      没存过偏好的话，手机上默认收起 —— 那 208px 在窄屏里占掉的是舞台的一大半，
+      先让人看见内容，需要时再从浮标叫回来。 */
   const [railClosed, setRailClosed] = useState(() => {
     try {
-      return localStorage.getItem("matrix:rail:collapsed") === "1";
+      const saved = localStorage.getItem("matrix:rail:collapsed");
+      if (saved === "1") return true;
+      if (saved === "0") return false;
+      return (
+        typeof window !== "undefined" &&
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(max-width: 640px)").matches
+      );
     } catch {
       return false;
     }
@@ -275,6 +303,12 @@ export function MatrixPanel({
       /* 隐私模式下写不了就不记 —— 不影响这一会儿的收起展开 */
     }
   };
+  /** 选一面视图。窄屏上顺手把导航收回去 —— 那栏展开就盖住舞台，
+      选完还杵着等于白选（宽屏上并排摆着，收不收都看得见） */
+  const pick = (t: TabKey) => {
+    setTab(t);
+    if (narrow) setRail(true);
+  };
   /**
    * 预览里的「落点编辑」开着没有：开着才铺可拖的手柄。默认开着 —— 进预览多半
    * 就是来调按钮位置的，只想看页面时在浮标右半边一点就收起来。
@@ -286,10 +320,12 @@ export function MatrixPanel({
   const packInput = useRef<HTMLInputElement>(null);
 
   // 导航一收，舞台就该独占整幅：把顶栏也交给外壳收掉。这一条不只管预览 ——
-  // 列表、图谱、外观、外站同理（少一条顶栏，就多一整条内容的高度）
+  // 列表、图谱、外观、外站同理（少一条顶栏，就多一整条内容的高度）。
+  // 窄屏不在此列：手机上导航本来就是"盖上来的一层"（默认还收着），
+  // 顶栏再一起退场的话，进工作台连名字和「回接待台」都看不见了。
   useEffect(() => {
-    onBare?.(railClosed);
-  }, [onBare, railClosed]);
+    onBare?.(railClosed && !narrow);
+  }, [onBare, railClosed, narrow]);
 
   const reload = useCallback(async () => {
     setErr("");
@@ -357,14 +393,18 @@ export function MatrixPanel({
     });
   }, []);
 
-  /** 预览里当前这页出边的指纹：一变就让整页重挂一次，取到最新的真实渲染 */
+  /**
+   * 预览里当前这页出边的指纹：一变就让整页重挂一次，取到最新的真实渲染。
+   * 只认落点的**种类**（锚点 / 兜底栏 / 自由坐标），不认坐标本身 —— 拖一个已经
+   * 是自由坐标的按钮，预览自己把真身的 left/top 抹过去就够了，不必整页重载。
+   * 种类变了（比如锚点按钮被拖成自由坐标）才重挂，那时候按钮的写法得换。
+   */
   const linksVersion = useMemo(
     () =>
       links
         .filter((l) => l.from === roomId)
         .map(
-          (l) =>
-            `${l.from}:${l.to}:${l.label}:${l.order}:${JSON.stringify(l.place)}`,
+          (l) => `${l.from}:${l.to}:${l.label}:${l.order}:${l.place.kind}`,
         )
         .join("|"),
     [links, roomId],
@@ -422,6 +462,7 @@ export function MatrixPanel({
         id: draft.id,
         path: draft.path,
         title: draft.title,
+        kind: draft.kind,
         access: draft.access,
         types: draft.types,
         sandbox: draft.sandbox,
@@ -431,7 +472,8 @@ export function MatrixPanel({
       };
       const form = new FormData();
       form.append("meta", JSON.stringify(meta));
-      if (!draft.external) {
+      // 只有网页才谈得上正文：门卫/助手/功能块不往包里塞
+      if (draft.kind === "page" && !draft.external) {
         if (draft.source === "paste" && draft.text) form.append("text", draft.text);
         else if (draft.source === "upload" && draft.file)
           form.append("file", draft.file);
@@ -771,6 +813,9 @@ export function MatrixPanel({
                 </button>
                 <span className="dim">{p.title || "（未命名）"}</span>
                 <span className="chip">{ACCESS_LABEL[p.access]}</span>
+                {(p.kind ?? "page") !== "page" && (
+                  <span className="chip on">{KIND_LABEL[p.kind ?? "page"]}</span>
+                )}
                 {p.entry && <span className="chip on">入口</span>}
                 {p.sandbox && <span className="chip">沙箱</span>}
                 {p.external && <span className="chip">外链</span>}
@@ -863,7 +908,7 @@ export function MatrixPanel({
           <nav className="mx-rail">
             <button
               className={`mx-rail-item${tab === "list" ? " on" : ""}`}
-              onClick={() => setTab("list")}
+              onClick={() => pick("list")}
             >
               <Icon name="layers" size={15} />
               页面列表
@@ -871,28 +916,28 @@ export function MatrixPanel({
             </button>
             <button
               className={`mx-rail-item${tab === "graph" ? " on" : ""}`}
-              onClick={() => setTab("graph")}
+              onClick={() => pick("graph")}
             >
               <Icon name="share" size={15} />
               矩阵图谱
             </button>
             <button
               className={`mx-rail-item${tab === "preview" ? " on" : ""}`}
-              onClick={() => setTab("preview")}
+              onClick={() => pick("preview")}
             >
               <Icon name="eye" size={15} />
               页面预览
             </button>
             <button
               className={`mx-rail-item${tab === "look" ? " on" : ""}`}
-              onClick={() => setTab("look")}
+              onClick={() => pick("look")}
             >
               <Icon name="settings" size={15} />
               外观美化
             </button>
             <button
               className={`mx-rail-item${tab === "sites" ? " on" : ""}`}
-              onClick={() => setTab("sites")}
+              onClick={() => pick("sites")}
             >
               <Icon name="link" size={15} />
               外站认定
@@ -900,7 +945,7 @@ export function MatrixPanel({
             </button>
             <button
               className={`mx-rail-item${tab === "pack" ? " on" : ""}`}
-              onClick={() => setTab("pack")}
+              onClick={() => pick("pack")}
             >
               <Icon name="download" size={15} />
               矩阵包
@@ -1008,6 +1053,33 @@ export function MatrixPanel({
                           }
                         />
 
+                        <label className="field-label">
+                          类型（站到这个点上会发生什么）
+                        </label>
+                        <div className="matrix-chips">
+                          {(Object.keys(KIND_LABEL) as MatrixNodeKind[]).map(
+                            (k) => (
+                              <button
+                                key={k}
+                                className={`chip${draft.kind === k ? " on" : ""}`}
+                                onClick={() =>
+                                  setDraft({
+                                    ...draft,
+                                    kind: k,
+                                    // 非网页没有正文与外链可言：切过去时顺手把这两格放下
+                                    ...(k === "page"
+                                      ? {}
+                                      : { external: "", sandbox: false }),
+                                  })
+                                }
+                              >
+                                {KIND_LABEL[k]}
+                              </button>
+                            ),
+                          )}
+                        </div>
+                        <p className="dim mx-hint">{KIND_HINT[draft.kind]}</p>
+
                         <label className="field-label">身份档</label>
                         <select
                           className="field"
@@ -1062,7 +1134,7 @@ export function MatrixPanel({
                             <input
                               type="checkbox"
                               checked={draft.sandbox}
-                              disabled={draft.entry}
+                              disabled={draft.entry || draft.kind !== "page"}
                               onChange={(e) =>
                                 setDraft({ ...draft, sandbox: e.target.checked })
                               }
@@ -1091,19 +1163,23 @@ export function MatrixPanel({
                           </label>
                         </div>
 
-                        <label className="field-label">
-                          外站链接（填了就只作导航外链，不出本地正文）
-                        </label>
-                        <input
-                          className="field"
-                          value={draft.external}
-                          placeholder="https://example.com"
-                          onChange={(e) =>
-                            setDraft({ ...draft, external: e.target.value })
-                          }
-                        />
+                        {draft.kind === "page" && (
+                          <>
+                            <label className="field-label">
+                              外站链接（填了就只作导航外链，不出本地正文）
+                            </label>
+                            <input
+                              className="field"
+                              value={draft.external}
+                              placeholder="https://example.com"
+                              onChange={(e) =>
+                                setDraft({ ...draft, external: e.target.value })
+                              }
+                            />
+                          </>
+                        )}
 
-                        {!draft.external && (
+                        {draft.kind === "page" && !draft.external && (
                           <>
                             <label className="field-label">正文来源</label>
                             <select
@@ -1246,7 +1322,11 @@ export function MatrixPanel({
                         </div>
                       </div>
                     ) : (
-                      <p className="dim mx-empty">从左边挑一页，或新建一页</p>
+                      <p className="dim mx-empty">
+                        {narrow
+                          ? "挑一页开始编辑，或新建一页"
+                          : "从左边挑一页，或新建一页"}
+                      </p>
                     )}
                   </div>
                 </div>
@@ -1304,8 +1384,11 @@ export function MatrixPanel({
                           pages={pages}
                           links={links}
                           onOpen={(p) => void openEdit(p)}
-                          onLink={(from, to) => void quickLink(from, to)}
-                          onUnlink={(from, to) => void quickUnlink(from, to)}
+                          // 这两个 handler 进 MatrixFlow 的 effect 依赖：必须传稳定的
+                          // useCallback 本体，包一层箭头会让它每渲染换一次身份 ——
+                          // 边被反复重建，刚拖出来的那条还没落库就被旧 links 冲掉
+                          onLink={quickLink}
+                          onUnlink={quickUnlink}
                         />
                       )}
 
@@ -1330,8 +1413,8 @@ export function MatrixPanel({
                     version={linksVersion}
                     editing={edit}
                     onWalk={walk}
-                    onOpen={(p) => void openEdit(p)}
-                    onMove={(from, to, x, y) => void roomMove(from, to, x, y)}
+                    // 同上：进预览拖动 effect 的依赖，传稳定的本体
+                    onMove={roomMove}
                   />
                 </div>
               )}
