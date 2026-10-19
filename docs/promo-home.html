@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ericher 接待台 · 长在你自己域名下的 AI 助手</title>
+<meta name="description" content="ericher 是一个跑在 Cloudflare Workers 上的自托管 AI 助手接待台：管理员派任务、盯进度、记东西，也可以开门让客人进来谈事。每个房间有自己的对话、记忆与文件。免费额度内自配自管，MIT 开源。">
+<meta name="color-scheme" content="light dark">
+<style>
+/* 全部前缀 ep-：这一页会被矩阵的外挂层注入样式与导航，不共名就不会互相打架。
+   零外部请求 —— 字体走系统栈，不连 Google Fonts（境内访客打不开那就是白屏）。 */
+:root{
+  --ep-ink:#1b2027;--ep-dim:#5b6672;--ep-faint:#8a95a1;--ep-bg:#f7f5f1;--ep-card:#fffdf9;
+  --ep-line:#e2ddd4;--ep-accent:#0b6bcb;--ep-accent-ink:#08447d;--ep-ok:#1c7a4b;--ep-warn:#a8541d;
+  --ep-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --ep-serif:"Songti SC","Noto Serif CJK SC",Georgia,"Times New Roman",serif;
+  --ep-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root{--ep-ink:#e8e4dc;--ep-dim:#a3aeb9;--ep-faint:#7d8792;--ep-bg:#14171a;--ep-card:#1b1f23;
+    --ep-line:#2c3238;--ep-accent:#6db3f2;--ep-accent-ink:#a8d0f7;--ep-ok:#5fc18b;--ep-warn:#e0a06a}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ep-bg);color:var(--ep-ink);font:16px/1.75 var(--ep-sans);
+  -webkit-font-smoothing:antialiased}
+.ep-wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+.ep-skip{position:absolute;left:-9999px}.ep-skip:focus{left:8px;top:8px;background:var(--ep-card);padding:8px 12px;z-index:9}
+
+.ep-top{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--ep-bg) 88%,transparent);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--ep-line)}
+.ep-top-in{display:flex;align-items:center;gap:14px;padding:13px 0;flex-wrap:wrap}
+.ep-brand{display:flex;align-items:baseline;gap:8px;text-decoration:none;color:inherit}
+.ep-brand b{font:700 19px/1 var(--ep-serif);letter-spacing:.02em}
+.ep-brand span{font-size:12px;color:var(--ep-faint);letter-spacing:.14em}
+.ep-nav{display:flex;gap:16px;margin-left:auto;flex-wrap:wrap}
+.ep-nav a{color:var(--ep-dim);text-decoration:none;font-size:14px}
+.ep-nav a:hover{color:var(--ep-accent-ink)}
+
+.ep-btn{display:inline-block;padding:11px 18px;border-radius:10px;text-decoration:none;
+  font-size:15px;border:1px solid var(--ep-line);color:var(--ep-ink);background:var(--ep-card)}
+.ep-btn.primary{background:var(--ep-accent);border-color:var(--ep-accent);color:#fff}
+.ep-btn.primary:hover{filter:brightness(1.07)}
+.ep-btn:hover{border-color:var(--ep-accent)}
+
+.ep-hero{padding:64px 0 44px;border-bottom:1px solid var(--ep-line)}
+.ep-eyebrow{font:12px/1 var(--ep-mono);letter-spacing:.18em;color:var(--ep-faint);text-transform:uppercase}
+.ep-hero h1{font:700 clamp(30px,5.4vw,50px)/1.28 var(--ep-serif);margin:16px 0 14px;letter-spacing:.01em}
+.ep-hero h1 em{font-style:normal;color:var(--ep-accent-ink)}
+.ep-lede{max-width:60ch;color:var(--ep-dim);font-size:17px}
+.ep-cta{display:flex;gap:12px;flex-wrap:wrap;margin:26px 0 10px}
+.ep-note{font-size:13px;color:var(--ep-faint)}
+
+.ep-facts{display:flex;flex-wrap:wrap;gap:10px;padding:22px 0;border-bottom:1px solid var(--ep-line)}
+.ep-fact{flex:1 1 200px;background:var(--ep-card);border:1px solid var(--ep-line);border-radius:12px;padding:14px 16px}
+.ep-fact b{display:block;font:700 22px/1.2 var(--ep-serif)}
+.ep-fact span{font-size:13px;color:var(--ep-dim)}
+
+.ep-sec{padding:52px 0;border-bottom:1px solid var(--ep-line)}
+.ep-sec h2{font:700 clamp(22px,3.4vw,30px)/1.35 var(--ep-serif);margin:0 0 8px}
+.ep-sec>p.sub{color:var(--ep-dim);margin:0 0 26px;max-width:64ch}
+.ep-two{display:grid;grid-template-columns:1fr 1fr;gap:34px;align-items:start}
+@media (max-width:820px){.ep-two{grid-template-columns:1fr}}
+.ep-quote{font:italic 18px/1.7 var(--ep-serif);border-left:3px solid var(--ep-accent);padding-left:16px;color:var(--ep-ink)}
+.ep-quote cite{display:block;font:12px/1.6 var(--ep-mono);font-style:normal;color:var(--ep-faint);margin-top:10px}
+.ep-ul{margin:0;padding-left:20px}
+.ep-ul li{margin:9px 0}
+.ep-ul b{color:var(--ep-ink)}
+
+.ep-feats{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px;list-style:none;padding:0;margin:0;counter-reset:ep}
+.ep-feats li{background:var(--ep-card);border:1px solid var(--ep-line);border-radius:12px;padding:16px 18px}
+.ep-feats h3{margin:0 0 6px;font-size:16px}
+.ep-feats h3::before{counter-increment:ep;content:counter(ep,cjk-ideographic) " ·";color:var(--ep-faint);font:12px/1 var(--ep-mono);margin-right:6px}
+.ep-feats p{margin:0;font-size:14px;color:var(--ep-dim)}
+code{font:13px/1.6 var(--ep-mono);background:color-mix(in srgb,var(--ep-line) 45%,transparent);padding:1px 5px;border-radius:4px}
+
+.ep-mail{background:var(--ep-card);border:1px solid var(--ep-line);border-radius:14px;padding:20px 22px}
+.ep-mail dl{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:14px 0 0;font-size:14px}
+.ep-mail dt{color:var(--ep-faint);font:12px/1.7 var(--ep-mono)}
+.ep-mail dd{margin:0;color:var(--ep-dim)}
+
+.ep-rooms{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+.ep-room{border:1px solid var(--ep-line);border-radius:12px;padding:16px 18px;background:var(--ep-card)}
+.ep-room h3{margin:0 0 6px;font-size:16px}
+.ep-room p{margin:0;font-size:14px;color:var(--ep-dim)}
+.ep-room .tag{font:11px/1 var(--ep-mono);letter-spacing:.1em;color:var(--ep-faint)}
+
+pre{margin:14px 0;padding:14px 16px;background:var(--ep-card);border:1px solid var(--ep-line);
+  border-radius:10px;overflow-x:auto}
+pre code{background:none;padding:0;font-size:13px;line-height:1.7}
+.ep-steps{display:grid;gap:18px;grid-template-columns:1fr 1fr}
+@media (max-width:820px){.ep-steps{grid-template-columns:1fr}}
+.ep-step h3{margin:0 0 4px;font-size:15px}
+.ep-step h3 span{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;
+  background:var(--ep-accent);color:#fff;font:12px/1 var(--ep-mono);margin-right:8px}
+.ep-warn{font-size:13px;color:var(--ep-warn)}
+
+.ep-limits{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(250px,1fr))}
+.ep-limits div{border-left:2px solid var(--ep-line);padding-left:14px}
+.ep-limits b{display:block;font-size:15px;margin-bottom:3px}
+.ep-limits p{margin:0;font-size:14px;color:var(--ep-dim)}
+
+.ep-close{padding:56px 0;text-align:left}
+.ep-close h2{font:700 clamp(22px,3.6vw,32px)/1.4 var(--ep-serif);margin:0 0 10px}
+.ep-foot{border-top:1px solid var(--ep-line);padding:20px 0 40px;font-size:12.5px;color:var(--ep-faint);
+  display:flex;gap:16px;flex-wrap:wrap;justify-content:space-between}
+.ep-foot code{font-size:12px}
+</style>
+</head>
+<body>
+<a class="ep-skip" href="#main">跳到主要内容</a>
+
+<header class="ep-top"><div class="ep-wrap ep-top-in">
+  <a class="ep-brand" href="#top"><b>ericher</b><span>接待台</span></a>
+  <nav class="ep-nav" aria-label="页面导航">
+    <a href="#what">它是什么</a><a href="#features">能力</a><a href="#mail">信箱</a>
+    <a href="#rooms">房间</a><a href="#deploy">部署</a><a href="#limits">边界</a>
+  </nav>
+  <a class="ep-btn" href="/_gate">进门 · 门卫</a>
+  <a class="ep-btn primary" href="/assistant">找它办事 · 助手台</a>
+</div></header>
+
+<main id="main">
+
+<section class="ep-hero" id="top"><div class="ep-wrap">
+  <p class="ep-eyebrow">Cloudflare Workers · 自托管 · MIT 开源</p>
+  <h1>把这一屋事交给<br><em>ericher</em>，长在你<br>自己的域名下。</h1>
+  <p class="ep-lede">一枚个人 AI 助手接待台：你可以给它派任务、记待办、让它盯进度到点提醒你，也可以开门让客人直接跟它谈事。每个房间有自己的对话、记忆与文件，互不串门。</p>
+  <div class="ep-cta">
+    <a class="ep-btn primary" href="/_gate">现在就试一句</a>
+    <a class="ep-btn" href="https://github.com/leleou209/ericher" rel="noopener">在 GitHub 看源码</a>
+  </div>
+  <p class="ep-note">前提只有一个 Node 24（或 ≥22.12）与一个 Cloudflare 账号。免费额度内跑得起来。</p>
+</div></section>
+
+<section class="ep-facts"><div class="ep-wrap" style="display:contents">
+  <div class="ep-fact"><b>零月费</b><span>Workers / DO / R2 免费额度内自配自管，不绑付费服务</span></div>
+  <div class="ep-fact"><b>一个 DO 一间屋</b><span>对话与记忆按身份隔离，切换设备也回得到原话</span></div>
+  <div class="ep-fact"><b>1435 例测试</b><span>门禁全绿才算一次构建，含 58 个测试文件</span></div>
+  <div class="ep-fact"><b>MIT</b><span>可自用、可修改、可分发，包括商用</span></div>
+</div></section>
+
+<section class="ep-sec" id="what"><div class="ep-wrap ep-two">
+  <blockquote class="ep-quote">
+    <p>这不是一个客服机器人，也不是又一个聊天壳。它是一个人的助手，顺便替这个人在门口接待。</p>
+    <cite>—— 项目 README 原话</cite>
+  </blockquote>
+  <div>
+    <h2>两种人，两种用法</h2>
+    <ul class="ep-ul">
+      <li><b>给自己用</b>：记事、查事、定提醒、派任务、催进度、写周报。它记得你上次说到哪儿，也会在你没界面前把话寄到你邮箱。</li>
+      <li><b>给别人用</b>：开一张访客票或发一张长期身份卡，客人进来谈事；他的对话、记忆、能用的工具，都关在他自己那间屋里。</li>
+      <li><b>不联网也能用</b>：模型走你自己的 OpenAI / Anthropic / OpenAI-Responses 三种协议，密钥只以 secret 变量名的形式被引用，不落库、不回显。</li>
+    </ul>
+  </div>
+</div></section>
+
+<section class="ep-sec" id="features"><div class="ep-wrap">
+  <h2>一件件说</h2>
+  <p class="sub">下面每一条都对应仓库里已经实现的代码，不是路线图。工具面一共 28 件，管理员与来客各有一套，权限按档位开关。</p>
+  <ol class="ep-feats">
+    <li><h3>门禁与会话</h3><p>口令登录、无内置默认值 —— 没配就 503 而不是悄悄 500。会话令牌是 HttpOnly Cookie，只存 SHA-256 摘要。</p></li>
+    <li><h3>身份卡</h3><p>长期客人一张卡，可换手机回到原房间；同一档位的不同来客彼此隔房，各按各的入口说话。</p></li>
+    <li><h3>记忆库与向量检索</h3><p>分条记忆、向量索引、关键词搜索、时间/重要性检索；助手自己给每条标重视程度。</p></li>
+    <li><h3>任务、提醒与盯梢</h3><p>待办清单、定时提醒、到点主动开口；盯梢可以每小时看一眼某个网页或指标，变了才说。</p></li>
+    <li><h3>信箱</h3><p>自己的一枚 SMTP 通道：寄信、多收件人、发件流水、收信入库带附件清单。详见下一节。</p></li>
+    <li><h3>网页矩阵</h3><p>在自己域名下摆一组页面，按层级导航、按页授权，还能整包导出成 zip 再读回来。</p></li>
+    <li><h3>工具面</h3><p>联网搜索、读网页（带 SSRF 拦截与风险识别）、画图、多档折叠导出、语音合成、文件附件。</p></li>
+    <li><h3>产物卡片</h3><p>对话里现生成自包含 HTML 小部件，沙箱 iframe 内渲染，回复不只是一段文字。</p></li>
+    <li><h3>夜间整理</h3><p>空闲时段自动回顾对话、萃取洞察、写记忆摘要 —— 它自己会长记性。</p></li>
+  </ol>
+</div></section>
+
+<section class="ep-sec" id="mail"><div class="ep-wrap">
+  <h2>信箱：它真的能寄信，也真的收得到</h2>
+  <p class="sub">这一版新加的一块。发信走自研的一次性 SMTP 客户端（不是第三方 SDK），收信走 Cloudflare 的入站路由 —— 信箱本身（解析、存储、清单、读法）全在这个仓库里。</p>
+  <div class="ep-mail">
+    <dl>
+      <dt>发信</dt><dd>管理员在界面上写一封，或者对助手说一句让它寄；一封寄多个收件人只占一格额度，额度按天记、并发不重复占。</dd>
+      <dt>加密</dt><dd>465 隐式 TLS 与 587 STARTTLS 都实测过。升级失败就断连，绝不在明文上发凭据；证书主机名钉死。</dd>
+      <dt>流水</dt><dd>每一封都记账，<b>失败也记</b>并留服务器原话 —— 只记成功的账本等于没账本。</dd>
+      <dt>收信</dt><dd>头部进 DO 的 SQLite，整封原件进 R2；按内容指纹去重，超出保留数时连原件一起裁。</dd>
+      <dt>附件</dt><dd>清单只记名字与大小，内容一概不落库；正文只取纯文本，HTML 永不作为 HTML 交给上层。</dd>
+      <dt>离线副本</dt><dd>到点要说的话如果没进你当前那一场的对话流，就攒成一份邮件寄给你 —— 默认关着，一开就生效。</dd>
+      <dt>安全</dt><dd>口令只存在 secret 变量名里；来信被当作外部材料框住交给助手，不当作指令执行；寄信与收信只给主人这一间。</dd>
+    </dl>
+  </div>
+</div></section>
+
+<section class="ep-sec" id="rooms"><div class="ep-wrap">
+  <h2>一个 DO 就是一间屋</h2>
+  <p class="sub">整条链路只有三层：测试只打 Worker，Worker 按身份把你的话转给那间屋。屋里的东西全在它自己身上。</p>
+  <div class="ep-rooms">
+    <div class="ep-room"><p class="tag">kind=host</p><h3>主人屋 <code>default</code></h3><p>只有管理员进得去。全套工具、配置、夜间整理、全局皮肤都在这里。</p></div>
+    <div class="ep-room"><p class="tag">kind=card</p><h3>持卡来客</h3><p>由稳定身份派生，可换设备回到原房间。能看见自己这间屋的对话与记忆，看不见别人的。</p></div>
+    <div class="ep-room"><p class="tag">kind=temp</p><h3>一次性入口</h3><p>匿名 cookie 生成。换了手机、或者清了 cookie，就找不回原房间 —— 要长期请领一张卡。</p></div>
+  </div>
+</div></section>
+
+<section class="ep-sec" id="deploy"><div class="ep-wrap">
+  <h2>四步，装到你自己的账号下</h2>
+  <p class="sub">命令照 README 抄即可。第 4 步先 dry-run 看清目标，再真部署。</p>
+  <div class="ep-steps">
+    <div class="ep-step"><h3><span>1</span>拉取与依赖</h3><pre><code>git clone https://github.com/leleou209/ericher.git
+cd ericher
+npm install
+npm run types</code></pre></div>
+    <div class="ep-step"><h3><span>2</span>建两个专用资源</h3><pre><code>npx wrangler r2 bucket create ericher-memory
+npx wrangler vectorize create ericher-memory-bge-m3 \
+  --dimensions 1024 --metric cosine</code></pre><p class="ep-note">名字要与 <code>wrangler.jsonc</code> 对应，改了就两步都改。</p></div>
+    <div class="ep-step"><h3><span>3</span>配 secret</h3><pre><code>npm run types  # 生成 worker 类型
+npx wrangler secret put API_ENDPOINT
+npx wrangler secret put API_KEY
+npx wrangler secret put API_MODEL
+npx wrangler secret put ADMIN_PASSWORD
+npx wrangler secret put GATE_PASSWORD
+npx wrangler secret put SESSION_SECRET
+# 要用信箱再加一把：
+npx wrangler secret put MAIL_KEY</code></pre><p class="ep-warn">来客口令与管理口令不要相同；只给 <code>GATE_PASSWORD</code> 的话，管理员进不了自己的全套工具。</p></div>
+    <div class="ep-step"><h3><span>4</span>看目标，再部署</h3><pre><code>npm run check          # 类型 + 1435 例 + 构建
+npm run deploy -- --dry-run
+npm run deploy</code></pre><p class="ep-note">部署到你自己域名下，就配 <code>.wrangler.local.jsonc</code> 走 <code>npm run deploy -- --private</code>。</p></div>
+  </div>
+</div></section>
+
+<section class="ep-sec" id="limits"><div class="ep-wrap">
+  <h2>先说清它不做什么</h2>
+  <p class="sub">这类事提前讲明白，比事后发现强。</p>
+  <div class="ep-limits">
+    <div><b>没有数据库后端</b><p>全在你自己的 DO 与 R2 里。管理员导出 <code>/api/export</code> 拿一份 JSON —— 定期备份是运维的一部分，不是可选项。</p></div>
+    <div><b>换口令不等于收房间</b><p>改 <code>GATE_PASSWORD</code> 只影响之后的登录，<b>不会踢掉已在线的房间</b>；改 <code>SESSION_SECRET</code> 会让所有票失效，对话与记忆原地保留。</p></div>
+    <div><b>本地开发要登录 CF</b><p>Browser Run / Vectorize / Workers AI 无法在本地 workerd 里模拟，<code>npm run dev</code> 仍走远程绑定。</p></div>
+    <div><b>第三方渲染有额度</b><p><code>read_url</code> 读前端渲染页面走 Browser Run，免费档每天 10 浏览器分钟；没启用时自动回退「摘要 + Jinja」路径。</p></div>
+    <div><b>信箱要一把真钥匙</b><p>发信需要一个能用的 SMTP 账号（自建域名的 relay 或免费档服务商都行），25 端口平台封着，用 465 或 587。</p></div>
+    <div><b>它是个人的项目</b><p>使用 Vibe coding 写成，代码与版本管理经验多有残缺。质量口径是 <code>npm run check</code> 与全量测试，但也请你对自己那套负责。</p></div>
+  </div>
+</div></section>
+
+<section class="ep-close"><div class="ep-wrap">
+  <h2>门开着，钥匙在你手里。</h2>
+  <p style="color:var(--ep-dim);max-width:60ch">MIT 许可，欢迎改。安全议题请按 <code>SECURITY.md</code> 私下报告。</p>
+  <div class="ep-cta">
+    <a class="ep-btn primary" href="/_gate">进门看看</a>
+    <a class="ep-btn" href="/assistant">直接找助手台</a>
+    <a class="ep-btn" href="https://github.com/leleou209/ericher" rel="noopener">GitHub · 提 Issue</a>
+  </div>
+</div></section>
+
+</main>
+
+<footer class="ep-foot"><div class="ep-wrap ep-foot" style="padding:0">
+  <span>ericher 接待台 · v0.1.7 <code>2c9ef75</code> · 2026-10-19</span>
+  <span>Cloudflare Agents SDK + Durable Objects + React · 以 MIT 开源</span>
+</div></footer>
+</body>
+</html>
