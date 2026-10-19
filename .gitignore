@@ -3,6 +3,8 @@ dist/
 .dev.vars
 .wrangler.local.jsonc
 .wrangler/
+release/
+output/
 .tsbuild/
 *.log
 *.tsbuildinfo

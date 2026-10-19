@@ -12,6 +12,7 @@
     "dev": "vite dev",
     "build": "vite build",
     "deploy": "node scripts/deploy.mjs",
+    "release:pack": "node scripts/make-release.mjs",
     "types": "wrangler types",
     "tail": "wrangler tail",
     "typecheck": "tsc -b",
