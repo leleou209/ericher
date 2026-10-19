@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ericher 使用手册 · 部署、组件与矩阵</title>
+<meta name="description" content="ericher 的通用使用手册：从部署初始化、各组件怎么加载和个性化，到网页矩阵的双层宅院与三片权限活动域。命令、入口和验收标准都写清楚。">
+<meta name="color-scheme" content="light dark">
+<style>
+/* 单页、零外部请求。所有类名以 ep- 开头，避免与矩阵注入的样式互相覆盖。 */
+:root{
+  --ep-ink:#1b2027;--ep-dim:#4f5b67;--ep-faint:#7f8a96;--ep-bg:#f7f5f1;--ep-card:#fffdf9;
+  --ep-line:#e2ddd4;--ep-accent:#0b6bcb;--ep-accent-ink:#08447d;--ep-ok:#1c7a4b;--ep-warn:#a8541d;--ep-bad:#a12d2d;
+  --ep-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --ep-serif:"Songti SC","Noto Serif CJK SC",Georgia,"Times New Roman",serif;
+  --ep-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root{--ep-ink:#e8e4dc;--ep-dim:#b3bcc6;--ep-faint:#8a95a1;--ep-bg:#14171a;--ep-card:#1b1f23;
+    --ep-line:#2c3238;--ep-accent:#6db3f2;--ep-accent-ink:#a8d0f7;--ep-ok:#5fc18b;--ep-warn:#e0a06a;--ep-bad:#f08a8a}
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--ep-bg);color:var(--ep-ink);font:16px/1.75 var(--ep-sans);-webkit-font-smoothing:antialiased}
+a{color:var(--ep-accent-ink)}
+code{font:13px/1.6 var(--ep-mono);background:color-mix(in srgb,var(--ep-line) 45%,transparent);padding:1px 5px;border-radius:4px;word-break:break-word}
+pre{margin:14px 0;padding:14px 16px;background:var(--ep-card);border:1px solid var(--ep-line);border-radius:10px;overflow-x:auto}
+pre code{background:none;padding:0;font-size:13px;line-height:1.7;word-break:normal}
+.ep-skip{position:absolute;left:-9999px}.ep-skip:focus{left:8px;top:8px;background:var(--ep-card);padding:8px 12px;z-index:20}
+.ep-top{position:sticky;top:0;z-index:10;background:color-mix(in srgb,var(--ep-bg) 90%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--ep-line)}
+.ep-top-in{display:flex;align-items:center;gap:14px;max-width:1180px;margin:0 auto;padding:12px 22px;flex-wrap:wrap}
+.ep-brand{display:flex;align-items:baseline;gap:8px;text-decoration:none;color:inherit}
+.ep-brand b{font:700 19px/1 var(--ep-serif);letter-spacing:.02em}
+.ep-brand span{font-size:12px;color:var(--ep-faint);letter-spacing:.12em}
+.ep-nav{display:flex;gap:14px;margin-left:auto;flex-wrap:wrap}
+.ep-nav a{color:var(--ep-dim);text-decoration:none;font-size:13.5px}
+.ep-nav a:hover{color:var(--ep-accent-ink)}
+.ep-btn{display:inline-block;padding:8px 13px;border-radius:8px;text-decoration:none;font-size:13.5px;border:1px solid var(--ep-line);color:var(--ep-ink);background:var(--ep-card)}
+.ep-btn.primary{background:var(--ep-accent);border-color:var(--ep-accent);color:#fff}
+.ep-shell{display:grid;grid-template-columns:238px minmax(0,1fr);gap:46px;max-width:1180px;margin:0 auto;padding:30px 22px 80px}
+.ep-toc{position:sticky;top:76px;align-self:start;max-height:calc(100vh - 96px);overflow:auto;padding-right:8px}
+.ep-toc p{margin:0 0 8px;font:11px/1 var(--ep-mono);letter-spacing:.16em;color:var(--ep-faint);text-transform:uppercase}
+.ep-toc a{display:block;padding:5px 0;color:var(--ep-dim);text-decoration:none;font-size:13.5px;border-left:2px solid transparent;padding-left:10px}
+.ep-toc a:hover,.ep-toc a.on{color:var(--ep-accent-ink);border-left-color:var(--ep-accent)}
+.ep-toc .sub{padding-left:22px;font-size:12.5px}
+.ep-doc{min-width:0}
+.ep-doc h1{font:700 clamp(26px,4vw,38px)/1.3 var(--ep-serif);margin:8px 0 10px;letter-spacing:.01em}
+.ep-lede{color:var(--ep-dim);font-size:16.5px;max-width:66ch;margin:0 0 8px}
+.ep-meta{font:12px/1.7 var(--ep-mono);color:var(--ep-faint);margin:10px 0 26px}
+.ep-doc h2{font:700 clamp(21px,3vw,27px)/1.35 var(--ep-serif);margin:52px 0 14px;padding-top:18px;border-top:1px solid var(--ep-line);scroll-margin-top:80px}
+.ep-doc h3{font-size:17px;margin:28px 0 8px;scroll-margin-top:80px}
+.ep-doc h4{font-size:14.5px;margin:20px 0 6px;color:var(--ep-dim)}
+.ep-doc p{margin:9px 0}
+.ep-doc ul,.ep-doc ol{margin:9px 0;padding-left:22px}
+.ep-doc li{margin:5px 0}
+.ep-doc table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
+.ep-doc th,.ep-doc td{border:1px solid var(--ep-line);padding:8px 10px;text-align:left;vertical-align:top}
+.ep-doc th{background:color-mix(in srgb,var(--ep-line) 35%,transparent);font-weight:600}
+.ep-wrap-x{overflow-x:auto}
+.ep-call{border:1px solid var(--ep-line);border-left:3px solid var(--ep-accent);background:var(--ep-card);border-radius:8px;padding:12px 15px;margin:14px 0;font-size:14px}
+.ep-call.ok{border-left-color:var(--ep-ok)}
+.ep-call.warn{border-left-color:var(--ep-warn)}
+.ep-call.bad{border-left-color:var(--ep-bad)}
+.ep-call b{display:block;margin-bottom:3px}
+.ep-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:14px 0}
+.ep-card{background:var(--ep-card);border:1px solid var(--ep-line);border-radius:10px;padding:13px 15px}
+.ep-card b{display:block;margin-bottom:3px}
+.ep-card p{margin:0;font-size:13.5px;color:var(--ep-dim)}
+.ep-checks{list-style:none;padding:0;margin:12px 0}
+.ep-checks li{position:relative;padding:7px 0 7px 28px;margin:0;border-bottom:1px dashed var(--ep-line);font-size:14px}
+.ep-checks li::before{content:"";position:absolute;left:2px;top:12px;width:13px;height:13px;border:1.5px solid var(--ep-faint);border-radius:3px}
+.ep-tag{display:inline-block;font:11px/1.5 var(--ep-mono);padding:1px 7px;border:1px solid var(--ep-line);border-radius:999px;color:var(--ep-dim);margin-right:6px}
+.ep-tag.pub{color:var(--ep-ok);border-color:color-mix(in srgb,var(--ep-ok) 45%,var(--ep-line))}
+.ep-tag.vis{color:var(--ep-accent-ink);border-color:color-mix(in srgb,var(--ep-accent) 45%,var(--ep-line))}
+.ep-tag.adm{color:var(--ep-warn);border-color:color-mix(in srgb,var(--ep-warn) 45%,var(--ep-line))}
+.ep-kv{display:grid;grid-template-columns:150px 1fr;gap:6px 16px;font-size:14px;margin:12px 0}
+.ep-kv dt{color:var(--ep-faint);font:12px/1.7 var(--ep-mono)}
+.ep-kv dd{margin:0;color:var(--ep-dim)}
+.ep-foot{max-width:1180px;margin:0 auto;padding:20px 22px 40px;border-top:1px solid var(--ep-line);font-size:12.5px;color:var(--ep-faint);display:flex;gap:16px;flex-wrap:wrap;justify-content:space-between}
+.ep-mobile-toc{display:none;margin:0 0 18px;border:1px solid var(--ep-line);border-radius:8px;background:var(--ep-card);padding:10px 14px}
+.ep-mobile-toc summary{cursor:pointer;font-weight:600;font-size:14px}
+.ep-mobile-toc a{display:block;padding:3px 0;font-size:13.5px;text-decoration:none}
+@media (max-width:900px){
+  .ep-shell{grid-template-columns:1fr;gap:0;padding-top:20px}
+  .ep-toc{display:none}
+  .ep-mobile-toc{display:block}
+  .ep-kv{grid-template-columns:1fr}
+  .ep-kv dt{margin-top:8px}
+}
+/* 矩阵会在左上角注入可拖拽的悬浮菜单；宽屏默认展开，页头与目录给它让位。 */
+@media (min-width:1000px){.ep-top-in{padding-left:290px}.ep-shell{padding-top:170px}}
+@media (max-width:999px){.ep-top-in{padding-top:56px}}
+@media print{.ep-top,.ep-toc,.ep-mobile-toc,.ep-foot{display:none}.ep-shell{display:block;max-width:none;padding:0}.ep-doc h2{break-after:avoid}pre{white-space:pre-wrap}}
+</style>
+</head>
+<body>
+<a class="ep-skip" href="#main">跳到正文</a>
+
+<header class="ep-top"><div class="ep-top-in">
+  <a class="ep-brand" href="/home"><b>ericher</b><span>使用手册</span></a>
+  <nav class="ep-nav" aria-label="页面导航">
+    <a href="#quick">五分钟</a><a href="#deploy">部署</a><a href="#components">组件</a>
+    <a href="#personalize">个性化</a><a href="#matrix">矩阵</a><a href="#agent">给 AI</a><a href="#trouble">排错</a>
+  </nav>
+  <a class="ep-btn" href="/home">介绍页</a>
+  <a class="ep-btn primary" href="/assistant">进入助手台</a>
+</div></header>
+
+<main id="main" class="ep-shell">
+  <aside class="ep-toc" aria-label="目录">
+    <p>目录</p>
+    <a href="#quick">1. 五分钟试用</a>
+    <a href="#deploy">2. 部署与初始化</a>
+    <a href="#components">3. 组件地图</a>
+    <a class="sub" href="#door">门禁与会话</a>
+    <a class="sub" href="#chat">对话与模型</a>
+    <a class="sub" href="#memory">记忆与回想</a>
+    <a class="sub" href="#tools">工具与技能</a>
+    <a class="sub" href="#remind">任务与提醒</a>
+    <a class="sub" href="#mail">信箱</a>
+    <a class="sub" href="#matrix">网页矩阵</a>
+    <a class="sub" href="#look">外观与 PWA</a>
+    <a class="sub" href="#ops">额度、备份、更新</a>
+    <a href="#personalize">4. 个性化</a>
+    <a href="#matrix-house">5. 矩阵：双层宅院</a>
+    <a href="#agent">6. 给 AI 的清单</a>
+    <a href="#trouble">7. 排错</a>
+    <a href="#safety">8. 安全与边界</a>
+  </aside>
+
+  <article class="ep-doc">
+    <h1>ericher 使用手册</h1>
+    <p class="ep-lede">这份手册只回答三件事：怎么把它跑起来；每个组件在什么时候初始化、数据放在哪；按自己的需求怎么改。命令和入口都按当前仓库可执行，不写“未来会有”。</p>
+    <p class="ep-meta">适用 0.1.7 · 95 个测试文件 / 1435 例 · 零外部请求</p>
+
+    <details class="ep-mobile-toc"><summary>目录</summary>
+      <a href="#quick">1. 五分钟试用</a><a href="#deploy">2. 部署与初始化</a>
+      <a href="#components">3. 组件地图</a><a href="#personalize">4. 个性化</a>
+      <a href="#matrix-house">5. 双层宅院</a><a href="#agent">6. 给 AI 的清单</a>
+      <a href="#trouble">7. 排错</a><a href="#safety">8. 安全与边界</a>
+    </details>
+
+    <section id="quick">
+      <h2>1. 五分钟试用</h2>
+      <p>先分清两个入口：<code>/home</code> 是介绍页（你现在看的手册也在这一组页面里），<code>/assistant</code> 才是登录与助手本体。没有票时，<code>/assistant</code> 就是门禁页；登录成功后仍是这个地址。</p>
+      <h3>管理员（主人）</h3>
+      <ol>
+        <li>打开 <code>https://你的域名/assistant</code>，输入部署时设置的 <code>ADMIN_PASSWORD</code>。</li>
+        <li>点“新建对话”，输入 <code>/help</code>，看当前可用的工具与命令。</li>
+        <li>说一句“记一条：周五交电费”，再打开“笔记本”或“上下文记忆”，确认它已经落库。</li>
+        <li>说一句“两分钟后提醒我喝水”，等两分钟，确认主动消息到达。</li>
+        <li>点左下角身份卡，确认称呼；打开“设置”，从上到下看一遍各节，知道东西都在哪。</li>
+      </ol>
+      <h3>来客</h3>
+      <ol>
+        <li>向管理员要一个来客口令（<code>GATE_PASSWORD</code>）或某档来客类型的口令。</li>
+        <li>在登录页输入口令。来客只会看到自己的对话、记忆与获准的工具，看不到设置、信箱、矩阵与别人的房间。</li>
+        <li>如果拿到了长期身份卡，换设备登录同一张卡可以回到原房间；临时票换设备不保证找回。</li>
+      </ol>
+      <div class="ep-call warn"><b>没有默认口令</b>没有配置任何口令时，登录页返回 503“门禁未配置”，这是故意设计，不是密码错误。管理员口令与来客口令必须不同。</div>
+      <div class="ep-call"><b>试用的边界</b>对话会真实写入 DO 的 SQLite；不要在试用时输入不希望留存的内容。管理员可以用 <code>/api/export</code> 导出整库备份。</div>
+    </section>
+
+    <section id="deploy">
+      <h2>2. 部署与初始化</h2>
+      <h3>2.1 前置</h3>
+      <ul>
+        <li>Node.js 24（或 ≥ 22.12），一个 Cloudflare 账号。</li>
+        <li>一个可用的模型接口（Anthropic / OpenAI Chat / OpenAI Responses 三种线格式之一）。</li>
+        <li>可选：SMTP 账号（发信）、Tavily key（搜索）、语音/绘图 key。没配时对应功能自动降级或关闭。</li>
+      </ul>
+      <h3>2.2 从仓库部署</h3>
+<pre><code>git clone https://github.com/leleou209/ericher.git
+cd ericher
+npm install
+npm run types
+
+npx wrangler r2 bucket create ericher-memory
+npx wrangler vectorize create ericher-memory-bge-m3 --dimensions 1024 --metric cosine
+
+npx wrangler secret put API_ENDPOINT
+npx wrangler secret put API_KEY
+npx wrangler secret put API_MODEL
+npx wrangler secret put ADMIN_PASSWORD
+npx wrangler secret put GATE_PASSWORD
+npx wrangler secret put SESSION_SECRET
+
+npm run check
+npm run deploy -- --dry-run
+npm run deploy</code></pre>
+      <p>已有自己的域名与 Worker 时，把现用配置另存为 <code>.wrangler.local.jsonc</code>（已被 git 忽略），并用 <code>npm run deploy -- --private</code>；公开配置只部署到示例 Worker <code>ericher-app</code>。</p>
+
+      <h3>2.3 必需 secret</h3>
+      <div class="ep-wrap-x"><table>
+        <thead><tr><th>名字</th><th>用途</th><th>要点</th></tr></thead>
+        <tbody>
+          <tr><td><code>API_ENDPOINT</code></td><td>模型接口地址</td><td>OpenAI / Anthropic 兼容端点；也可在“模型配置”面板里改用运行时配置</td></tr>
+          <tr><td><code>API_KEY</code></td><td>模型密钥</td><td>只以 secret 变量名被引用，不入库、不回显</td></tr>
+          <tr><td><code>API_MODEL</code></td><td>模型名</td><td>要与端点支持的模型一致</td></tr>
+          <tr><td><code>ADMIN_PASSWORD</code></td><td>管理员口令</td><td>人能敲出来的口令；与来客口令不同</td></tr>
+          <tr><td><code>GATE_PASSWORD</code></td><td>通用来客口令</td><td>没有它时管理员仍可用管理员口令进入自己的屋</td></tr>
+          <tr><td><code>SESSION_SECRET</code></td><td>会话票签名</td><td>独立随机值；更换会让旧票全部失效</td></tr>
+        </tbody>
+      </table></div>
+      <p>可选：<code>MAIL_KEY</code>（SMTP 口令）、<code>TAVILY_API_KEY</code>、<code>ZHIPU_KEY</code> / <code>MIMO_API_KEY</code> / <code>DOUBAO_TTS_KEY</code>（语音）、<code>SILICONFLOW_API_KEY</code> / <code>MINIMAX_KEY</code>（绘画）、<code>CF_ACCOUNT_ID</code> + <code>CF_API_TOKEN</code>（额度校准）。完整清单见仓库 <code>.dev.vars.example</code>。</p>
+
+      <h3>2.4 第一次请求时发生了什么</h3>
+      <div class="ep-kv">
+        <dt>Worker</dt><dd>门禁与路由先启动；没有口令直接 503。静态资源由 <code>ASSETS</code> 绑定托管。</dd>
+        <dt>DO</dt><dd>第一次进房时唤醒 <code>CoworkAgent</code>；建表、补列、读默认配置都在这一层完成。</dd>
+        <dt>SQLite</dt><dd>对话、消息、记忆、来客类型、模型/读音配置、行为留痕都在各自房间里。</dd>
+        <dt>R2</dt><dd><code>ericher-memory</code> 存文件、图片、邮件原件、矩阵正文与配置。</dd>
+        <dt>Vectorize</dt><dd><code>ericher-memory-bge-m3</code>（1024 维，cosine）存记忆向量；本地 workerd 不支持它。</dd>
+        <dt>矩阵</dt><dd>第一次访问矩阵路径时读 R2 的 <code>matrix/config.json</code>；没有就落默认配置。</dd>
+      </div>
+      <div class="ep-call warn"><b>不要改类名</b>DO 存储按类标识派生。把 <code>CoworkAgent</code> 改名会导致既有记忆读不到；迁移标签同理。</div>
+    </section>
+
+    <section id="components">
+      <h2>3. 组件地图</h2>
+      <p>先看一张总表，再按需往下翻。每个组件都按“入口 / 初始化 / 怎么用 / 怎么改 / 边界”写。</p>
+      <div class="ep-wrap-x"><table>
+        <thead><tr><th>组件</th><th>入口</th><th>数据在哪</th><th>怎么个性化</th></tr></thead>
+        <tbody>
+          <tr><td>门禁与会话</td><td><code>/assistant</code></td><td>Worker secret + HMAC cookie</td><td>口令、<code>SESSION_SECRET</code>、来客类型</td></tr>
+          <tr><td>对话与模型</td><td>侧栏“对话”</td><td>DO SQLite + 模型配置</td><td>模型配置、普通/深度模式、工作守则</td></tr>
+          <tr><td>记忆与回想</td><td>“上下文记忆”“人物记忆”“回想”</td><td>DO SQLite + Vectorize</td><td>记忆权限、公开账本、回想守则</td></tr>
+          <tr><td>工具与技能</td><td>对话内工具调用</td><td>DO SQLite + 外部 API</td><td>来客权限、工具守则、技能配方</td></tr>
+          <tr><td>提醒与盯梢</td><td>“提醒”“任务清单”</td><td>DO SQLite</td><td>离线邮件副本、时段</td></tr>
+          <tr><td>信箱</td><td>侧栏“信箱”</td><td>DO SQLite + R2</td><td>SMTP 配置、收件地址表、每日额度</td></tr>
+          <tr><td>网页矩阵</td><td>域名下的路径 + 工作台</td><td>R2 <code>matrix/*</code></td><td>页面、四档权限、导航、主题、矩阵包</td></tr>
+          <tr><td>外观</td><td>“设置 → 外观”</td><td>DO SQLite + fetch</td><td>主题、壁纸、形象、弹页、动效、主题包</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 id="door">3.1 门禁、会话与身份</h3>
+      <p><b>初始化：</b>Worker 启动时只读 secret，不建默认口令。登录成功才签发 HMAC 签名的 HttpOnly Cookie；票里带角色、来客类型与卡片信息。管理员连 <code>default</code> 屋；来客的 DO 名由签名密钥派生，Worker 入口再核对一遍角色，防止来客改进主人的屋。</p>
+      <ul>
+        <li><b>角色：</b>管理员、持票来客、临时来客、公开访客（矩阵用）。</li>
+        <li><b>来客类型：</b>“设置 → 来客设置 → 来客类型”维护名称、口令、权限开关与接待说明。口令只存 SHA-256 摘要；同档不同来客仍物理隔离。</li>
+        <li><b>身份卡：</b>长期来客可跨设备回到原房间；临时票不提供跨设备找回。</li>
+        <li><b>换口令：</b>只影响之后的登录，不会撤销已签发的票；换 <code>SESSION_SECRET</code> 才会让旧票全部失效。</li>
+      </ul>
+
+      <h3 id="chat">3.2 对话、模型与上下文</h3>
+      <p><b>初始化：</b>每个房间的 DO 第一次醒来时建会话表与默认状态；模型配置优先读面板里的运行时条目，没有才回落到 <code>API_ENDPOINT/API_KEY/API_MODEL</code> 三件套。一次对话的历史、工具调用与 token 计数都在 DO 里。</p>
+      <ul>
+        <li><b>模型配置：</b>“设置 → 模型配置 → 模型配置”。支持 <code>anthropic</code>、<code>openai-chat</code>、<code>openai-responses</code>；普通与深度思考可指派不同配置。</li>
+        <li><b>密钥：</b>面板只存 secret 变量名，运行时再从环境取；不要把 key 粘进页面或矩阵 HTML。</li>
+        <li><b>上下文：</b>“设置 → 对话 → 回复风格 / 上下文记忆”控制语气与记忆注入；会话记录可导出/清理。</li>
+        <li><b>工作守则：</b>“设置 → 工作守则”里的人格里写“怎么做事”，不是营销文案；改完用一轮真实对话验收。</li>
+      </ul>
+
+      <h3 id="memory">3.3 记忆、回想、笔记与人物</h3>
+      <p><b>初始化：</b>DO SQLite 建记忆表；写入时同步生成向量进 Vectorize。会话停满 30 分钟会自动整理存档（回想）；夜间空闲时段也会做回顾。记忆权限关闭的来客一次数据回调都不该收到。</p>
+      <ul>
+        <li><b>上下文记忆：</b>分条记忆、重要度、类型、书架、可见性（private / public）。“公开账本”是管理员明确点头后给来客看的那一份。</li>
+        <li><b>人物记忆：</b>一个人的称呼、关系与相关记录；同名同姓时用称呼区分。</li>
+        <li><b>笔记：</b>侧栏“笔记本”是管理员的长期本子；来客能否使用由档位权益决定。</li>
+        <li><b>回想：</b>按时间回看会话；会话记录在“设置 → 储存内容 → 会话记录”。</li>
+        <li><b>个性化：</b>“设置 → 工作守则 → 回想守则”控制怎么整理；隐私边界用记忆的可见性，而不是靠提示词自觉。</li>
+      </ul>
+
+      <h3 id="tools">3.4 工具与技能</h3>
+      <p><b>初始化：</b>工具按当前身份与档位组装进上下文；工具自己只拿到必要的上下文与密钥名。搜索、读网页、绘画、语音、天气、artifact、文件附件等都可能因没配 key 而降级或关闭。</p>
+      <div class="ep-grid">
+        <div class="ep-card"><b>搜索</b><p>Tavily；没有 key 时退到免费渠道并标注来源。</p></div>
+        <div class="ep-card"><b>读网页</b><p>Tavily → 直连 → Browser Run → Jina 四级兜底；带 SSRF 防护与风控识别。</p></div>
+        <div class="ep-card"><b>绘画</b><p>按可用 key 逐级降档；没配就明确说画不了，不假装成功。</p></div>
+        <div class="ep-card"><b>语音</b><p>MiMo / 豆包 / 智谱多协议；在“读音配置”里选。</p></div>
+        <div class="ep-card"><b>artifact</b><p>对话里生成自包含 HTML 小部件，沙箱 iframe 渲染。</p></div>
+        <div class="ep-card"><b>文件</b><p>小图内联直读；大图/冷门格式转述；附件进 R2，按房间前缀隔离。</p></div>
+      </div>
+      <p><b>权限：</b>“设置 → 来客设置 → 来客权限管理”按档位开关工具；管理员默认全开。工具的提示词在“设置 → 工作守则 → 工具守则”里改，不要在前端硬编码另一套。</p>
+
+      <h3 id="remind">3.5 任务、提醒与盯梢</h3>
+      <p><b>初始化：</b>提醒与任务落在 DO SQLite；DO 被唤醒时恢复调度。到点后优先在当前对话流里说话；如果没进当前这一场，可攒成一封邮件寄出（默认关，需在邮件配置里打开 <code>sayMail</code>）。</p>
+      <ul>
+        <li>自然语言创建：“明天九点提醒我……”；也可在“任务清单/提醒”里手动维护。</li>
+        <li>盯梢按小时级频率检查网页或指标，变化才说；注意目标站的额度与反爬限制。</li>
+        <li>夜间默认不主动开工；需要时在配置里改时段。</li>
+      </ul>
+
+      <h3 id="mail">3.6 信箱</h3>
+      <p><b>初始化：</b>邮件配置只存在主人屋 <code>default</code> 的 SQLite；场屋读到的是空表，所以发信、收信、配置类调用都会转交主屋。口令只存 secret 变量名（如 <code>MAIL_KEY</code>），发信那一刻才从环境取。</p>
+      <div class="ep-kv">
+        <dt>发信</dt><dd>“设置 → 寄信 → 邮件”填 SMTP 主机、端口、加密方式、账号、发件地址、默认收件地址表、每日额度；保存后用“测试发送”。465 隐式 TLS 与 587 STARTTLS 都支持；升级失败即断连，不在明文上发凭据。</dd>
+        <dt>发件箱</dt><dd>侧栏“信箱 → 寄出”。每一封都记流水，失败也记并留服务器原话；超出保留数剪到最新 200 条。</dd>
+        <dt>收信</dt><dd>Cloudflare Email Routing 把入站交给 Worker 的 <code>email()</code>：头部进 SQLite，整封原件进 R2 <code>mail/in/&lt;日&gt;/&lt;id&gt;.eml</code>，按 SHA-256 去重。收件箱最多 500 条，超限连原件一起裁。</dd>
+        <dt>收信开关</dt><dd>邮件配置里的 <code>inboxEnabled</code> 默认关；打开后才把来信落库。测试可用 <code>npm run feed:mail -- --base http://127.0.0.1:8787 --pw &lt;管理员口令&gt;</code> 喂一封本地样例。</dd>
+        <dt>真收信三步</dt><dd>在 Cloudflare 域名下开 Email Routing、把 MX 交给 Cloudflare、把投递目标设为这个 Worker。三步缺一不可；代码侧只剩平台投递这一跳无法在本地验证。</dd>
+      </div>
+      <div class="ep-call warn"><b>来信不是指令</b>公网任何人都能往信箱里写。界面与工具都会把来信框成“外部材料”，不当作主人交代的任务或系统指令执行；HTML 永不作为 HTML 交给上层。</div>
+
+      <h3 id="look">3.7 外观、主题与 PWA</h3>
+      <p><b>初始化：</b>主题配置由管理员保存，登录页也能读到全局皮肤；未登录时走公开主题接口。四套内置主题：白纸黑字、晨曦、夜墨、跟随系统。外观可整套打包成主题包（zip）导入导出，并带可视化编辑器。</p>
+      <ul>
+        <li>“设置 → 外观 → 主题 / 壁纸与配色 / 形象与弹页 / 动效与消息”分别管色板、背景、头像与进站弹页、动效。</li>
+        <li>PWA：浏览器“安装到主屏”即可；需要 HTTPS。</li>
+        <li>矩阵页面另有自己的外观注入，“设置 → 网页矩阵”里改的是矩阵那一套，不要和主应用主题混为一谈。</li>
+      </ul>
+
+      <h3 id="ops">3.8 额度、备份与更新</h3>
+      <ul>
+        <li><b>额度：</b>设置里的额度面板显示自计量；配置只读的 <code>CF_API_TOKEN</code> 与 <code>CF_ACCOUNT_ID</code> 后可校准官方用量。不要把这些写进公开的 <code>wrangler.jsonc</code>。</li>
+        <li><b>备份：</b>管理员访问 <code>/api/export</code> 下载整库 JSON（记忆、会话、消息、配置、留痕）。数据只在你的 DO/R2 里，没有异地副本；定期拉一份是运营的一部分。</li>
+        <li><b>更新：</b><code>version.json</code> 是发布清单；线上实例拿它比版本号决定是否提示升级。私有部署攒批推送是常态，提交号对不上不代表旧。</li>
+        <li><b>成本：</b>在 Cloudflare 免费额度与自备模型/SMTP 额度内可以零月费跑；Browser Run 免费档每天 10 个浏览器分钟，超出或启用付费能力时以平台账单为准。</li>
+      </ul>
+    </section>
+
+    <section id="personalize">
+      <h2>4. 个性化：从不动代码到改代码</h2>
+      <p>按改动成本从低到高选一层，不要一上来就改源码。</p>
+      <div class="ep-wrap-x"><table>
+        <thead><tr><th>层</th><th>能改什么</th><th>在哪</th><th>验收</th></tr></thead>
+        <tbody>
+          <tr><td>界面配置</td><td>称呼、签名、主题、壁纸、头像、动效、模型、读音、搜索、绘画、邮件</td><td>“设置”各节</td><td>保存后刷新仍在；换设备仍生效</td></tr>
+          <tr><td>行为提示</td><td>人格、工具偏好、回想方式、自我认知</td><td>“设置 → 工作守则”</td><td>用一轮真实任务验收，不看提示词自评</td></tr>
+          <tr><td>权限与房间</td><td>来客类型、工具权限、记忆可见性、公开账本</td><td>“设置 → 来客设置 / 对话”</td><td>分别用管理员、持票来客、临时来客验收</td></tr>
+          <tr><td>矩阵</td><td>页面、路径、四档权限、导航、外站认定、页面 CSS</td><td>“设置 → 网页矩阵”或 <code>/assistant/workbench</code></td><td>公开/持票/管理员三种身份各走一遍</td></tr>
+          <tr><td>源码</td><td>默认提示词、工具实现、前端界面、注入样式</td><td><code>src/agent/prompt.ts</code>、<code>src/tools/*</code>、<code>web/src/*</code></td><td><code>npm run check</code> 全绿，并在实机走一遍</td></tr>
+        </tbody>
+      </table></div>
+      <div class="ep-call"><b>先改提示词，再改代码</b>很多“它不够像我”的问题在“工作守则”里就能解决；代码只负责能力边界，不负责语气。</div>
+    </section>
+
+    <section id="matrix-house">
+      <h2>5. 矩阵：双层宅院与三片权限活动域</h2>
+      <p>矩阵不是“再挂几个页面”，而是一套按身份分层的站点结构。推荐把它设计成一座双层宅院：外院负责展示，谁都能进；内院要过门卫，给持票来客；核心区只有管理员能进。</p>
+
+      <h3>5.1 三片活动域</h3>
+      <div class="ep-grid">
+        <div class="ep-card"><b>展示域 · 外院 <span class="ep-tag pub">public</span></b><p>介绍页、作品、公开文章、联系方式。无登录、无隐私数据、可被搜索引擎收录。入口页只能有一个，且必须是公开页。</p></div>
+        <div class="ep-card"><b>协作域 · 内院 <span class="ep-tag vis">visitor / types</span></b><p>持票来客或指定档位能看到的内容：项目进度、家庭页、共享资料。每个来客仍在自己的房间里，记忆与文件不串。</p></div>
+        <div class="ep-card"><b>管理域 · 核心 <span class="ep-tag adm">admin</span></b><p>设置、信箱、模型配置、来客名册、矩阵工作台、备份导出。只给管理员；不要从公开页直接挂链接。</p></div>
+      </div>
+
+      <h3>5.2 两道墙</h3>
+      <ul>
+        <li><b>外墙（门卫墙）：</b>公开访客撞上 <code>visitor</code> / <code>types</code> / <code>admin</code> 页面时，会得到“这一页要验票”，跳到 <code>/_ticket?next=...</code>。验票成功才进内院；没票的人进不去。也可以用 <code>kind=gate</code> 的门卫节点，让“进内院”成为一个明确的入口。</li>
+        <li><b>内墙（管理墙）：</b><code>access=admin</code> 的页面只对管理员开放；来客即使登录也只会看到“这一页不向你开放”。权限判定在服务端，页面里藏链接不算保护。</li>
+      </ul>
+
+      <h3>5.3 四档身份怎么选</h3>
+      <div class="ep-wrap-x"><table>
+        <thead><tr><th>access</th><th>谁能看</th><th>适合</th></tr></thead>
+        <tbody>
+          <tr><td><code>public</code></td><td>所有人，包括没有票的过路人</td><td>介绍页、作品、公开文章、联系页</td></tr>
+          <tr><td><code>visitor</code></td><td>任何已登录的持票来客</td><td>内院首页、共享项目、给所有来客的资料</td></tr>
+          <tr><td><code>types</code></td><td>登录且来客类型在 <code>types</code> 白名单里</td><td>家人、朋友、客户等不同档位的专属页</td></tr>
+          <tr><td><code>admin</code></td><td>只有管理员</td><td>核心区、配置页、内部台账</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3>5.4 一套最小可行布局</h3>
+<pre><code>/home                  public   入口页（entry=true）
+/about                 public   介绍
+/work                   public   作品 / 公开文章
+
+/inner                  visitor  内院首页（或 kind=gate 到 /inner/home）
+/inner/projects         visitor  所有来客可见
+/inner/family           types    types=["family"] 才可见
+
+/core                   admin    核心区
+/core/mail              admin    信箱（或直接用 /assistant）
+/core/matrix            admin    矩阵工作台
+/core/backup            admin    备份说明</code></pre>
+      <p>路径规则：最多 3 段，每段只含小写字母、数字、<code>-</code>、<code>_</code>；不能占用 <code>api</code>、<code>agents</code>、<code>assets</code>、<code>index</code>、<code>assistant</code>。入口页最多一个，且会被强制设为公开。</p>
+
+      <h3>5.5 在矩阵工作台里怎么搭</h3>
+      <ol>
+        <li>打开 <code>/assistant/workbench</code>（或“设置 → 网页矩阵”）。先建外院页，把 <code>/home</code> 设为入口。</li>
+        <li>建内院页，<code>access</code> 选 <code>visitor</code>；需要按档位区分时选 <code>types</code> 并填来客类型 id。</li>
+        <li>要一个明确的“进内院”入口，就建 <code>kind=gate</code> 的门卫节点，连一条边到内院首页；门卫自己不出正文。</li>
+        <li>建核心区页，<code>access</code> 选 <code>admin</code>；不要从公开页挂链接，只从工作台或助手台进入。</li>
+        <li>用“通路”把页面连起来：按钮落在正文锚点、拖拽落点或页面末尾的兜底栏。外站跳转统一走 <code>/_gate</code>，域名需先在外站认定表里放行。</li>
+        <li>三种身份各验一遍：无痕窗口（公开）、来客口令（持票）、管理员口令（核心）。</li>
+        <li>改动前先导出矩阵包；装备新包前会留底，出问题用“回滚”装回上一版。</li>
+      </ol>
+
+      <h3>5.6 矩阵包与回滚</h3>
+      <ul>
+        <li>导出：工作台“导出矩阵包”或 <code>GET /api/matrix/pack</code>，得到一个 zip（配置 + 页面正文；缺失正文会在回执头里如实标出）。</li>
+        <li>装备：<code>POST /api/matrix/pack</code>（管理员，或配置了 <code>MATRIX_PUSH_TOKEN</code> 的自动化）会整体替换当前矩阵，并在替换前留底。</li>
+        <li>回滚：<code>POST /api/matrix/pack/rollback</code> 装回上一份留底。</li>
+        <li>页面正文上限 2MB；入口页、外站页、门卫/助手节点各有独立规则，保存时会收口。</li>
+      </ul>
+      <div class="ep-call warn"><b>公开页就是公开的</b>矩阵把 HTML 原样存进 R2 并直出。不要把密码、key、内部地址、客人真名与私人资料写进 <code>public</code> 页面；需要保护的内容放进内院或核心区。</div>
+    </section>
+
+    <section id="agent">
+      <h2>6. 给 AI 的执行清单</h2>
+      <p>这一节给代为操作的人或 AI。每步都有可验证的结果；任一步失败就停，不要靠猜连续重试。</p>
+      <h3>6.1 部署与门禁</h3>
+      <ul class="ep-checks">
+        <li>Node ≥ 22.12；<code>npm install</code> 与 <code>npm run types</code> 成功。</li>
+        <li>R2 桶与 Vectorize 索引已创建，名字与 <code>wrangler.jsonc</code> 一致。</li>
+        <li>六个必需 secret 已配置；<code>ADMIN_PASSWORD != GATE_PASSWORD</code>。</li>
+        <li><code>npm run check</code> 全绿；<code>npm run deploy -- --dry-run</code> 的目标是预期 Worker。</li>
+        <li>打开 <code>/assistant</code>，管理员口令返回 200 且角色为 admin；无口令时为 503。</li>
+      </ul>
+      <h3>6.2 对话、记忆、提醒</h3>
+      <ul class="ep-checks">
+        <li>模型配置保存后，发一句“只回复 OK”，确认不走 fallback 报错。</li>
+        <li>说“记一条：验收标记 &lt;时间&gt;”，在“上下文记忆”里能搜到。</li>
+        <li>说“两分钟后提醒我验收”，到点收到主动消息；若开了离线副本，发件箱有记录。</li>
+        <li>关闭某个来客档位的记忆权限，用该档位登录，确认一次数据回调都没有。</li>
+      </ul>
+      <h3>6.3 信箱</h3>
+      <ul class="ep-checks">
+        <li>邮件配置保存成功；用“测试发送”收到测试信。</li>
+        <li>发件箱出现一行；失败时也有一行并带服务器原话。</li>
+        <li>打开 <code>inboxEnabled</code>；<code>npm run feed:mail</code> 喂一封，收件箱出现且重复投递被判重。</li>
+        <li>真收信另验三步：Email Routing、MX、目标 Worker。</li>
+      </ul>
+      <h3>6.4 矩阵</h3>
+      <ul class="ep-checks">
+        <li>外院 <code>/home</code> 公开且是唯一入口；无痕窗口能打开。</li>
+        <li>内院 <code>visitor</code> 页：无票跳 <code>/_ticket</code>，持票能看。</li>
+        <li><code>types</code> 页：别的档位登录只看到“不向你开放”。</li>
+        <li><code>admin</code> 页：来客看不到，管理员能看。</li>
+        <li>外站链接只走 <code>/_gate</code>，未认定的域名被拦。</li>
+        <li>改动前导出矩阵包；装备后检查页面数与入口数；需要时回滚。</li>
+      </ul>
+      <h3>6.5 机器可读的验收单</h3>
+<pre><code>{
+  "goal": "部署并验收 ericher 0.1.7",
+  "must_pass": [
+    "POST /api/auth {pw: admin} -> 200, role=admin",
+    "GET /assistant -> 200",
+    "GET /api/matrix/pages -> pages>=1, entries==1",
+    "GET /home -> 200 (public)",
+    "GET /guide -> 200 (public)",
+    "GET /api/export -> 200, JSON",
+    "npm run check -> exit 0"
+  ],
+  "never": [
+    "commit .dev.vars or .wrangler.local.jsonc",
+    "put secrets in a public matrix page",
+    "retry a wrong password in a loop",
+    "skip npm run check before deploy"
+  ]
+}</code></pre>
+      <div class="ep-call"><b>403 / 401 先看身份</b>矩阵与 REST 的权限都在服务端；403 通常不是 cookie 过期，而是当前身份不够。不要用管理员口令去猜来客行为，也不要用无痕窗口当“已登录”。</div>
+    </section>
+
+    <section id="trouble">
+      <h2>7. 排错</h2>
+      <div class="ep-wrap-x"><table>
+        <thead><tr><th>现象</th><th>先查</th><th>处理</th></tr></thead>
+        <tbody>
+          <tr><td>登录页 503“门禁未配置”</td><td><code>ADMIN_PASSWORD</code> / <code>GATE_PASSWORD</code></td><td>至少配一个；管理员与来客口令必须不同</td></tr>
+          <tr><td>来客进不去</td><td>口令是否与管理口令相同、是否只配了 <code>GATE_PASSWORD</code></td><td>配 <code>SESSION_SECRET</code> 或管理员口令；用独立来客类型</td></tr>
+          <tr><td>登录后看不到设置/信箱/矩阵</td><td>当前角色是否 admin</td><td>用管理员口令；来客本来就看不到这些</td></tr>
+          <tr><td>模型 401 / 404</td><td>端点、模型名、key、线格式</td><td>在“模型配置”里逐项对齐；先发一句最短消息</td></tr>
+          <tr><td>本地 Vectorize / Browser Run 不工作</td><td>是否走 remote bindings</td><td><code>npm run dev</code> 需要 CF 登录；本地 workerd 不模拟这些服务</td></tr>
+          <tr><td>发信失败</td><td>端口 25 被封、TLS 模式、<code>MAIL_KEY</code>、发件地址</td><td>用 465 或 587；确认 SMTP 账号允许该发件人；看发件箱里的服务器原话</td></tr>
+          <tr><td>收不到信</td><td>Email Routing、MX、投递目标、<code>inboxEnabled</code></td><td>三步都配；先用 <code>feed:mail</code> 验证解析与落库</td></tr>
+          <tr><td>矩阵页 404</td><td>路径是否保留字、是否被别的页占用、是否已保存正文</td><td>换路径；检查页面列表；外站页没有本地正文</td></tr>
+          <tr><td>矩阵页 403/“不向你开放”</td><td>access 与当前身份</td><td>public / visitor / types / admin 四档逐一对；服务端判定，不看前端</td></tr>
+          <tr><td>页面样式互相打架</td><td>矩阵注入样式与本页 CSS 的优先级</td><td>自建页统一用自己的前缀（本页用 <code>ep-</code>）；页面级 CSS 会排在矩阵默认样式之后</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="safety">
+      <h2>8. 安全与边界</h2>
+      <ul>
+        <li><b>凭据：</b><code>.dev.vars</code>、<code>.wrangler.local.jsonc</code>、任何真实 key 都不进公开仓库；secret 只存变量名。</li>
+        <li><b>口令：</b>管理员与来客口令不同；不要把口令写进矩阵公开页；怀疑泄露就轮换 SMTP/模型 key。</li>
+        <li><b>房间：</b>一个 DO 一间屋；配置与邮件只认主人屋。来客改进不了主人的屋，但管理员也不要把管理员票发给来客。</li>
+        <li><b>来信：</b>当外部材料处理，不当指令；HTML 不直出；体积、条数、附件都有上限。</li>
+        <li><b>矩阵：</b>公开页就是公开的；内院靠服务端 access 判定；外站跳转经 <code>/_gate</code> 且域名要认定。</li>
+        <li><b>备份：</b><code>/api/export</code> 是唯一整库导出；没有异地副本，定期拉取。</li>
+        <li><b>项目边界：</b>这是单人/小家庭的接待台，不是给大量陌生访客做客服路由的 SaaS；免费额度适合轻量使用，超出时按自己的 Cloudflare 与服务商账单为准。</li>
+      </ul>
+      <p style="margin-top:26px"><a class="ep-btn primary" href="/assistant">现在去助手台</a> <a class="ep-btn" href="/home">回介绍页</a></p>
+    </section>
+  </article>
+</main>
+
+<footer class="ep-foot">
+  <span>ericher 使用手册 · 0.1.7 · 2026-10-19</span>
+  <span>Cloudflare Workers + Durable Objects + React · MIT</span>
+</footer>
+
+<script>
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll(".ep-toc a"));
+  var heads = links.map(function (a) { return document.querySelector(a.getAttribute("href")); }).filter(Boolean);
+  function sync() {
+    var y = window.scrollY + 100, cur = heads[0];
+    heads.forEach(function (h) { if (h.offsetTop <= y) cur = h; });
+    links.forEach(function (a) { a.classList.toggle("on", cur && a.getAttribute("href") === "#" + cur.id); });
+  }
+  window.addEventListener("scroll", sync, { passive: true });
+  sync();
+})();
+</script>
+</body>
+</html>
