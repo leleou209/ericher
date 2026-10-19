@@ -39,15 +39,9 @@ import type {
 } from "../lib/types";
 
 /**
- * 网页矩阵工作台的舞台。
- *
- * 矩阵页挂在主域名下，是主包原生的功能：按多段层级路径安放
- * （如 thisme/foryou），导航按层级树遍历，每页可选四档身份（公开 / 持票来客 /
- * 管理员 / 指定来客档位），服务端取正文前先验身份，不通过就吐一页零脚本的
- * 「不对你开放」。页面可以是上传的 HTML、云盘里的文件、粘贴的源码或外站链接。
- *
- * 左导航挑一面，右舞台摊开这一面：页面列表、矩阵图谱、页面预览、外观美化、
- * 外站认定、矩阵包。整页工作台（/assistant/workbench）承载这一切。
+ * 网页矩阵工作台：页面按层级路径安放，四档身份（公开/持票/管理员/指定档位），
+ * 服务端取正文前先验身份，不通过吐零脚本的拒绝页；正文可上传、引用云盘、粘贴或外链。
+ * 左导航挑一面：列表 / 图谱 / 预览 / 外观 / 外站 / 矩阵包。
  */
 const ACCESS_LABEL: Record<MatrixAccess, string> = {
   public: "公开",
@@ -141,8 +135,8 @@ function esc(s: string): string {
 }
 
 /**
- * 新开一间房时的空白正文：保存一页要求新页必须带正文（缺正文直接 400），
- * 所以先给它一张素净的纸，回头去编辑器里换上真正的内容。
+ * 新开一间房的空白正文：新页必须带正文（缺了直接 400），
+ * 先给一张素净的纸，回头去编辑器里换。
  */
 function blankPage(title: string): string {
   const t = esc(title || "新房间");
@@ -175,9 +169,8 @@ interface MatrixTreeNode {
 }
 
 /**
- * 把扁平的页面列表按路径拼成树：thisme/foryou、thisme/blog 会自动补出中间层
- * thisme，于是同一个前缀下的页面在面板里收进一个「文件夹」，而不是平铺成
- * 一行行看不出归属的路径。先排序再插，兄弟之间的顺序稳定、可预期。
+ * 把扁平页面按路径拼成树：thisme/foryou 自动补出中间层 thisme（文件夹）。
+ * 先排序再插，兄弟顺序稳定可预期。
  */
 function buildTree(pages: MatrixPage[]): MatrixTreeNode[] {
   const roots: MatrixTreeNode[] = [];
@@ -212,10 +205,7 @@ function tally(list: MatrixTreeNode[]): number {
   return n;
 }
 
-/**
- * 右栏当前开着哪一面。左导航按这一个值切换视图，一次只摊开一面，
- * 不再把所有东西挤进一条竖轴。
- */
+/** 右栏当前开着哪一面，一次只摊开一面 */
 type TabKey = "list" | "graph" | "preview" | "look" | "sites" | "pack";
 
 /** 导出这一步落到真浏览器上的三件事：造临时 URL、挂个 a 点一下、回收 URL */
@@ -234,9 +224,8 @@ export function MatrixPanel({
   onBare,
 }: {
   /**
-   * 「现在该不该只剩舞台」：左导航一收就报 true，工作台顶栏随之退场，整幅高度
-   * 都归舞台（预览面尤其需要 —— 那时顶栏不退，页面就铺不满）。顶栏不在这一层
-   * 手里（它在 Workbench 上），所以只能把这件事报上去，由外壳去藏。
+   * 「现在该不该只剩舞台」：左导航一收就报 true，工作台顶栏随之退场（它在 Workbench
+   * 上，不归这层管）—— 预览面尤其需要，顶栏不退页面就铺不满。
    */
   onBare?: (bare: boolean) => void;
 }) {
@@ -276,12 +265,8 @@ export function MatrixPanel({
   /** 右栏当前开着哪一面：列表 / 图谱 / 预览 / 外观 / 外站 */
   const [tab, setTab] = useState<TabKey>("list");
   /**
-   * 是不是手机那种窄屏。
-   *
-   * 工作台是给大屏做的（左导航 + 右舞台，图谱和预览都拿宽度换出来的），
-   * 没打算应付手机 —— 与其把两页挤成一团，不如进去时说一句：
-   * 这两面在手机上摊不开，去电脑上开。列表 / 外观 / 外站 / 矩阵包这几面
-   * 都是竖着读的，手机上照常用，所以只提醒、不拦。
+   * 是不是手机窄屏。工作台给大屏做（图谱和预览拿宽度换），手机上只提醒、不拦：
+   * 列表 / 外观 / 外站 / 矩阵包竖着读，照常用。
    */
   const [narrow, setNarrow] = useState(
     () =>
@@ -330,8 +315,7 @@ export function MatrixPanel({
     if (narrow) setRail(true);
   };
   /**
-   * 预览里的「落点编辑」开着没有：开着才铺可拖的手柄。默认开着 —— 进预览多半
-   * 就是来调按钮位置的，只想看页面时在浮标右半边一点就收起来。
+   * 预览里的落点编辑开关：开着才铺可拖手柄。默认开 —— 进预览多半是来调位置的。
    */
   const [edit, setEdit] = useState(true);
   /** 浮标（导航 / 编辑）的落点：拖过记本地，没拖过就按 CSS 钉在左下角 */
@@ -344,10 +328,8 @@ export function MatrixPanel({
   const saver = useRef(new ConfigurationSave());
   const packRunner = useRef(new PackOperation());
 
-  // 导航一收，舞台就该独占整幅：把顶栏也交给外壳收掉。这一条不只管预览 ——
-  // 列表、图谱、外观、外站同理（少一条顶栏，就多一整条内容的高度）。
-  // 窄屏不在此列：手机上导航本来就是"盖上来的一层"（默认还收着），
-  // 顶栏再一起退场的话，进工作台连名字和「回接待台」都看不见了。
+  // 导航一收，舞台独占整幅：把顶栏也交给外壳收掉（预览、列表、图谱、外观、外站同理）。
+  // 窄屏例外：手机上导航是盖上来的，顶栏再退就连名字和「回接待台」都看不见。
   useEffect(() => {
     onBare?.(railClosed && !narrow);
   }, [onBare, railClosed, narrow]);
@@ -439,10 +421,8 @@ export function MatrixPanel({
   }, []);
 
   /**
-   * 预览里当前这页出边的指纹：一变就让整页重挂一次，取到最新的真实渲染。
-   * 只认落点的**种类**（锚点 / 兜底栏 / 自由坐标），不认坐标本身 —— 拖一个已经
-   * 是自由坐标的按钮，预览自己把真身的 left/top 抹过去就够了，不必整页重载。
-   * 种类变了（比如锚点按钮被拖成自由坐标）才重挂，那时候按钮的写法得换。
+   * 预览当前页出边的指纹：一变就整页重挂。只认落点种类（锚点/兜底/自由坐标），
+   * 不认坐标 —— 拖已存在的自由坐标时预览自己抹 left/top，种类变了才需重载。
    */
   const linksVersion = useMemo(
     () =>
@@ -651,8 +631,8 @@ export function MatrixPanel({
   };
 
   /**
-   * 装备矩阵包：整体替换线上这套。动手前先把话说清楚 ——
-   * 这是「装上的就是那个包的样子」，不是往现有的里添几页。
+   * 装备矩阵包：整体替换线上这套（不是往里添几页）。
+   * 装前自动留底，装错可回滚。
    */
   const equipPack = async (file: File) => {
     if (
@@ -688,10 +668,8 @@ export function MatrixPanel({
   };
 
   /**
-   * 全景图里拖出的一条线：不填文字，落点走兜底栏 —— 后端会把按钮文字回落成
-   * 目标页标题。要改文字或落点，去房间侧表改同一条。
-   * 这两个 handler 必须稳定：它们会进 MatrixFlow 的 effect 依赖，每次渲染换
-   * 新函数会让边反复重建。
+   * 全景图里拖出的线：不填文字，落点走兜底栏（后端把文字回落成目标页标题）。
+   * 两个 handler 必须稳定：它们进 MatrixFlow 的 effect 依赖，换新函数会让边反复重建。
    */
   const quickLink = useCallback(
     (from: string, to: string) =>
@@ -801,8 +779,8 @@ export function MatrixPanel({
   );
 
   /**
-   * 预览里拖完一个按钮：把这条出边的落点改成拖到的自由坐标。
-   * 后端按 (from,to) 整条覆盖，label 与 order 不回传会被静默重置，所以一并带上。
+   * 预览里拖完按钮：把落点改成拖到的自由坐标。后端按 (from,to) 整条覆盖，
+   * label 与 order 不回传会被静默重置，所以一并带上。
    */
   const roomMove = useCallback(
     (from: string, to: string, x: number, y: number) => {

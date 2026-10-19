@@ -68,20 +68,13 @@ const SessionPlanDrawer = lazy(() => import("./components/SessionPlanDrawer").th
 const SettingsPage = lazy(() => import("./components/SettingsPage").then(module => ({ default: module.SettingsPage })));
 
 /**
- * 快捷指令表：一份数据同时喂给三处 —— 输入框的「/」菜单、按下回车时的解析、
- * 以及按身份裁剪（访客看不到自己没有的那几条）。
- *
- * 分两种，这个区分是有用的：
- *   say —— 换成一句自然语言交给他。这类要的是他的判断（统计、整理、反思），绕不开模型。
- *   ui  —— 前端当场做完。切深度模式、新开一场对话本来就是界面动作，
- *          以前也要写一句话让他去调工具：白烧一轮 token，而且他回一句「好的，已切换」
- *          时状态未必真的变了 —— 人看到的是「他说切了」，实际上是没切。
+ * 快捷指令表：同时喂给「/」菜单、回车解析与身份裁剪。
+ * say = 换成自然语言交给他（要他的判断）；ui = 前端当场做完 ——
+ * 以前也写句话让他调工具，白烧一轮 token，状态还未必真变。
  */
 /**
- * 界面窗口的层高：消息列表只挂最近这一层的条数，往上翻到顶再放一层。
- * 整段历史照旧躺在 SDK 的消息库里、照旧进模型上下文 —— 这里只管屏幕：
- * 几百条一次性 mount，弱设备要画好几秒，看着像一段从上往下扫的「动画」，
- * 其实是浏览器在逐段绘制。收成层，负载就封了顶。
+ * 消息列表只挂最近这一层的条数，翻到顶再放一层。历史仍在 SDK 消息库与模型上下文里，
+ * 这里只管屏幕：几百条一次 mount，弱设备要画好几秒。
  */
 const MSG_WIN = 50;
 
@@ -93,9 +86,8 @@ type Cmd = {
   /** 访客也能用。不标就是主人专属：他手上没有那些工具，列出来才是骗人 */
   guest?: boolean;
   /**
-   * 这条指令收不收行内参数，值是提示写的什么（如 /plan 后面那句话）。
-   * 有它，敲「名字 + 空格 + 内容」才认（见 submit）；没有，名字后面跟了字
-   * 就当正经说话，不吞。空指令（/plan 光着敲）永远认。
+   * 这条指令收不收行内参数（值是提示写的什么）。有它，敲「名字 + 空格 + 内容」才认；
+   * 没有，名字后跟字就当正经说话，不吞。空指令永远认。
    */
   argHint?: string;
 } & (
@@ -284,18 +276,9 @@ function UsageChip({ usage }: { usage: LastUsage }) {
 }
 
 /**
- * 进门介绍页：第一次来的访客先弄清楚这儿是谁、能干什么，再进去。
- *
- * 三种登记方式（身份卡体系，见后端 userCards.ts）：
- * - 临时进入：报个称呼就进，来历可写可不写；
- * - 登卡：老朋友凭「昵称 + 密码」回到卡绑定的那间屋 —— 成功后整页重载，
- *   cookie 已换成卡票，重连就是自己那间；
- * - 领卡：想把这段对话变成长期身份，就登记目的和卡密码 —— 当前房间整体升级，
- *   历史一条不搬。
- *
- * 为什么是一层覆盖而不是一个路由：它只该在「第一次」出现，之后永远不再打扰。
- * 记号写在本机 localStorage；后端那边一旦落了 guestName，这层也永远不再弹 ——
- * 两道闸，换台机器来过的老访客也不会被再塞一遍说明书。
+ * 进门介绍页：三种登记（临时进入 / 登卡 / 领卡，见 userCards.ts）。它是一层覆盖而非路由，
+ * 只在第一次出现；本机 localStorage 与后端 guestName 两道闸，老访客换机器也不再弹。
+ * 登卡/领卡成功整页重载（cookie 已换，重连即自己那间）；领卡是当前房间整体升级，历史不搬。
  */
 function GuestIntro({
   onDone,
@@ -672,13 +655,8 @@ export function Shell({
   agentName: string;
   onLock: () => void;
 }) {
-  // 基础屋由后端按登录身份指定：来客必须进自己那间，否则一开门就会看到主人正在聊的内容。
-  // 每场新对话另有自己的一间场屋（屋名 = 人屋--场id）——切场就是换连接：
-  // name 一变，底层 socket 自动重连那间屋，历史按屋灌回。一个屋一辈子只聊一场，
-  // 老场留在老屋里继续活着，这就是多场并行的地基
-  //
-  // 初值不直接用人屋：本机记着落点在某间场屋上时，开机就直连那间 —— 省掉
-  // 「先连人屋、读到记录、再切过去」那次多余的 Durable Object 冷启动（见 localStartRoom）。
+  // 基础屋由后端按身份指定（来客必须进自己那间）；每场新对话有自己的场屋（人屋--场id），
+  // name 一变 socket 自动重连、历史按屋灌回。初值优先本机落点，省一次 DO 冷启动。
   const { activeRoom, setActiveRoom, agent, messages, sendMessage, status, stop, regenerate,
     state, busy: connectionBusy, online, thinkDeep } = useChatConnection(agentName);
   const isAdmin = role === "admin";
@@ -725,15 +703,9 @@ export function Shell({
   const persona = agentDisplay(themeConfig);
   const { sessions, sessionsLoaded, sessionsOk, loadSessions } = useSessionList();
   /**
-   * 开机落点拍板完成 —— 状态恢复的**唯一入口**。
-   *
-   * 以前有两条路各跑各的：后端同步 effect 一拿到 state 就把人屋的 activeSession
-   * 画出来（那只是「人屋此刻的指向」，未必是「我最后看的那一场」——多半还停在
-   * 上一场或宿在人屋的旧场），独立恢复器再等清单到位、照 lastRoom/lastSession
-   * 记录跳一次 —— 看着就是「先加载出错误的一场，又跳到另一场」。
-   *
-   * 合一：清单到位前正文空着、遮罩明说「正在接入」；到位后由恢复器一次定下落点，
-   * 后端同步只在拍板之后接手「之后的变化」（切场、被删这些）。
+   * 开机落点拍板完成 —— 状态恢复的唯一入口。
+   * 以前后端同步与独立恢复器各跑各的，会先画出错误的一场再跳；现在清单到位前正文空着、
+   * 遮罩提示接入，到位后一次定下落点，之后的变化再交回后端同步。
    */
   const [startupDone, setStartupDone] = useState(false);
   /** 这台机器上能用的嗓子。拿不到（比如来客）就是空的，设置页自然不显示这一块 */
@@ -745,9 +717,8 @@ export function Shell({
   const voicesLoadedRef = useRef(false);
   const [activeSession, setActiveSession] = useState("");
   /**
-   * 正在换场。从点下去到新屋把状态推回来，中间那几秒屏幕上摆的还是旧那一场 ——
-   * 不遮一下，人看到的就是「点了没反应」，于是再点一次；两次切换的 state 互相追着改，
-   * 侧栏高亮就来回跳。遮罩 + 先把侧栏跳过去，是把这个空窗明说出来，而不是假装没有。
+   * 正在换场。新屋把状态推回来前，屏幕摆的还是旧场 —— 不遮会让人以为「点了没反应」
+   * 再点一次，两次切换互相追着改。遮罩 + 侧栏先跳，是把空窗明说出来。
    */
   const [switching, setSwitching] = useState<{
     id: string;
@@ -757,16 +728,9 @@ export function Shell({
     room?: string;
   } | null>(null);
   /**
-   * 已经点了「新建」、但还没开出来的那一场。
-   *
-   * 新建不连屋：一间场屋就是一个完整的 DO 实例，点一下就建 ——
-   * 「点了没说话就走」会留下一间侧栏里看不见、界面上也删不掉的屋。
-   * 所以这里先只握着「屋名 + 场 id」（服务端已经算好；建 stub 不会实例化 DO），
-   * 等这一场的第一句话真要说出口了，再换连接把它开出来。
-   *
-   * 侧栏这时候不插行：还没说过一句话的位子不是一场对话，摆上去只会让列表
-   * 里出现一条点不开、也删不掉的假会话。真要开始了（第一句话落位、后端登记）
-   * 它自己会出现在列表里。
+   * 已点「新建」但还没开出来的场。新建不连屋：每间场屋是一个 DO 实例，
+   * 「点了没说话就走」会留下看不见也删不掉的屋。先只握屋名 + 场 id，
+   * 等第一句话真要说出口再换连接；侧栏也不插行，免得出现点不开的假会话。
    */
   const [pendingRoom, setPendingRoom] = useState<{
     id: string;
@@ -805,10 +769,8 @@ export function Shell({
   const preparation = useRef(0);
   const [notice, setNotice] = useState("");
   /**
-   * 这一轮他在想什么：服务端隔几秒翻一句过来（见 src/agent/think.ts）。
-   *
-   * 为什么要它：开口之前那一段静默里，来客那边整段推理是不给看的 ——
-   * 屏幕上只剩一个空气泡，和「ericher 卡了」长得一模一样。
+   * 这一轮他在想什么：服务端隔几秒翻一句过来（think.ts）。来客看不到真推理，
+   * 不送这句就只剩空气泡，和「卡了」分不清。
    */
   const [thoughts, setThoughts] = useState<string[]>([]);
   const thoughtTurn = useRef(0);
@@ -835,15 +797,8 @@ export function Shell({
   const picker = useRef<HTMLInputElement>(null);
   const stick = useRef(true);
   /**
-   * 落底旗：切进一场有记录的对话，就该落在最新那条的末尾 ——
-   * 不是从开头翻起。平时自动滚动只认「人本来就贴着底部」（stick），
-   * 可刚从一场翻着旧账的对话里切出来时 stick 是假的，新场的历史灌进来
-   * 就会停在顶上 —— 等于每换一场都被人摁回第一页。这个旗子压过 stick 一次。
-   *
-   * 开机首次加载同样靠它：不立旗的话，首屏历史灌进来走的是跟随 effect 的
-   * 平滑滚动 —— 短会话（不足两屏，绕过距离保险丝）就成了一段从顶端滑到底
-   * 的「动画」，流式内容撑高时还会被反复打断。初始就为真，
-   * 让第一帧非空渲染抢在浏览器动笔前瞬移落底。
+   * 落底旗：切进有记录的场就落在最新末尾，不从开头翻。平时自动滚动只认 stick，
+   * 但从旧账里切出来时 stick 是假的；开机首屏也靠它跳过「从顶滑到底」的动画。
    */
   const jumpBottom = useRef(true);
   const rec = useRef<{ stop: () => void } | null>(null);
@@ -863,12 +818,8 @@ export function Shell({
   const speakToken = useRef(0);
 
   /**
-   * 停滞检测：busy 期间如果 5 秒没有任何新内容（消息没变、想法没翻新），
-   * 就截一份当前状态报出来。CF 打盹、工具卡死、上游断流都会让会话静默停下 ——
-   * 以前界面只是一直转、永不报错，人分不清是在想还是卡了。
-   *
-   * 正常结束的会话不会触发：busy 变 false 时检测器直接清掉。
-   * 正常思考期间想法每几秒翻一句、消息不断有新 part，都不会到 5 秒门槛。
+   * 停滞检测：busy 期间 5 秒无新内容（消息没变、想法没翻新）就截状态报出来。
+   * CF 打盹、工具卡死、上游断流都会让会话静默停下；正常结束或思考中不会触发。
    */
   const lastActivity = useRef(Date.now());
   const stallReported = useRef(false);
@@ -893,11 +844,10 @@ export function Shell({
     }
   }, [busy]);
 
-  // 消息或想法有更新就刷新活动时间
+  // 消息或想法有更新就刷新活动时间。依赖用数组本身：长回复流式增长时条数不变，
+  // 按长度刷新会把正常的流式回复误判成「停滞」。
   useEffect(() => {
     if (busy) lastActivity.current = Date.now();
-    // 依赖必须是数组本身而不是长度：一条长回复在流式增长时条数不变，
-    // 按长度刷新的话弱网下每句话都会被误判成「停滞了」
   }, [messages, thoughts, busy]);
 
   // 轮询：每秒看一次，busy 超过 5 秒没动静就报
@@ -907,7 +857,6 @@ export function Shell({
       if (!busy || stallReported.current) return;
       const elapsed = Date.now() - lastActivity.current;
       if (elapsed < 5000) return;
-      // 到了：截一份状态
       stallReported.current = true;
       const lastMsg = messages[messages.length - 1];
       // 把正在跑的工具状态捞出来 —— 那些多半就是卡住的地方
@@ -944,29 +893,17 @@ export function Shell({
   }, [activeRoom, activeSession]);
 
   /**
-   * 我此刻是不是贴着最新那一条。
-   *
-   * 和 stick 那个 ref 不同：stick 是给自动滚动看的内部旗，改它不重渲染；
-   * 这个要驱动界面 —— 翻上去看旧账时，右下角浮出「滑到底」，点一下回来。
+   * 我此刻是否贴着最新一条。与 stick 不同：那个是内部旗、不重渲染；
+   * 这个驱动界面 —— 翻旧账时浮出「滑到底」。
    */
   const [atBottom, setAtBottom] = useState(true);
   /** 放层那一刻的 scrollHeight：prepend 之后把视口补回去，眼前那条原地不动 */
   const growAnchor = useRef<number | null>(null);
 
   /**
-   * 摆到屏幕上的那一份消息。
-   *
-   * 换场期间先清空：手上这份还是上一场的（客户端只在收到消息推送时才换，
-   * 换屋和切场都有一段空窗），而遮罩是半透的磨砂 —— 摆出来等于把上一场的话
-   * 透给人看。服务端那边已经在连接时把这一场的历史推过来了（见 cowork 的
-   * onConnect），到位之前这里就是空的，正配上遮罩那句「正在切换」。
-   *
-   * 刚点的新建（pendingRoom）同理：新屋还没开，手上这份还是上一场的，
-   * 新场该是空的。
-   *
-   * 在这之上再收一道窗口：只挂最近 winSize 条，老消息翻到顶再放一层。
-   * SDK 的消息库仍是全量（发话、重来都从那儿走，模型上下文也在服务端），
-   * 这里只是别让几百条一次性 mount 把弱设备画瘫。
+   * 摆到屏幕上的消息。换场/新建/开机未拍板时先清空：手上这份还是上一场的，
+   * 遮罩是半透的，摆出来等于把上一场的话透给人看。之后再按 winSize 收窗口，
+   * SDK 消息库仍是全量。
    */
   const shown =
     switching || pendingRoom || !agent.state || !startupDone ? [] : messages;
@@ -986,28 +923,19 @@ export function Shell({
   }, [shownMessages]);
 
   /**
-   * 界面上「现在这间屋」是哪一间。
-   *
-   * 站在刚点的新建上时，手上那条连接还挂在上一场上 —— 那一场已经不在眼前了，
-   * 名字盘、笔记本、附件这些按屋取的东西都该读人屋：这一场真要开出来时，
-   * 场屋就是从人屋那儿抄一份配置起步的（见 cowork 的 onConnect）。
+   * 界面上「现在这间屋」是哪间。站在刚点的新建上时连接还在上一场，已不在眼前；
+   * 名字盘、笔记本、附件都该读人屋 —— 新场屋会从人屋抄配置起步（见 onConnect）。
    */
   const uiRoom = pendingRoom ? agentName : activeRoom;
 
   /**
-   * 本场计划（目标 + 步骤）存在场屋的表里，state 只给一个 planRev 信号。
-   * 换场、换屋，或他/我改过计划（planRev 变）时都重拉一次。
-   *
-   * 换场空窗里就开拉：目标屋与目标场这时已经知道（switching.room / switching.id），
-   * 等它落地时这份已经在手上 —— 不然要等连接打通之后再排一次队，白多等一个往返，
-   * 那正是切场之后「又卡一下」的来路。计划条在空窗里本来就不渲染（见 SessionPlanBar
-   * 那行的 !switching），所以先取回来不会把上一场的目标贴到新场头上。
+   * 本场计划存在场屋的表里，state 只给 planRev 信号。换场/换屋/改计划都重拉；
+   * 换场空窗里就开拉，等落地时已在手上，免得再等一个往返。计划条空窗里不渲染。
    */
   const planSeq = useRef(0);
   /**
-   * 上一次是为谁拉的。抢跑那一次（换场空窗里）还不知道目标的 planRev，
-   * 记成 null；等落地时把版本号认下来就完事 —— 不然「落屋」这一下会
-   * 因为 activeSession / switching / room 先后变化，再补跑两趟一模一样的。
+   * 上一次为谁拉的。抢跑那次不知道目标 planRev，记 null；落地认下版本号，
+   * 免得 activeSession/switching/room 先后变化时再补跑两趟一样的。
    */
   const planFetched = useRef<{
     room: string;
@@ -1077,9 +1005,8 @@ export function Shell({
   }, []);
 
   /**
-   * 多行数据的长版 flash：10 秒、等宽换行。
-   * 给 /memory /tasks /skills 这种代码化指令用 —— 那些是多行结构化数据，
-   * 2.5 秒不够人看完。仍然和 flash 共用同一个定时器：后一条来了照样替掉前一条。
+   * 多行长版 flash：10 秒，给 /memory /tasks /skills 这类结构化输出用。
+   * 仍与 flash 共用一个定时器，后一条替掉前一条。
    */
   const flashLong = useCallback((text: string) => {
     setNotice(text);
@@ -1192,13 +1119,8 @@ export function Shell({
   }, [startupDone]);
 
   /**
-   * 接住服务端主动开口时广播的那条 notice。
-   *
-   * 以前没人接这条消息 —— 他在那边说了话（提醒到点、有新动静），这边界面纹丝不动，
-   * 只有事后翻记录才发现他说过。那就等于他白开口了一次。
-   *
-   * 顺带刷一次会话列表：他可能刚另开了一场说事，那一场得先出现在侧栏里，
-   * 才有「闪一下 + 角标」可言。
+   * 接服务端主动开口的 notice 并顺手刷新会话列表（他可能刚另开一场说事）。
+   * 以前没人接，他开了口界面纹丝不动，等于白说。
    */
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
@@ -1248,16 +1170,8 @@ export function Shell({
     return () => { alive = false; };
   }, [isAdmin, view, section]);
 
-  // 「当前是哪一场」以后端为准：切会话、新建、被删都是它在改。
-  // 但换场途中要放行本地那次乐观跳转 —— 旧屋的 state 会晚到一步，
-  // 照单全收就会把刚点的那一场拽回去，看上去正是「乱跳会话」。
-  // 站在还没开出来的新场上同理：那一场后端还不知道（屋都没建），
-  // 位置只能本地拿着，这会儿后端说的「当前是上一场」不作数。
-  //
-  // 开机前闸：清单还没到位、恢复器还没拍板时，后端同步过来的 activeSession
-  // 多半是「人屋此刻的指向」，不是「我最后看的那一场」——照单全收就会先画出
-  // 错误的一场，紧接着恢复器又跳一次，正是「双恢复器打架」的元凶。
-  // 合一：开机前一律不接，恢复器一次定下落点后再放行。
+  // 「当前是哪一场」以后端为准，但换场途中要放行本地乐观跳转（旧屋 state 晚到），
+  // 新场未开时后端也不知道。开机前闸：恢复器拍板前一律不接，避免先画错一场再跳。
   useEffect(() => {
     if (!startupDone) return;
     if (!state.activeSession) return;
@@ -1266,16 +1180,8 @@ export function Shell({
     setActiveSession(state.activeSession);
   }, [state.activeSession, switching, pendingRoom, startupDone]);
 
-  // 新屋把状态推回来了：activeSession 落到目标上，就是「到了」，撤遮罩。
-  // 连接也认出来了才算数 —— 否则刚换连接、旧屋的 state 还挂在那儿时会被误判成到位。
-  //
-  // 三道都要过：identified（socket 认过身份了）、agent.name 就是我们要去的屋
-  // （旧屋的 state 可能还没散，光看 activeSession 会被它骗过去），
-  // 以及 activeSession 落到目标场。agent.name 是服务端报回来的实例名，
-  // 它一对上就说明这条 socket 真挂在目标屋上了 —— 比只等 state 到的更快也更准。
-  //
-  // 补发也在这儿：等着的「第一句话」必须等屋真连上再发 —— 提前发就落到上一间屋里去了
-  // （换连接不是同步的，手上的 socket 还是旧的那条）。
+  // 新屋把状态推回来了：identified + agent.name 对上目标屋 + activeSession 落到目标场，
+  // 才撤遮罩（只看 state 会被旧屋迟到推送骗过）。补发也在这：首句必须等屋真连上再发。
   useEffect(() => {
     if (!switching) return;
     if (!online || agent.readyState !== 1 || agent.name !== activeRoom) return;
@@ -1317,11 +1223,8 @@ export function Shell({
     }
   }, [messages.length, winSize]);
 
-  // 换场落底要抢在浏览器动笔之前：useLayoutEffect 跑在绘制前，首帧就是底部。
-  // 以前放在 useEffect 里（画完才跳），首帧从列表顶画起 —— 绘制又重，
-  // 看起来就是一段从上往下扫的「渐进动画」，扫完才落到最新消息。
-  // 注意等的是 shownMessages（换场遮罩开了才算数）：SDK 手上的消息在推送前
-  // 还是上一场的，拿 messages 判空会把「跳底」白白消耗在旧列表上
+  // 换场落底抢在绘制前（useLayoutEffect）：放 useEffect 会先画出列表顶，
+  // 看起来像从上往下扫。等的是 shownMessages —— 换场遮罩开了才算数。
   useLayoutEffect(() => {
     if (!jumpBottom.current) return;
     if (!shownMessages.length) return;
@@ -1332,11 +1235,8 @@ export function Shell({
     if (el) el.scrollTop = el.scrollHeight;
   }, [shownMessages]);
 
-  // 贴着底部时跟着新话往下走：不抢帧，绘制完再滚反而顺。
-  // 但跟随只认「真的长了东西」：来了新的一条，或者流式回复正在长（busy）。
-  // SDK 的 store 在恢复完还会再抖好几下（种子补刀、60ms 节流快照、状态补丁），
-  // 每抖一次都平滑滚一遍的话 —— 图片、图、工具卡正陆续撑开高度，
-  // 屏幕上就是一段接一段往下溜的「滑动动画」，聊天明明已经加载完了。
+  // 贴底时跟着新话走，但只认「真的长了东西」。SDK store 恢复完还会抖几下，
+  // 每抖都平滑滚一遍，图片/工具卡撑高时就成了一段接一段的滑动动画。
   const prevLastId = useRef("");
   useEffect(() => {
     const id = messages.length ? messages[messages.length - 1].id : "";
@@ -1354,11 +1254,8 @@ export function Shell({
   }, [messages, busy]);
 
   /**
-   * 一键滑到底：翻旧账翻远了，点一下回到最新那条。
-   *
-   * 先把 stick 立回来（从这一下起又跟着新话走），再滚过去 ——
-   * 顺序反了的话，滚动途中来一条新话，跟随 effect 会因为 stick 还是假的而不接，
-   * 人就被撂在半路。关掉动效的人不该再等一段滑动动画，直接瞬移到位。
+   * 一键滑到底。先立回 stick 再滚 —— 顺序反了，途中来新话时跟随 effect 会撂下不管。
+   * 关掉动效的人直接瞬移。
    */
   const jumpToBottom = useCallback(() => {
     const el = stream.current;
@@ -1391,11 +1288,8 @@ export function Shell({
   );
 
   /**
-   * 调思考强度。
-   *
-   * 走 /api/think 而不是 patchConfig：这件事访客也该有 —— 问的是同一副脑子，
-   * 没道理主人能要他想深一点、来客就只能收着。而 patchConfig 是设置页那道口子，
-   * 后面还站着人格提示词和任务清单，不能为了一个开关把它们一起放开。
+   * 调思考强度。走 /api/think 而非 patchConfig：来客也该能调，而 patchConfig
+   * 那道门后面站着人格提示词与任务清单。点名 uiRoom —— 新建时写人屋，供新场抄。
    */
   const setThink = useCallback(
     (mode: "normal" | "deep") => {
@@ -1481,10 +1375,8 @@ export function Shell({
     const operation = ++preparation.current;
     const valid = () => operation === preparation.current && composerDraft.store.current(snapshot, draftScopeRef.current);
     const raw = input.trim();
-    // 把指令名敲全了再按回车，和从菜单里挑一条是同一条路 —— 两条出口分开写，
-    // 迟早会长成两种行为（菜单里切了模式、手打却发了一段话给他）。
-    // 名字后面空一格再跟字，是给这条指令的正文（如 /plan 把文档看完）；
-    // 只有声明收参数的（argHint）才认，别的指令后面跟了字就是正经说话，不能吞。
+    // 指令名敲全回车 = 从菜单挑一条，两条出口分开写迟早长成两种行为。
+    // 名字后空一格才是参数；只有声明 argHint 的才认，否则就是正经说话。
     const sp = raw.search(/\s/);
     const name = (sp < 0 ? raw : raw.slice(0, sp)).toLowerCase();
     const arg = sp < 0 ? "" : raw.slice(sp).trim();
@@ -1532,12 +1424,9 @@ export function Shell({
   };
 
   /**
-   * 打断。人对人说话，对方跑偏了就是一句「停一下」——这里也得有。
-   *
-   * 两刀都要下：先断客户端这条流，显示立刻停住；再告诉服务端。
-   * 因为刷新页面后恢复的那种流，客户端手里没有 requestId，只断本地的话
-   * 服务端还在那边说，界面会一直挂着「正在回应…」，谁也逃不出来。
-   * 已经说出口的部分留着 —— 那是它说过的话。
+   * 打断。两刀都要下：先断客户端这条流（显示立刻停），再告诉服务端 ——
+   * 刷新后恢复的流客户端没有 requestId，只断本地的话服务端还在说，
+   * 界面会一直挂着「正在回应…」。已说出口的部分留着。
    */
   const halt = useCallback(() => {
     voiceReply.current = false; // 都被打断了，就别再把半截话念出来
@@ -1551,10 +1440,8 @@ export function Shell({
   }, [activeRoom, flash, stop]);
 
   /**
-   * 重来。他说得不合意，就让他把最后那句收回、重新想一遍。
-   *
-   * 界面上这个按钮只挂在最后一条 —— 重来等于「从那句往后全部作废、重新生成」，
-   * 挂在中间某条上就是顺手删掉后面一整段对话，而那个代价用户看不见。
+   * 重来：最后那句收回重想。按钮只挂最后一条 —— 重来 = 从那句往后全部作废，
+   * 挂中间等于删掉后面一整段，代价用户看不见。
    */
   const retryMsg = useCallback(
     (id: string) => {
@@ -1570,10 +1457,8 @@ export function Shell({
     [agent, busy, flash, online, regenerate],
   );
 
-  // Esc 打断：手不用离开键盘。这是「别说了」最自然的手势。
-  // 但浮层（看图层、命令菜单）也认 Esc —— 它们把这下手势 preventDefault 认走时，
-  // 这里就别再接：人家关的是自己的面板，不该顺手把正在跑的生成轮也砍了
-  //（看图层的监听挂载在先、这里的随后重挂，认领逻辑先于本处执行，次序成立）
+  // Esc 打断。浮层（看图层、命令菜单）认领时已 preventDefault，这里就别再接 ——
+  // 人家关的是自己的面板，不该顺手砍掉生成轮。
   useEffect(() => {
     if (!busy) return;
     const onKey = (e: KeyboardEvent) => {
@@ -1610,10 +1495,8 @@ export function Shell({
     setListening(true);
   }, [flash, input, listening]);
 
-  // 逐条朗读：再点一下是同一条，就当「别念了」
-  //
-  // 先亮起「正在念」再等音频：云端合成要几百毫秒，
-  // 等拿到了才变状态的话，点下去那一瞬像是没点着。
+  // 逐条朗读：再点同一条 = 停。先亮「正在念」再等音频 ——
+  // 云端合成要几百毫秒，等拿到才变状态会像没点着。
   const speakMsg = useCallback(
     (id: string, text: string) => {
       // 每次朗读领一个自增 token。A 正在念时点 B，speak() 开头的 stopSpeaking() 会触发
@@ -1644,14 +1527,8 @@ export function Shell({
     [flash, speakingId, state.voice, voiceCloud],
   );
 
-  // 一轮答完，把会话列表补一次。
-  //
-  // 为什么还要等一下再补：会话标题是他答完之后才起的（得读完自己刚说的话才起得准），
-  // 比回答晚半拍。只刷一次的话，名字往往在刷新之后才落到库里，侧栏要等到下次
-  // 换会话才会更新成新名字。所以先刷一次把时间和条数对上，过一会儿再接一次名字。
-  //
-  // 这个 effect 必须排在下面那个「用说的回」之前：那个 effect 结尾会写 wasBusy.current，
-  // 一写就把「刚答完」这个信号吃掉了，排在它后面就永远等不到。
+  // 一轮答完补一次会话列表。标题晚半拍才起，所以先刷一次对时间/条数，
+  // 2.5 秒后再接一次名字。必须排在下个 effect 之前 —— 它会写 wasBusy，吃掉信号。
   useEffect(() => {
     if (!(wasBusy.current && !busy)) return;
     void loadSessions();
@@ -1678,11 +1555,8 @@ export function Shell({
   }, [busy, messages, state.voice]);
 
   /**
-   * 这一眼记回人屋：这台设备最后看的是哪一场、哪间屋 —— 供别的设备下次开机对齐。
-   *
-   * 按「动作发生的那一刻」打时间戳：多端各记各的最后一眼，人屋只留最晚的那笔，
-   * 慢半拍才到的写、旧设备内存里揣着的时刻都顶不掉新记录。写失败在控制台留个痕 ——
-   * 让「没记上」不再是悄无声息的事，排查时有个去处。
+   * 这一眼记回人屋：本机最后看的场/屋，供别的设备开机对齐。
+   * 按动作发生那刻打戳，后端只留最晚一笔；写失败在控制台留痕，别悄无声息。
    */
   const recordView = useCallback((room: string, session: string) => {
     void api
@@ -1693,9 +1567,8 @@ export function Shell({
   }, []);
 
   /**
-   * 这一轮加载里，人有没有亲手动过场/屋。
-   * 动过 = 他的意思比人屋那份记录新，开机对表就该让路 ——
-   * 不能拿一份旧记录把他从刚打开的那一场拽回去。
+   * 这一轮加载里人有没有亲手动过场/屋。动过就让开机对表让路 ——
+   * 别拿旧记录把他从刚打开的那场拽回去。
    */
   const userActed = useRef(false);
 
@@ -1711,11 +1584,8 @@ export function Shell({
       stopSpeaking();
       setSpeakingId("");
       cancelUploads(); // 取消旧上传，已读好的附件留在原场草稿。
-      // 新对话 = 新开一间场屋。后端当场把场 id 和屋名算好（home），人屋本尊一动不动。
-      //
-      // 但这里**不换连接**：屋此刻还不建（建 stub 不会实例化 DO），等这一场的第一句话
-      // 要说出口了才换（见 pendingRoom 与 send 里那一段）—— 那句话正好落进新屋的第一轮。
-      // 没人说过话的场，就不会留下一间看不见也删不掉的空屋。
+      // 新对话 = 新开一间场屋；后端当场算好场 id 与屋名（home）。这里不换连接 ——
+      // 屋还不建（stub 不实例化 DO），等第一句话要说出口才换，没人说话就不留空屋。
       const meta = await api.createSession();
       if (meta?.home) {
         userActed.current = true;
@@ -1734,15 +1604,9 @@ export function Shell({
   }, [flash, loadSessions, recordView, restoreQueued, endSwitch, cancelUploads]);
 
   /**
-   * 执行一条快捷指令。
-   *
-   * ui 类故意不经过 sendMessage：切模式、新开一场、跳到账本这些事，
-   * 他本来也不需要「知道」——以前写一句话让他去调工具，等于为了按一下开关烧一轮 token，
-   * 而且那一下还不一定按对（他回「已切换」而 thinkMode 没动，人是分辨不出来的）。
-   * 至于汇报类的（统计、整理、反思），要的本来就是他的判断，那必须交给他。
-   *
-   * 不是 useCallback：它只被事件处理器调用，不进任何依赖数组，
-   * 而它要用到后面才定义的 newSession —— 包成 callback 反而会在依赖数组求值时踩到未初始化。
+   * 执行快捷指令。ui 类故意不走 sendMessage：切模式、新开一场本来就不必让他知道 ——
+   * 写句话让他调工具等于烧一轮 token，还不一定按对。汇报类（统计/整理）才交给他。
+   * 不是 useCallback：只被事件调用，且要用后面定义的 newSession。
    */
   const runCommand = (cmd: Cmd, arg = "") => {
     setCmdOff(false);
@@ -1784,11 +1648,8 @@ export function Shell({
   };
 
   /**
-   * /plan：给这一场定目标 —— 当场写、当场生效，不经过模型。
-   *
-   * 光着敲（或从菜单点）就把计划抽屉摁开，让人手写；后面跟了内容，就把那句话
-   * 直接设成本场目标 —— 「/plan 把文档看完」一句话就够，不用先说一句话让他去调工具。
-   * 但得先有「这一场」：刚点的新建还没落库（草稿态），目标无处可挂，先说一句话把场开起来。
+   * /plan：给这一场定目标，当场生效、不经过模型。光敲开抽屉手写，跟内容就直接设目标；
+   * 但得先有这一场（新建还没落库时目标无处可挂）。
    */
   const runPlan = (arg: string) => {
     // 左边那几块抽屉互斥：开计划抽屉就把另外两块收掉（同 note/memo 芯片的做法）
@@ -1818,10 +1679,7 @@ export function Shell({
       .catch((e) => flash((e as Error).message));
   };
 
-  /**
-   * /memory：直接拉记忆库统计，不走模型。
-   * 多行数据用长 flash（10 秒）展示，够人看一眼分布。
-   */
+  /** /memory：直接拉统计，不走模型；多行用长 flash 展示 */
   const runMemory = async () => {
     try {
       const stats = await api.memoryStats();
@@ -1841,10 +1699,7 @@ export function Shell({
     }
   };
 
-  /**
-   * /tasks：直接读 state.tasks，不走模型。
-   * 进行中 + 待办摆出来，已完成的只报个数。
-   */
+  /** /tasks：直接读 state.tasks；进行中 + 待办列出，已完成只报个数 */
   const runTasks = () => {
     const tasks = state.tasks || [];
     if (!tasks.length) {
@@ -1863,10 +1718,7 @@ export function Shell({
     flashLong(`待办 ${active.length} 条${tail}\n${lines}`);
   };
 
-  /**
-   * /skills：直接读 state.skills，不走模型。
-   * 有几个配方、各自叫什么，一眼看完。
-   */
+  /** /skills：直接读 state.skills，列出有几套、各叫什么 */
   const runSkills = () => {
     const skills = state.skills || {};
     const names = Object.keys(skills);
@@ -2003,30 +1855,15 @@ export function Shell({
   );
 
   /**
-   * 开机落点 · 状态恢复的唯一入口。
-   *
-   * 两条路以前各跑各的：后端同步 effect 一拿到 state 就把人屋的 activeSession
-   * 画出来，独立恢复器等清单到位后再照 lastRoom/lastSession 记录跳一次 ——
-   * 刷新后先加载出错误的一场、又跳到另一场，正是这两条打架的表现。
-   * 现在合一：这里拍板之前正文空着（见 shown 的 !startupDone 闸），
-   * 拍板之后才放行后端同步接手「之后的变化」。登记（recordView 打戳写回）不变。
-   *
-   * 闸：state 到了、连接确实挂上了目标屋（agent.name === activeRoom，光看 state
-   * 会被旧屋迟到的推送骗过去）、每次加载只跑一次（viewRestored ref）。
-   *
-   * **只在真要还原时才等清单**（以前是无条件等）：开机直连在场屋上、没记过落点、
-   * 或记的就是眼下这一场 —— 这些情况都没有可还原的分叉，当场拍板，不再被会话清单
-   * 拖住那一次网络往返。真正要跳去别的一场时，才需要清单判它还在不在、宿在哪间。
-   *
-   * 让路：人已经亲手切过场/屋（userActed）就照本地的来 —— 他那一下比记录新。
-   * 清单没拿到（sessionsOk 为假）时不跑判定：空列表会把活着的记录误判成「已删」，
-   * 顺手抹掉别处那一笔。
+   * 开机落点 · 状态恢复的唯一入口。以前后端同步与独立恢复器各跑各的，会先画错一场再跳；
+   * 现在这里拍板前正文空着，拍板后才放行后端同步。闸：state 到、连接确在目标屋
+   * （agent.name === activeRoom）、每次加载只跑一次。只在真要还原时才等清单；
+   * 人已亲手切过（userActed）或清单拿不到（sessionsOk 假）时不判定，免得抹掉更晚的记录。
    */
   const viewRestored = useRef(false);
   /**
-   * 开机直接落在本地记的目标场屋上（没走人屋）时，记下这间屋。
-   * 清单回来后拿它核对一次：这一场是不是已经不在册了（多半别的设备删了）——
-   * 是的话退回人屋（见下面的兜底 effect）。
+   * 开机直连目标场屋时记下这间；清单回来后核对它是否已不在册
+   * （多半别的设备删了），是就退回人屋（见下面的兜底 effect）。
    */
   const bootFieldRoom = useRef("");
   useEffect(() => {
@@ -2216,28 +2053,18 @@ export function Shell({
   }, [onLock]);
 
   /**
-   * 他还没等到回答的问题，只挑当前这一场的。
-   *
-   * 为什么要按会话过滤：卡片是「他正等着」的意思。换了一场话题还看见上一场的追问，
-   * 会让人以为那件事还压在自己身上 —— 其实他早跟着新话题往下走了。
-   *
-   * 用侧栏选中的那一场（activeSession）而不是连接上那一场（state.activeSession）：
-   * 刚点「新建对话」那会儿手上还是上一场的连接，后端报的 activeSession 也仍是上一场，
-   * 若照它过滤，空白的新建页上就会冒出上一场的追问，而且发第一句话时还会被当成
-   * 「答过了」顺手收掉（见 submit 里的 nearest）。侧栏选中的新场此刻还没有卡，正好为空。
+   * 他还没答的问题，只挑当前这场。按侧栏选中场过滤（不是连接上的 state.activeSession）——
+   * 刚点新建时后端仍报上一场，照它滤会让空白新场冒出上一场的追问，
+   * 发首句时还会被当成「答过了」收掉（见 submit 的 nearest）。
    */
   const pendingAsks = (state.asks || []).filter(
     (a) => a.sessionId === activeSession,
   );
 
   /**
-   * 正在送答案的那几张卡（按 id 记）：ref 管同步防重、state 管界面禁用。
-   *
-   * 为什么非要有这道闩：CF 打盹或网络慢时，点了按钮半天没动静，人自然连点几下 ——
-   * 而每多一点就到服务端一次：第一次喂进挂起的工具，之后几次只能拿到 409、
-   * 被退回当普通消息发出去。于是凭空多出几条新消息，还会把刚起的生成掐断重来，
-   * 会话就这么卡住。请求飞的这段时间按钮全禁掉，并明说「正在送」——
-   * 让「点了没反应」变成「在动」。
+   * 正在送答案的卡（ref 同步防重、state 管禁用）。CF 打盹/弱网时人会连点：
+   * 第一次喂进挂起的工具，之后几次拿 409、被当普通消息发出去，还会掐断生成 ——
+   * 所以请求期间全禁并明说「正在送」。
    */
   const sendingAsk = useRef<Set<string>>(new Set());
   const [sendingAsks, setSendingAsks] = useState<string[]>([]);
@@ -2264,11 +2091,8 @@ export function Shell({
   );
 
   /**
-   * 答一张提问卡：REST 直达挂起的场屋，答案作为那次 ask 工具调用的结果回喂 ——
-   * 模型带着答案在同一轮工作流里接着跑，不把回答当成一条新消息打断节奏。
-   * 服务端已顺带收卡（state 经 WS 广播刷新），不再重复打一次收卡请求。
-   * 请求失败或挂起过期时只保留答案草稿，不自动打断或另发消息。
-   * 同一张卡在请求落地前只认第一次点击（见 sendingAsk）——连点会送出复数回答。
+   * 答提问卡：答案作为挂起的 ask 工具结果回喂，模型在同一轮接着跑，不当新消息。
+   * 服务端已顺带收卡；失败/过期只保留答案草稿，不自动另发。连点只认第一次。
    */
   const answerAsk = async (a: AskEntry, text: string) => {
     if (sendingAsk.current.has(a.id)) return;

@@ -1,21 +1,7 @@
 /**
- * 入站报文 → ParsedMail：整封原始 RFC822 进来，纯数据出去，不做任何 IO。
- *
- * 三件事决定了下面每个函数为什么长成这样：
- *   1. 零依赖、不读时钟。只用 Web API（TextDecoder / atob / Uint8Array），不引 npm 包；
- *      `now` 由调用方（入库那一刻）传进来，同一份报文喂两次必须出完全相同的结果 ——
- *      否则这层没法离线测，也没法事后复查某封信。
- *   2. 永不抛错。来件是外人发的，什么形状都有：坏 base64、缺 boundary、只有半行的头、
- *      截断的 multipart。这层的职责是"尽力读出能读的部分"，收不收是 store.ts 的判断 ——
- *      解析器一拒绝，界面就只剩一片空白，谁也不知道那封信原本长什么样。
- *   3. 每个字段都有上限（值 500 / 地址 254 / 名字 120 / 附件名 200 / 正文 20000），
- *      超限截断而不是报错。正文那个数与 src/mail/send.ts 的 TEXT_MAX 同尺，两边必须是
- *      一个数，否则「寄得出、收不回」，界面上"这封是全文"也成了假话。
- *
- * 字节口径：先把整封报文**逐字节**摊成 latin1 字符串来切结构与行（每个字符就是一个字节，
- * 下标即字节序），这样 `bytes`（整封报文）与附件的 `bytes`（该段解码后）都是真实字节数，
- * 不会因为 TextDecoder 的替换字符而失真；字符集只在"把某一段变成可读文本"时才解一次，
- * 认不出来退回 UTF-8，非法字节由 TextDecoder 替换掉。
+ * 入站报文 → ParsedMail：整封 RFC822 进来，纯数据出去，不做 IO，永不抛错。
+ * 零依赖、不读时钟（now 调用方给，两次同结果）；字段有上限（值500/地址254/名120/附件名200/正文20000），截断不报错。
+ * 正文上限与 send.ts 的 TEXT_MAX 同尺（否则「寄得出、收不回」）；字节口径：逐字节摊 latin1 切结构。
  */
 
 import type { ParsedMail } from "./mailboxTypes";
@@ -63,9 +49,8 @@ interface FieldParams {
 // ── 字节与文本 ────────────────────────────────────────────────
 
 /**
- * 入参归一成字节。string 也要按 UTF-8 算字节（口径 4），Cloudflare 的 email()
- * 给的是 Uint8Array，string 那条路是本地联调与测试用的。
- * 这里手写 UTF-8 而不是 TextEncoder：白名单只有 TextDecoder / atob / Uint8Array。
+ * 入参归一成字节。string 按 UTF-8 算；Cloudflare email() 给 Uint8Array，string 路是联调/测试用。
+ * 手写 UTF-8 是因为白名单只允许 TextDecoder/atob/Uint8Array。
  */
 function toBytes(raw: Uint8Array | string): Uint8Array {
   const v = raw as unknown;
@@ -140,10 +125,7 @@ function bytesOfLines(lines: string[]): Uint8Array {
 
 const DECODERS = new Map<string, TextDecoder>();
 
-/**
- * 字符集不认识或非法时退回 UTF-8（口径 6）。TextDecoder 的构造在标签非法时会抛，
- * 非法字节则按非 fatal 模式替换掉 —— 两种"坏"都不许把整封信带走。
- */
+/** 字符集不认识/非法就退回 UTF-8；两种坏都不许把整封信带走。 */
 function decoderFor(charset: string): TextDecoder {
   const key = (charset || "").toLowerCase();
   const cached = DECODERS.get(key);
@@ -183,9 +165,8 @@ function cut(value: string, max: number): string {
 // ── 转移编码 ──────────────────────────────────────────────────
 
 /**
- * base64：先丢掉一切非字母表字符（折行的 \r\n、空格、混进来的垃圾），再把补位号
- * 摘掉重算 —— 长度不整（被截断的信）时裁到能解的那一段，而不是抛。
- * atob 只可能因为长度不成形而抛（非法字符已经丢干净了），抛了就退回最大的完整组。
+ * base64：丢掉非字母表字符，补位号重算；长度不整（截断信）裁到能解的一段。
+ * atob 抛了就退回最大的完整组，不抛。
  */
 function b64ToBytes(text: string): Uint8Array {
   const chars = text.replace(/[^A-Za-z0-9+/]/g, "");
@@ -272,10 +253,8 @@ function decodeWords(value: string): string {
 const FATAL_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
 
 /**
- * 头部里非 ASCII 的那一段：结构是从**逐字节**视图上切的，所以裸 8 位字节在这里
- * 是一串 latin1 形状的字符（"报告" 会变成 "æ¥å"）。编码词自带 charset 不用管，
- * 剩下那些裸字节按 UTF-8 严格解一次，解不动才按 latin1 认 —— 顺序反了的话，
- * 一个 Latin-1 的 é 会被当成半个 UTF-8 序列变成乱码。
+ * 头部非 ASCII 段：结构从逐字节视图切，裸 8 位字节是 latin1 形状。带 charset 的编码词不用管；
+ * 剩下裸字节先按 UTF-8 严格解，解不动才按 latin1——顺序反了 Latin-1 的 é 会变乱码。
  */
 function headerToText(value: string): string {
   if (!/[^\x00-\x7f]/.test(value)) return value;
@@ -403,8 +382,7 @@ function isoOf(ms: number): string {
 // ── MIME 参数与结构 ───────────────────────────────────────────
 
 /**
- * 分号分隔的参数，引号里的分号不算分隔（`boundary="a;b"`、`filename="x; y"` 真见过）。
- * 键一律小写：头部字段名与参数名都大小写不敏感（口径 5）。
+ * 分号分隔参数，引号里的分号不算分隔；键一律小写（头部/参数名大小写不敏感）。
  */
 function parseParams(value: string): FieldParams {
   const parts: string[] = [];
@@ -624,9 +602,8 @@ function decodeEntities(text: string): string {
 }
 
 /**
- * 只有 HTML 的信：先把 script/style 的**内容**整段删掉（不闭合的一路删到结尾），
- * 再去标签，最后还原实体。去标签要求尖括号后先是字母或 `/`，否则正文里的
- * 「x < 5 and y > 3」会被当成一个标签吃掉。
+ * 只有 HTML 的信：先整段删 script/style（不闭合删到结尾），再删标签，最后还原实体。
+ * 去标签要求尖括号后是字母或 /，否则「x < 5 and y > 3」会被当标签吃掉。
  */
 function htmlToText(html: string): string {
   let s = html.replace(/<!--[\s\S]*?(?:-->|$)/g, "");
@@ -659,8 +636,7 @@ function emptyParsed(nowMs: number, bytes: number): ParsedMail {
 }
 
 /**
- * 解一封入站报文。永不抛错，字段缺省一律空串/空数组，`bytes` 照实报。
- * 调用方（email() 入口 → store.ts）决定这一封收不收；这里只负责"能读出多少算多少"。
+ * 解一封入站报文：永不抛错，字段缺省空串/空数组，bytes 照实报。收不收由调用方决定。
  */
 export function parseIncoming(raw: Uint8Array | string, now?: number): ParsedMail {
   const nowMs = Number.isFinite(now) ? (now as number) : 0;

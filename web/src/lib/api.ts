@@ -1,9 +1,7 @@
 import { request as req, requestResponse, json, assertApiSuccess as bizOk, ApiError } from "./http";
 // Worker `/api/*` 的薄封装。
-//
-// 为什么不用 agents 的客户端 RPC（`agent.call()`）：那要求服务端方法带 `@callable()`
-// 装饰器，而 tsconfig 的 `experimentalDecorators` 与 stage-3 装饰器冲突。所以
-// 写操作走 REST（Worker 再通过 DO binding RPC 打到 agent），读实时状态走 useAgent().state。
+// 不用 agents 的客户端 RPC：它要求服务端方法带 @callable()，而 tsconfig 的
+// experimentalDecorators 与 stage-3 冲突。写操作走 REST，读实时状态走 useAgent().state。
 
 import type {
   Attachment,
@@ -81,14 +79,14 @@ export const api = {
   getConfig: () => req<ChatState>("/api/config"),
 
   /**
-   * 两份可编辑提示词的出厂默认值（守则 / 回想守则），供「恢复默认」用。
-   * 工具那份不在这里 —— 它拆成了逐工具的稿子，出厂稿随名册走，见 getToolGroups。
+   * 两份可编辑提示词的出厂默认（守则 / 回想守则），供「恢复默认」用。
+   * 工具那份不在这里 —— 它逐工具拆分，出厂稿随名册走（见 getToolGroups）。
    */
   getDefaultPrompt: () => req<{ base: string; recap: string }>("/api/prompt"),
 
   /**
    * 工具名册：组 → 工具，两侧（主人/来客）的出厂稿与当前自定义。
-   * 「工具守则」面板与「来客权限」页共用这一份（仅管理员）。
+   * 「工具守则」与「来客权限」页共用（仅管理员）。
    */
   getToolGroups: () => req<ToolCatalog>("/api/tool-groups"),
 
@@ -96,18 +94,15 @@ export const api = {
     req<ChatState>("/api/config", json("POST", { patch })),
 
   /**
-   * 调思考强度。单开一条而不是复用 patchConfig：来客也该能调强度，
-   * 但 patchConfig 那道门后面还站着人格提示词和任务清单。
-   * room：调哪间屋的开关。多场并行后每场各有各的强度 —— 空着 = 本人那间人屋，
-   * 连在场屋上时必须点名，不然调的是人屋、眼前这场纹丝不动。
+   * 调思考强度（每场一份）。单开一条是因为来客也该能调，而 patchConfig 那道门后面
+   * 还站着人格提示词与任务清单。room：不点名调的是人屋，连在场屋时必须点名。
    */
   setThinkMode: (mode: "normal" | "deep", room?: string) =>
     req<ChatState>("/api/think", json("POST", { mode, room })),
 
   /**
-   * 回答一张提问卡：他的回答会 resolve 那次挂起的 ask 工具调用，
-   * 模型带着答案在同一轮工作流里接着跑。room 定参送进挂起的场屋
-   * （他可能切到别的场才想起来答）；answer 空串 = 先不答。
+   * 回答提问卡：resolve 挂起的 ask 工具，模型带着答案在同一轮里接着跑。
+   * room 送进挂起的场屋（他可能已切走）；answer 空串 = 先不答。
    */
   answerAsk: (id: string, answer: string, room?: string) =>
     req<ChatState>("/api/ask/answer", json("POST", { id, answer, room })),
@@ -191,8 +186,8 @@ export const api = {
     ),
 
   /**
-   * 公开账本：来客能看的那一档 —— 管理员公开的人物条目 + 他这场自己登记的。
-   * 只有读，没有改：写走 memoryAdd（后端按身份把它落到他自己那间）。
+   * 公开账本：管理员公开的人物条目 + 他这场自己登记的（仅读）。
+   * 写走 memoryAdd，后端按身份落到他自己那间。
    */
   publicLedger: () => req<MemEntry[]>("/api/memory/public"),
 
@@ -235,10 +230,9 @@ export const api = {
     `/api/files/${key.split("/").map(encodeURIComponent).join("/")}`,
 
   /**
-   * 读一份刚上传的附件：服务端按类型读它（看图 / 抽 PDF 文字 / 转写录音），
-   * 回一段能直接进对话的正文。读不出来也会带着一句人话回来，不抛错。
-   * native：这张图前端会以原图（file part）直接放进消息 —— 服务端就不必再请
-   * 视觉模型转述一遍了；只有前端没敢内联的图（太大 / 格式冷门）才走转述。
+   * 读刚上传的附件（看图 / 抽 PDF / 转写录音），回一段可直接进对话的正文；
+   * 读不出来也带一句人话回来，不抛错。native：图由前端以原图放进消息，
+   * 服务端不必再请视觉模型转述（只有太大 / 格式冷门的图才走转述）。
    */
   attach: (key: string, name: string, native?: boolean, signal?: AbortSignal) =>
     req<Attachment>("/api/attach", { ...json("POST", { key, name, native }), signal }),
@@ -246,8 +240,8 @@ export const api = {
   // ── 会话（元信息与消息都在后端 DO 里）──
   sessions: () => req<SessionMeta[]>("/api/sessions"),
   /**
-   * 开新会话。不点名时后端只立「预备栏」不落库，返回 null ——
-   * 真正的会话行要等第一句话发出后才建，免得侧栏攒下一排空会话
+   * 开新会话。不点名时后端只立「预备栏」不落库并回 null ——
+   * 真正的会话行等第一句话发出后才建，免得侧栏攒一排空会话。
    */
   createSession: (title?: string, visibility?: "private" | "public") =>
     req<SessionMeta | null>(
@@ -258,11 +252,8 @@ export const api = {
   switchSession: (id: string) =>
     req<SessionMeta | null>("/api/sessions/switch", json("POST", { id })),
   /**
-   * 记「最后看的是哪间屋、哪一场」—— 多端对齐用。
-   * 写口恒落人屋（后端那间），所以连着场屋时也能发；下次开机别的设备读它回到同一场。
-   *
-   * at 是这次动作发生的那一刻（毫秒时间戳），默认取调用此刻。后端只收更晚的那笔，
-   * 所以调用方要在「人真按下/真切了」的那一瞬打戳，别拖到之后才补。
+   * 记「最后看的是哪间屋、哪一场」（多端对齐）。写口恒落人屋，连场屋时也能发。
+   * at 默认此刻；后端只收更晚的那笔，所以要在人真操作的那一瞬打戳。
    */
   setActiveRoom: (room: string, session: string, at = Date.now()) =>
     req<ChatState>("/api/active-room", json("POST", { room, session, at })),
@@ -296,8 +287,8 @@ export const api = {
 
   // ── 会话记忆：他休息时回头整理出来的那些（仅管理员）──
   /**
-   * 三种检索都走这一条：关键词（q）、时间（from/to）、语气（sentiment），
-   * 再按场（sessionId）收窄。全都留空就是「全部，最近的在前面」。
+   * 三种检索都走这条：关键词 q、时间 from/to、语气 sentiment，可按场收窄。
+   * 全空 = 全部，最近的在前面。
    */
   sessionMemories: (
     q: {
@@ -326,11 +317,9 @@ export const api = {
     ),
 
   // ── 笔记本：管理员和 ericher 共用的本子（仅管理员）──
-  // room：本子跟着场走（每场自带资产）——连在哪间场屋上，读写的就是哪一间的本子；
-  // 空着 = 本人那间人屋的本子
+  // room：本子跟着场走 —— 连在哪间场屋，读写的就是哪间的本子；空着 = 人屋
   notes: (q?: string, tag?: string, room?: string) => {
-    // 拼参交给 URLSearchParams：手拼时 q 为空、tag+room 同时有值会拼成
-    // `?tag=xroom=y`（少了 &），统一拼参后分隔符不再靠手写
+    // 用 URLSearchParams 拼参：手拼时 q 空、tag+room 同时有值会漏掉 &
     const p = new URLSearchParams();
     if (q) p.set("q", q);
     if (tag) p.set("tag", tag);
@@ -356,8 +345,8 @@ export const api = {
   deleteNote: (id: string, room?: string) =>
     req<boolean>("/api/notes/delete", json("POST", { id, room })),
   /**
-   * 告诉他「我翻开了哪一篇」（空串 = 合上了）。
-   * 这一下不只是界面状态：他下一轮就知道你指着屏幕说的「这篇」是哪篇。
+   * 告诉他「我翻开了哪一篇」（空串 = 合上）。不只是界面状态：
+   * 他下一轮就知道你说的「这篇」是哪篇。
    */
   focusNote: (id: string, room?: string) =>
     req<ChatState>("/api/notes/focus", json("POST", { id, room })),
@@ -370,11 +359,8 @@ export const api = {
     req<Note | null>("/api/notes/restore", json("POST", { id, seq, room })),
 
   // ── 本场计划：这一场的目标与步骤（仅管理员）──
-  // 它和下面的提醒不是一回事：提醒是「会话外、到点响」（reminders 表），
-  // 这里是「会话内、不排期」（sessions.goal + session_tasks 表）——
-  // 只管把这一场要干什么钉在眼前，不会替谁排队。
-  // room + session 两个都要：room 说它在哪间屋，session 说它是哪一场
-  // （一间屋能装好几场，老场都住在人屋）。
+  // 与提醒不同：提醒是会话外、到点响；这里只管把这一场要干什么钉在眼前，不排期。
+  // room + session 都要：一间屋能装好几场，老场都住在人屋。
   sessionPlan: (room: string, session: string) =>
     req<{ goal: string; tasks: SessionTask[] }>(
       `/api/session-plan?room=${encodeURIComponent(room)}&session=${encodeURIComponent(session)}`,
@@ -408,8 +394,8 @@ export const api = {
       `/api/visitors/events?room=${encodeURIComponent(room)}`,
     ),
   /**
-   * 进门介绍页的落点：报称呼 / 来历，两个字段都可空、整个表单可跳过。
-   * 报了称呼后端会记进他自己那间屋子的 state，往后的留痕跟着称呼走。
+   * 进门介绍页的落点：称呼 / 来历都可空、整个表单可跳过。
+   * 报了称呼后端会记进他那间屋，往后的留痕跟着称呼走。
    */
   guestIntro: (input: { nickname?: string; origin?: string }) =>
     req<{ guestName: string }>("/api/guest-intro", json("POST", input)),
@@ -509,9 +495,8 @@ export const api = {
       "读取页面失败",
     ),
   /**
-   * 新建 / 保存一页。用 FormData 一把带齐元信息与正文：
-   * meta（JSON 串）必有；正文按来源三选一 —— file（上传）/ text（粘贴）/ key（云盘）。
-   * 外站链接不出正文；编辑旧页不带正文时沿用原正文。
+   * 新建 / 保存一页。FormData：meta（JSON）必有；正文三选一 ——
+   * file / text / key（云盘）。外链不出正文；编辑不带正文时沿用原正文。
    */
   matrixSave: async (form: FormData) =>
     bizOk<{ page: MatrixPage }>(
@@ -553,8 +538,8 @@ export const api = {
       "读取网页矩阵通路失败",
     ),
   /**
-   * 建 / 改一条通路。后端按 (from,to) 这对 upsert：同一对只留一条，
-   * 改文字 / 落点就是拿同一对再发一次。
+   * 新建 / 改一条通路。后端按 (from,to) upsert：同一对只留一条，
+   * 改文字或落点就是拿同一对再发一次。
    */
   matrixLink: async (input: {
     from: string;
@@ -574,10 +559,9 @@ export const api = {
       "断开通路失败",
     ),
   /**
-   * 导出整套矩阵为一个 zip。这里不走 req —— 那条路只认 JSON，
-   * 而这里是二进制流。失败时后端回的是 JSON（{ok:false,error}），照旧把话说出来。
-   * missing 是「有页、正文却没进包」的页面路径（后端用回执头带出来）——
-   * 这种包装不回来，导出的人得当场知道。
+   * 导出整套矩阵为 zip。不走 req（那条路只认 JSON，这里是二进制流）。
+   * 失败时后端回 JSON（{ok:false,error}）。missing 是「有页、正文却没进包」的路径，
+   * 这种包装不回来，导出时得当场知道。
    */
   matrixPackExport: async (): Promise<{ blob: Blob; missing: string[] }> => {
     const r = await requestResponse("/api/matrix/pack");
@@ -593,8 +577,8 @@ export const api = {
     return { blob: await r.blob(), missing };
   },
   /**
-   * 装备一个矩阵包：**整体替换**线上那套 —— 旧正文全清、旧配置整个换掉。
-   * 后端动手前会先把当前这套留一份底，装错了能回滚。
+   * 装备矩阵包：**整体替换**线上那套（旧正文与旧配置全换）。
+   * 后端动手前会留一份底，装错了能回滚。
    */
   matrixPackEquip: async (file: File) =>
     bizOk<MatrixPackResult>(
@@ -614,8 +598,8 @@ export const api = {
 
   // ── 模型目录（供应商 + 模型条目两级；仅管理员）──
   /**
-   * keySecrets 是这台机器已配置的 secret 名（wrangler secret put 过的那些），
-   * 供表单下拉挑选 —— 配没配过一眼就知道。数组做兜底：形状没对上就当空。
+   * keySecrets 是这台机器已配的 secret 名（wrangler secret put 过的），
+   * 供表单下拉挑选 —— 配没配过一眼就知道。形状没对上就当空。
    */
   modelCatalog: async (): Promise<{
     providers: ModelProvider[];
@@ -793,15 +777,15 @@ export const api = {
   /** 读这一份配置：keyAvailable 与 lastSend 是后端算出来的只读事实 */
   mailConfig: () => req<MailConfigView>("/api/mail/config"),
   /**
-   * 保存。提交的就是那九格可写字段，请求体里没有口令 ——
-   * 口令住在 keySecret 所指的 Worker secret 里，浏览器从来没见过它。
+   * 保存那九格可写字段。请求体里没有口令 —— 口令住在 keySecret 所指的
+   * Worker secret 里，浏览器从来没见过它。
    */
   mailConfigSave: (patch: MailConfigPatch) =>
     req<MailConfigView>("/api/mail/config", json("POST", patch)),
   /**
-   * 发一封测试邮件：to 不给就寄到配置里那个默认收件地址。
-   * 后端失败回的是 200 里的 {ok:false,error}，req() 已经把它抛成 ApiError，
-   * 所以这条 promise 落定就是真发出去了；调用方接住错的原话显示，别当成功。
+   * 发一封测试邮件；to 不给就寄到配置里的默认地址。
+   * 失败是 200 里的 {ok:false,error}，req() 会抛成 ApiError —— 落定即真发出去了，
+   * 调用方接住原话显示，别当成功。
    */
   mailTest: (to?: string) =>
     req<{ ok: true }>("/api/mail/test", json("POST", { to })),
@@ -902,11 +886,8 @@ export const api = {
       "/api/voices",
     ),
   /**
-   * 取一段话的音频。
-   *
-   * 不走 req：req 按 JSON 解析，而这里回的是音频字节。
-   * 拿不到音频时把服务端说的原因一起带回来（没配 key / 余额不足 / 限流）——
-   * 只说「念不了」的话，人只会一直听着那个难听的嗓子，却不知道该去修什么。
+   * 取一段话的音频。不走 req（它按 JSON 解析，这里回音频字节）。
+   * 拿不到时把服务端的原因带回来（没配 key / 余额不足 / 限流），否则人不知道该修什么。
    */
   tts: async (
     text: string,
@@ -923,14 +904,13 @@ export const api = {
   // ── 动作 ──
   organize: () => req<string>("/api/organize", { method: "POST" }),
   /**
-   * 打断：把这一轮正在生成的回答停下来（服务端那一轮，客户端自己也会断）。
-   * room：正在说话的那间屋 —— REST 没有连接语义，多场并行后连接可能挂在场屋上，
-   * 不点名就会去人屋里找一场没人说话的对话干着急。
+   * 打断这一轮生成（服务端那一轮；客户端也会断）。
+   * room：正在说话的那间屋 —— REST 没有连接语义，不点名会去人屋找。
    */
   stop: (room?: string) => req<boolean>("/api/stop", json("POST", { room })),
   /**
-   * 清空「当前这场」的消息与压缩摘要。room 点名要清哪间屋 —— 矩阵工作台那间
-   * 场屋不在人屋里，连接也不挂在人屋上，不点名清的会是人的那场。不带 = 人屋。
+   * 清空「当前这场」的消息与摘要。room 点名哪间屋 —— 场屋不挂在人屋上，
+   * 不点名清的会是人的那场。不带 = 人屋。
    */
   clear: (room?: string) =>
     req<{ ok: boolean }>("/api/clear", json("POST", { room })),

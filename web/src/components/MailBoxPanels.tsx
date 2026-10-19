@@ -1,18 +1,7 @@
-// 发件流水与收件箱：两块只读列表 + 详情弹页（接待台 → 设置 → 寄信 → 邮件）。
-//
-// 为什么单独一个文件：MailPanel.tsx 只管「那一份配置」，而这里两块面各读各的接口
-// （/api/mail/outbox、/api/mail/inbox），混在一起会让一个开关的保存动作顺手把
-// 两面的状态搅浑。FormDialog.tsx 是共享样板，只读不改。
-//
-// 口径全部外提在 ../lib/mailBoxView.ts（那边是不碰 React 的纯函数，node 环境测得住）：
-// 这里只接线 —— 读视图、格式化时刻、按行渲染、按下弹页里的按钮才提交。
-//
-// 为什么不挂到 ../lib/api.ts：那一档是多个面板共用的文件，这一轮不许我改。
-// 传输直接用 ../lib/http 的 request()/json() —— 它已经把「HTTP 200 但 ok:false」
-// 也抛成 ApiError，所以 promise 落定就是真成功；落 catch 的原话一律显示，不关窗、
-// 不做乐观更新（本项目硬规矩）。
-//
-// 正文一律走 <pre> 的文本子节点：外面寄进来的东西一个字都不许当 HTML 注入。
+// 发件流水与收件箱：两块只读列表 + 详情弹页（设置 → 邮件）。
+// 读法与措辞全在 ../lib/mailBoxView.ts 的纯函数里（node 可测），这里只接线。
+// 传输走 ../lib/http：HTTP 200 里的 ok:false 也抛成 ApiError，落定即真成功；
+// 失败原话照显、不关窗、不做乐观更新。正文一律走 <pre> 文本节点，绝不注入 HTML。
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { json, request } from "../lib/http";
@@ -61,9 +50,8 @@ import { fmtWhen } from "./PanelsShared";
 import "./MailBoxPanels.css";
 
 /**
- * 收件面自己攥着的那份状态。和契约（MailInboxView）差一格：
- * `unread` 允许 null = 后端这次没回这个数（老后端 / 字段坏了），
- * 交给 unreadReadOf 落回「按清单数」并说明那是兜底。
+ * 收件面自己攥着的状态。与 MailInboxView 差一格：unread 允许 null（后端没回），
+ * 由 unreadReadOf 落回「按清单数」并说明那是兜底。
  */
 interface InboxFace {
   rows: MailInRow[];
@@ -72,8 +60,8 @@ interface InboxFace {
 }
 
 /**
- * 读失败那一块：出口走 LoadingBoundary 的 resourceErrorActions ——
- * 我们有 load() 可以就地重试，就不该让人刷新整个页面（弱网下那等于重下一遍）。
+ * 读失败那一块：走 LoadingBoundary 的 resourceErrorActions ——
+ * 有 load() 就地重试，别让人刷新整页（弱网下等于重下一遍）。
  */
 function LoadError({ error, onRetry }: { error: string; onRetry: () => void }) {
   const actions = resourceErrorActions(onRetry);
@@ -129,8 +117,7 @@ function MailBoxHead({
 // ── 发件箱 ─────────────────────────────────────────
 
 /**
- * 发件流水：每一封寄出去过的（成的、败的都在）一行一个，点开是只读详情。
- * 面上没有任何输入条 —— 这一面本来也没什么可写的。
+ * 发件流水：每一封寄出去过的（成、败都在）一行一个，点开是只读详情。
  */
 export function MailOutboxPanel() {
   const [rows, setRows] = useState<MailOutRow[]>([]);
@@ -243,11 +230,8 @@ export function MailOutboxPanel() {
 
 /**
  * 收件箱：头部在清单里，正文与原件在云盘，点开才取。
- *
- * 面上必须把两件事分开说：「收信通道还没接」（开关关着）与「通道通了但没信」
- * ——混成一句「收件箱是空的」，人就会去折腾明明配对了的地址。
- * 常显的那颗小控件只翻已读/未读，这是这一面唯一可写的动作 —— 写信与回信都在
- * 一级入口那页（MailboxPage.tsx，照笔记本的分布），这里不另开一套手势。
+ * 必须分开说「通道还没接」与「通道通了没信」—— 混成「收件箱是空的」，
+ * 人会去折腾明明配对的地址。常显控件只翻已读/未读；写信回信在一级入口页。
  */
 export function MailInboxPanel() {
   const [view, setView] = useState<InboxFace | null>(null);
@@ -293,10 +277,8 @@ export function MailInboxPanel() {
   const faceNote = inboxFaceNote(enabled, rows);
 
   /**
-   * 点开一行才去取正文；读一封可能把未读账改了，所以回头重读清单。
-   *
-   * 弱网下这一下可能很慢，所以弹页不设 busy：人随时关得掉。关掉之后晚到的回包要丢掉 ——
-   * 拿 reqRef 记住「这个窗现在是为哪一封开的」，那一笔就不许再改界面。
+   * 点开一行才取正文；读一封改了未读账，所以回头重读清单。
+   * 弱网下弹页不设 busy（随时关得掉）；reqRef 记住这窗为哪封开，晚到回包一律丢弃。
    */
   const openMail = async (row: MailInRow) => {
     setOpenId(row.id);

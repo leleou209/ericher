@@ -1,14 +1,6 @@
-// 笔记本：管理员和我一起写的本子。
-//
-// 它和记忆的分工，是这个功能立得住的前提：
-//   memory —— 我记住的东西（我的认知，措辞是我定的，他读到的是我的转述）
-//   note   —— 他要留下的东西（他的原话，一篇一篇，Markdown 保结构）
-// 少的那一格正是 note：以前他想让一件事「留着」，只能塞进记忆里，而记忆是我消化过的东西 ——
-// 他要的是原稿，不是我的笔记。
-//
-// 为什么是「多篇 + 标签」而不是一整篇长文：他打开哪一篇，我这一轮就该知道 ——
-// 单篇长文里「我在看哪一段」是说不清的，而「我在看这一篇」是能成立的。
-// 见 noteFocusBlock：他翻着的那一篇会被顶到提示词里，省掉他那句「我说的是哪篇」。
+// 笔记本：管理员和我一起写的本子。memory 是我消化后的认知；note 是他的原话（Markdown 保结构）。
+// 以前他想「留着」只能塞进记忆，留下的是我的转述，不是原稿。
+// 多篇 + 标签（而非一整篇长文），noteFocusBlock 才能把「他正在看哪一篇」顶进提示词。
 
 import type { SqlTag } from "./state";
 import { ageLabel } from "./memory";
@@ -162,9 +154,7 @@ export function newNoteId(): string {
 }
 
 /**
- * 标题留空时从正文第一行取一句。
- * 因为「没名字的一篇」在列表里就是一坨，他下次根本认不出哪篇是哪篇；
- * 而他写正文时第一行多半就是标题，取它比我编一个准。
+ * 标题留空时取正文第一行：没名字的一篇在列表里认不出，而第一行多半就是标题。
  */
 export function deriveTitle(body: string): string {
   const first = body
@@ -186,9 +176,7 @@ export function getNote(sql: SqlTag, id: string): Note | null {
 }
 
 /**
- * 列表。q 命中标题或正文，tag 精确命中标签。
- * 排序固定是「钉住的在前、然后按最近动过」—— 因为本子的第一屏该是他手上那几篇，
- * 而不是按创建时间排的考古层。
+ * 列表：q 命中标题/正文，tag 精确命中。排序固定「钉住在前、最近动过」，第一屏该是他手上那几篇。
  */
 export function listNotes(
   sql: SqlTag,
@@ -197,11 +185,9 @@ export function listNotes(
   const limit = opts.limit ?? NOTE_CAP;
   const q = (opts.q || "").trim();
   const tag = (opts.tag || "").trim();
-  // 四种条件各写一条固定 SQL，不在运行时拼语句。
-  // 因为 sql 模板标签里的插值一律是「绑定参数」，只能出现在值的位置上：
-  // 把 where 或者 ORDER BY 拼进去，拼出来的会变成一个参数占位符 —— 轻则语法错误，重则静默匹配错行。
-  // 条件就这么四种，写死反而看得清。
-  // LIKE 的 % 加在值上；标签则「前后补逗号再匹配」—— 免得到「写作」把「写作练习」也算命中。
+  // 四种条件各写一条固定 SQL，不在运行时拼：sql 模板插值一律是绑定参数，
+  // 把 WHERE/ORDER BY 拼进去会变成占位符，轻则语法错、重则静默匹配错行。
+  // LIKE 的 % 加在值上；标签前后补逗号匹配，免得「写作」命中「写作练习」。
   if (q && tag) {
     const like = `%${q}%`;
     const t = `%,${tag},%`;
@@ -243,11 +229,8 @@ function pushRevision(sql: SqlTag, old: Note, by: Author, at: string): void {
 }
 
 /**
- * 落库。新建与改写走同一条路。
- *
- * 为什么改写前一定要压一份旧版：管理员点头让我自由改写正文，也就是说我手一滑就能抹掉他写的字。
- * 覆盖没有后悔药，而「我以为是这么写的」这种账，事后是查不清的 —— 所以版本留着，他一句「退回去」就够了。
- * 只有正文或标题真的变了才压，避免「只是钉了一下」也留下一个一模一样的版本。
+ * 落库，新建与改写同路。
+ * 改写前必须压旧版：管理员允许我自由改写，我手滑就能抹掉他写的字；只压真正变了的标题/正文。
  */
 export function saveNote(sql: SqlTag, input: NoteInput): Note {
   const now = new Date().toISOString();
@@ -335,9 +318,7 @@ export function listRevisions(
 }
 
 /**
- * 退回某一版。
- * 关键是「退回」本身也走 saveNote —— 所以退错了还能再退回来，
- * 而他按的那一下不会变成又一次不可逆的覆盖。
+ * 退回某版也走 saveNote：退错了还能再退回来，那一下不会变成又一次不可逆覆盖。
  */
 export function restoreRevision(
   sql: SqlTag,
@@ -362,11 +343,9 @@ export function describeNote(
 }
 
 /**
- * 注入系统提示词的那一段：他此刻翻着的那一篇。
- *
- * 为什么只带开头几百字：他要的是「我知道你在说哪篇」，不是「我把这篇抄进脑子」。
- * 全文顶进来，长笔记每一轮都在烧 token，而真正要用全文的时候我本来就会 read。
- * 只在那一篇还真的存在时出现 —— 他删了它、提示词里却还留着，我下一句就会去说一篇不存在的东西。
+ * 注入提示词：他此刻翻着的那一篇。
+ * 只带开头几百字——要的是「我知道你在说哪篇」，不是抄全文；全文用 note read。
+ * 篇已删则不出，否则我下一句会去说一篇不存在的东西。
  */
 export function noteFocusBlock(
   sql: SqlTag,

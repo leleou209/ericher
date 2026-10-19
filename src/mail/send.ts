@@ -1,17 +1,7 @@
-// 配置 → 内核之间的那层薄适配：把「这台机器该用哪个服务器、哪把钥匙、每天几封」
-// 翻成 sendMail 的两个入参，并把每日额度的账记实。
-//
-// 消费方（说清楚这不是死配置）：三处，各自的账都记在 mail_out 那一本上
-//   · 主人那间的 send_email 工具（agent 想说就寄，走 src/tools/mail.ts）；
-//   · 面板上的「试一封」（POST /api/mail/test → DO 的 mailTestSend）；
-//   · 提醒/盯梢的离线副本（cowork.ts 的 mailMissedSays：那句话说出口时人不在这
-//     一场跟前，一批攒成一封寄出去 —— 判据是 speak 的落点，不是猜连接数）。
-// 三条路共用同一个 reserveMailSlot 与同一张默认收件地址表；谁来寄都只有一本账。
-//
-// 两条红线：
-//   1. 口令只从 env[keySecret] 取，配置里没有、也不该有口令本体；
-//   2. 失败一律照实返回内核给的那句话，不吞成成功 —— 寄不出去却说「已发送」，
-//      管理员会一直等那封永远不来的邮件。
+// 配置 → 内核的薄适配：把服务器/钥匙/每日额度翻成 sendMail 入参，并记实额度账。
+// 三处消费方共用同一个 reserveMailSlot 与默认收件表：send_email 工具、面板「试一封」、
+// 提醒/盯梢的离线副本（speak 落点判断人不在场，一批攒成一封）。
+// 两条红线：口令只从 env[keySecret] 取；失败照实返回，不吞成成功。
 
 import type { SqlTag } from "../agent/state";
 import {
@@ -48,9 +38,7 @@ const SUBJECT_MAX = 200;
 const TEXT_MAX = 20_000;
 
 /**
- * 为什么现在不能发。返回一句能看懂的原因，返回 null 表示可以发。
- *
- * 判的顺序就是排查的顺序：先问开没开，再问通不通信道，最后问钥匙在不在。
+ * 为什么现在不能发；null = 可以发。判的顺序就是排查顺序：开关 → 信道 → 钥匙。
  */
 function blockedReason(cfg: MailConfigView): string | null {
   if (!cfg.enabled) return "邮件发送是关着的（配置里 enabled 没开）";
@@ -65,10 +53,7 @@ function blockedReason(cfg: MailConfigView): string | null {
 }
 
 /**
- * 错误只截断、不拼接。
- *
- * 内核已经保证错误文本里没有口令；外层 catch 要是再把 hostname / username
- * 抹进去，等于自己把敏感面请回来 —— 一句「认证被拒绝」比一串上下文更有用。
+ * 错误只截断、不拼接：内核已保证错误里没口令，外层再抹 hostname/username 等于请回敏感面。
  */
 function brief(e: unknown): string {
   const m = (e as Error)?.message ? String((e as Error).message) : String(e);
@@ -77,14 +62,8 @@ function brief(e: unknown): string {
 
 /**
  * 按当前配置寄一封。
- *
- * 额度在 await 之前占（见 store.ts 的 reserveMailSlot）：占上就不退，
- * 半路断的时候服务器可能已经收了件，还回去就等于同一件事寄两封。
- * 地址形状错了不占额度 —— 那种连网络都没碰的失败不该吃掉一格。
- *
- * 流水（mail_out）在两处记：占上额度之后的成与败、以及地址形状被闸拦下的那一次。
- * 被「开关没开 / 额度用完」挡住的**不记** —— 那是这台机器的状态，面板顶上已经
- * 如实写着；混进发件箱就等于把「寄出去的账」变成「为什么没寄的日志」。
+ * 额度在 await 之前占且不退（半路断时服务器可能已收件，还回去等于寄两封）；地址形状错不占额度。
+ * 流水 mail_out 记两处：占额度后的成败、地址被闸拦下；被开关/额度挡住的不记（那是机器状态，不是发件账）。
  */
 export async function sendConfiguredMail(
   sql: SqlTag,

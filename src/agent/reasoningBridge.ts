@@ -1,21 +1,7 @@
-// 思考流桥 v2：让 openai 兼容端点的思维链实时显示。
-//
-// 为什么要有这一层：SDK 的 openai provider 只认 content / tool_calls / annotations
-// —— DeepSeek、GLM、Kimi 这类端点把思维链放在 delta.reasoning_content（与 content
-// 同级）或 Responses API 的 response.reasoning_text.delta 事件里。
-//
-// 第一版走「旁路收集 + 事件合成」，实测攒团 —— 根因在 provider 的 doStream：
-// 它先 await throwIfOpenAIStreamErrorBeforeOutput 预读，把「非输出 chunk」全部
-// 吞掉直到第一个正文块（isOpenAIChatOutputChunk 认 content 非空），且预读
-// stream.tee() 的另一支数据积压 —— 整个思考阶段的字节在 doStream 返回前就被
-// 预检消费完，消费者一次性收到。
-//
-// v2 改打「改写」：fetch 层把 reasoning 分片改写成 delta.content =
-// "\u0000" + 分片 + "\u0000"（NUL 哨兵）—— 预检看到非空 content 立即放行，
-// 思考阶段的字节逐块流到事件层；事件层把带哨兵的 text-delta 转回
-// reasoning 事件，正文不受影响（模型输出 NUL 的概率为零，成对拦截）。
-// reasoning 阶段会留一个空 text part（text-start/end 包着零个 delta），
-// 前端对空 part 不渲染，无碍。
+// 思考流桥 v2：让 openai 兼容端点的思维链实时显示。SDK 的 provider 只认 content/tool_calls，
+// DeepSeek/GLM/Kimi 把思维链放在 delta.reasoning_content 或 Responses 的 reasoning_text.delta。
+// v2 在 fetch 层改写成 content = NUL + 分片 + NUL（NUL 不会出现在正常输出）：预检看到非空 content 立即放行，
+// 事件层再转回 reasoning；v1 靠旁路收集会被预读把整个思考阶段攒成一团。思考阶段留的空 text part 前端不渲染。
 
 import { createOpenAI } from "@ai-sdk/openai";
 import type {
@@ -43,10 +29,8 @@ interface OpenAIModelConfig {
 }
 
 /**
- * 字节级改写器：SSE 行缓冲 + 逐行判定 ——
- * chat 的 reasoning_content → delta.content 哨兵包裹；
- * responses 的 reasoning_text.delta → output_text.delta 哨兵包裹；
- * 其余行原样。
+ * 字节级改写器：SSE 行缓冲 + 逐行判定。chat 的 reasoning_content 与 responses 的
+ * reasoning_text.delta 都改写成带哨兵的正文 delta，其余行原样。
  */
 class ReasoningRewriter {
   private buf = "";

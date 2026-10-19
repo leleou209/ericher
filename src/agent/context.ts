@@ -1,13 +1,6 @@
-// 上下文窗口管理：把一场对话的「很久以前」压成一段摘要，只把近处原样发给模型。
-//
-// 为什么必须做：会话是只增不减的，每轮都把整场历史重发一遍，token 会随时间线性涨，
-// 到最后不是变贵变慢，而是直接撞上下文上限、整场对话说不了话。
-//
-// 两条自我约束：
-// 1) 切点只能落在「用户发言」之前。工具调用和它的结果被切开，模型会看到一堆
-//    无来由的 tool result —— 与其让它困惑，不如少压几条。
-// 2) 摘要覆盖到哪里，记的是「最后一条被压掉的消息 id」而不是条数。
-//    id 找不到（那条被清了）就退回「保留最近 N 条」，宁可重复摘要，不可错位。
+// 上下文窗口管理：把很久以前压成摘要，近处原样发给模型；否则 token 线性涨到撞上限。
+// 两条约束：切点只落在用户发言之前（切开工具调用会让模型看到无来由的 tool result）；
+// 摘要覆盖记「最后一条被压消息 id」而非条数，id 找不到就退回保留最近 N 条，宁可重复不可错位。
 
 import type { ModelMessage, UIMessage } from "ai";
 
@@ -47,8 +40,7 @@ function nextUserAt(messages: UIMessage[], from: number): number {
 }
 
 /**
- * 决定这轮发什么。
- * 返回的 tail 一定是原样消息；被折进摘要的部分由调用方去生成新摘要。
+ * 决定这轮发什么；tail 一定是原样消息，被折进摘要的部分由调用方生成新摘要。
  */
 export function planContext(messages: UIMessage[], upto: string): ContextPlan {
   const n = messages.length;
@@ -74,8 +66,7 @@ export function planContext(messages: UIMessage[], upto: string): ContextPlan {
 }
 
 /**
- * 生成新摘要：老摘要 + 这一批要折进去的对话 → 一段更长的老摘要。
- * 提示词要的是「以后还用得上的东西」，不是复述——复述等于没压。
+ * 生成新摘要：老摘要 + 这批对话 → 新摘要。要「以后还用得上的东西」，复述等于没压。
  */
 export function digestPrompt(
   prev: string,
@@ -105,11 +96,8 @@ export function digestBlock(digest: string): string {
   );
 }
 
-// ── 提示词缓存 ─────────────────────────────────────────────
-//
-// 缓存命中只有一个决定因素：前缀逐字节一致。断点本身不产生命中，
-// 它只决定「缓存写到哪」。所以命中率的大头在序列怎么排（稳定段在前、
-// 动态段压尾、历史 append-only），断点只是把这份秩序记进账本。
+// 缓存命中只看前缀逐字节一致；断点本身不产生命中，只决定缓存写到哪。
+// 命中率大头在序列怎么排（稳定段在前、动态段压尾、历史 append-only）。
 
 /** Anthropic 语义的缓存断点标记。别家厂商不认 anthropic 这个键，原样忽略 */
 export const CACHE_PROVIDER_OPTIONS = {
@@ -117,14 +105,9 @@ export const CACHE_PROVIDER_OPTIONS = {
 } as const;
 
 /**
- * 给最后一条消息打缓存断点（Anthropic 语义；别家不该调它）。
- *
- * 为什么打在最后一条：历史是 append-only 的，这一轮的「最后一条」到了下一轮
- * 就躺在历史里 —— 上一轮写下的缓存前缀这一轮原样出现，模型只需读新长出来的
- * 一小段。每轮一次缓存写入，换长会话里绝大部分输入按缓存价计。
- *
- * 字符串内容没有可挂 providerOptions 的部件，包成单条文本部件再挂：
- * 建模方对两种形状的归一结果相同，不改变发出去的请求体。
+ * 给最后一条消息打缓存断点（Anthropic 语义，别家不认该键会忽略）。
+ * 历史 append-only：这轮最后一条下轮就躺在历史里，缓存前缀原样重现，只需读新长的一小段。
+ * 字符串内容没有可挂 providerOptions 的部件，包成单条文本部件再挂，请求体归一后不变。
  */
 export function markCacheBreakpoint(messages: ModelMessage[]): ModelMessage[] {
   const last = messages[messages.length - 1];

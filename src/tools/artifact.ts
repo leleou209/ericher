@@ -1,13 +1,5 @@
-// artifact：现场生成的交互式卡片。
-//
-// 一张清单、一份对比表、一个小仪表盘 —— 有时候一张能点的卡片比一千字更顶用。
-// ericher 把一份自包含的 HTML（样式、脚本全部内联，不引用任何外部资源）
-// 存进云盘，回复里用一行 [artifact <key> <标题>] 引用，前端就把这行
-// 渲染成对话里直接可以玩的 iframe 卡片。
-//
-// 安全模型：HTML 是模型写的，前端一律用 sandbox iframe（脚本可跑、无同源权限）
-// 渲染，后端给 text/html 响应垫 Content-Security-Policy: sandbox ——
-// 就算有人把卡片链接单独开个窗口，那也是不透明源，碰不到登录者的任何东西。
+// artifact：现场生成自包含 HTML 卡片（样式/脚本内联），存云盘，回复里用 [artifact <key> <标题>] 引用。
+// 前端以 sandbox iframe 渲染（脚本可跑、无同源权限）；后端垫 CSP: sandbox，单独打开也是不透明源。
 
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";

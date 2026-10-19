@@ -3,9 +3,7 @@ import { chatMemoryBlocks } from "../shared/chatMemoryBlocks";
 import { ChatIngress } from "./adapters/chatIngress";
 import { AskDelivery } from "./adapters/askDelivery";
 // ericher 主体：AIChatAgent + 原生工具调用。
-//
-// 类名 CoworkAgent 必须保持不变 —— DO 存储按类标识派生，改名等于换存储桶，
-// 既有 memories / state 全部读不到。
+// 类名 CoworkAgent 必须保持不变：DO 存储按类标识派生，改名等于换存储桶。
 
 import {
   AIChatAgent,
@@ -405,24 +403,21 @@ import {
 } from "./state";
 import { appendTurnError, describeTurn, type TurnCapture } from "./turnReport";
 
-/** 闲置超过这个时长就认为是一段新关系，清掉旧对话 */
+/** 闲置超过这个时长就当作一段新关系：上一场归档，另起一场 */
 const IDLE_RESET_MS = 30 * 24 * 60 * 60 * 1000;
 
-/** 导出时跳过的内部簿记表：迁移游标、配额计量——可重建的运行时状态，不是要备份的家当 */
+/** 导出时跳过可重建的运行时簿记：迁移游标、配额计量、任务游标 */
 const EXPORT_SKIP = new Set(["migration_flags", "write_meter", "task_cursor"]);
-/** 导出时剥离的敏感列：备份文件里不该出现任何可用于登录的东西（摘要也不给） */
+/** 导出时剥离的敏感列：备份里不能有任何可用于登录的东西（散列也不给） */
 const EXPORT_SENSITIVE: Record<string, string[]> = {
   guest_types: ["password"],
-  // 身份卡的口令散列：虽然只是散列，但离线撞库不需要联网 —— 备份文件里一样不能有
+  // 身份卡口令散列：离线撞库不需联网，备份里一样不能有
   user_cards: ["password_hash"],
 };
 
 /**
- * lastActive 落库的最小间隔。
- *
- * 每连一次、每切一次会话都写一整份 state blob（一行）再广播一遍，而这个字段
- * 只给自己做「闲置多久」的判定用 —— 判定尺子是 30 天，五分钟的粒度绰绰有余。
- * 额度紧张的当下，这类「什么也没改、只是报个时辰」的写该省掉。
+ * lastActive 落库的最小间隔：判定尺子是 30 天，五分钟粒度足够。
+ * 每次连接/切场都写整份 state blob 太贵，这类「只报时辰」的写该省掉。
  */
 const LAST_ACTIVE_FLUSH_MS = 5 * 60 * 1000;
 
@@ -432,9 +427,8 @@ const MAX_STEPS = 10;
 const THINK_TIMEOUT = 12_000;
 
 /**
- * 来客房缓存「生效模型目录组」的时长（见 fetchActiveCatalog）。
- * 跨间调用一趟不便宜，目录是改一次用很久的东西 —— 半分钟的生效延迟
- * 换每句话少一跳往返，划算。
+ * 来客房缓存「生效模型目录组」的时长（见 fetchActiveCatalog）：
+ * 跨间调用不便宜，目录改一次用很久，半分钟延迟换每句少一跳。
  */
 const ACTIVE_CONFIG_CACHE_MS = 30_000;
 
@@ -470,36 +464,22 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   messageConcurrency = "latest" as const;
 
   /**
-   * 关闭 WebSocket 休眠：连接断了，屋子不散。
-   *
-   * 默认 hibernate:true 的行为是「最后一个连接一断，实例随时可以原地冻结」——
-   * 而一轮多段工具链里满是秒级的空等（每步模型调用之间），运行时专挑这些空档
-   * 把实例休眠掉，进行中的流阅读器当场被杀：工具卡悬着「结果没回来」、正文截在
-   * 半截，人回来看到的不是「她还在跑」而是一具尸体。
-   *
-   * 换成内存连接管理器后，连接断了在途工作也照常跑完、落库完，才轮得到回收。
-   * 离开页面、双开另一场聊天，正在跑的这一轮都不受影响 —— 后台任务靠这行活命。
-   * 代价是连接挂着的期间实例不进休眠（内存常驻）：单人聊天，无所谓。
+   * 关闭 WebSocket 休眠：连接断了，在途的一轮照常跑完、落库完才被回收。
+   * 默认 hibernate 会在工具链的秒级空档冻结实例，杀掉进行中的流。
+   * 代价是连接挂着期间实例内存常驻（单人聊天，可接受）。
    */
   static options = { hibernate: false };
 
   /**
-   * 长思考要扛得住「跑到一半被驱逐 / 断线」。
-   *
-   * 打开它，这一轮就跑在一个 durable fiber 里：fiber 的登记先落 SQLite，全程握着
-   * keepAlive（不会被空闲驱逐），万一还是被重启掐断，下一次唤醒时基类会把已经流出去
-   * 的那半截从流缓冲里捞出来落库，再自己续一轮（见基类 _handleInternalFiberRecovery）。
-   * 不打开的话，这一轮只活在内存里 —— 进程一没，她说过的话和她正在做的事一起消失，
-   * 前端那边看到的就是「说到一半没了」，而且永远等不到下半句。
-   *
-   * 代价是多一张 cf_agents_runs 表的读写。相比「长回答说没就没」，这个代价划得来。
+   * 长思考要扛得住驱逐/断线：这一轮跑在 durable fiber 里，登记先落 SQLite，
+   * 重启后基类会从流缓冲捞出半截再续一轮（见 _handleInternalFiberRecovery）。
+   * 代价是多一张 cf_agents_runs 表的读写。
    */
   chatRecovery = true;
 
   /**
-   * Agent.sql 是依赖 `this.ctx` 的原型方法。写成 `agent.sql\`...\`` 是方法调用、this 正确，
-   * 但把它当值传递（如 `f(this.sql)`）会丢 this，运行时报
-   * "Cannot read properties of undefined (reading 'ctx')"。所有传递场景统一用这个绑定版本。
+   * Agent.sql 依赖 this.ctx：当值传递（如 `f(this.sql)`）会丢 this 并报
+   * "Cannot read properties of undefined (reading 'ctx')"，传递场景统一用这个绑定版本。
    */
   private dbTag?: SqlTag;
   get db(): SqlTag {
@@ -512,9 +492,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 不带计量的原生 sql。
-   * 计量器自己落账要用它 —— 用带计量的那个，就成了「为了记账而记账」，
-   * 每写一行账又多出一行账，越记越多。
+   * 不带计量的原生 sql：计量器自己落账要用它，
+   * 否则每记一行账又多出一行账。
    */
   private rawSqlTag?: SqlTag;
   private get rawSql(): SqlTag {
@@ -523,9 +502,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   /**
    * 今天写了多少行、写到哪儿去了。
-   *
-   * 每次都重新 attach：闭包只引用 this 和原型上的方法，所以哪怕基类构造时
-   * 就发了 SQL（那会儿子类字段还没初始化），挂上去的回调照样是好的。
+   * 每次都重新 attach：基类构造期可能已发 SQL，闭包只引用 this 和原型方法，回调仍须有效。
    */
   private get meter(): Meter {
     const m = meterOf(this);
@@ -540,9 +517,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 「她正在想什么」（见 think.ts）。
-   *
-   * 一间屋子一个：轮次号要一直往上走，客户端才分得清飘过来的哪句属于这一轮。
+   * 「她正在想什么」（见 think.ts）。一屋一个：
+   * 轮次号必须递增，客户端才分得清飘来的哪句属于这一轮。
    */
   private thinker = new Thinker({
     ask: (system, user) => this.thinkAsk(system, user),
@@ -550,9 +526,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   });
 
   /**
-   * 计量每一次 SQL —— 包括 SDK 自己发的那些（消息落库、状态 blob、定时任务表）。
-   * 只数我自己写的没意义：免费层每天 10 万行是整间屋子共用的，
-   * 而超限之后连「读」都会一起失败，整个 DO 就瘫了。
+   * 计量每一次 SQL，包括 SDK 自己发的（消息落库、state blob、定时任务表）：
+   * 免费层每天 10 万行是整屋共用，超限后连读都失败，整个 DO 会瘫。
    */
   sql<T = Record<string, string | number | boolean | null>>(
     strings: TemplateStringsArray,
@@ -580,7 +555,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       key: string;
       n: number;
     }>`SELECT key, n FROM write_meter WHERE day = ${day}`;
-    // 写和读怎么分、哪些不算（结构变更），都由 meter.ts 一处说了算，这里只管搬数据
+    // 写读怎么分、哪些不算（结构变更）由 meter.ts 说了算，这里只管搬数据
     return rows.map((r) => ({ key: r.key, n: r.n }));
   }
 
@@ -609,7 +584,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   /**
    * AI neurons / Vectorize 的自计量（面板用）。
-   * 纯内存账（见 usage.ts），顺带把 state 里的旧账接回来 —— 只接一次。
+   * 纯内存账，顺带接回 state 里的旧账 —— 只接一次。
    */
   resourceReport(): ResourceReport {
     usage.hydrate(this.state.usage);
@@ -629,23 +604,16 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 我是不是主人级的屋子（有记忆、夜间整理和全套工具的那一类）。
-   *
-   * 一个会话一间屋之后，主人的每一场对话各有一间场屋（default--sXxx，见 auth.ts），
-   * 它们和主屋一样是全套 —— 「一个会话一个全套」说的就是这个。
-   * 来客（含来客的场屋）不在其列：他们只有人格提示词和几个对外工具。
-   * （runtime.ts 也读它：来客那几间不排夜间整理，省下一次白烧的模型调用。）
+   * 我是不是主人级的屋子：主人每场对话各有一间场屋（default--sXxx），与主屋一样全套。
+   * 来客（含来客的场屋）只有人格提示词和几个对外工具；runtime 因此不给来客排夜间整理。
    */
   get isOwnerRoom(): boolean {
     return (ownerRoomOf(this.name) ?? this.name) === OWNER_AGENT;
   }
 
   /**
-   * 固定场模式：这间屋是场屋（名字带 `--` 后缀），一辈子只聊屋名里那一场。
-   *
-   * 会话的切换、新建在目录屋（人屋）层面就是「换一间屋连」，屋内不需要也不允许再切 ——
-   * 屋名即场 id，这是整个「多场并行」方案的地基：每场一个运行时，互不惊扰。
-   * 人屋本尊返回 null，走老的多场屋内切换。
+   * 固定场模式：场屋名带 `--` 后缀，屋名即场 id，一辈子只聊这一场，多场并行的地基。
+   * 人屋本尊返回 null，走老的屋内切换。
    */
   get fixedSessionId(): string | null {
     const owner = ownerRoomOf(this.name);
@@ -658,22 +626,14 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 守则和自我要求是共用的 —— 换了谁来聊天，我还是同一套做法，不该换一套说法。
-   *
-   * 只有主屋本尊把这两样存在自己 state 里（设置页能改守则，自我要求由我用 self 工具写）；
-   * 其余的屋 —— 来客屋、主人的场屋 —— 都不存，每次连上来时去主屋取一份，取不到就用出厂默认。
-   * 不共用的话，管理员一改守则、我自己一改要求，别的屋还是老样子 —— 等于养出多个 ericher。
-   * 取的只有这几样人格件：守则、自我要求、内核。记忆另走一套（跨间合并与并账）。
+   * 守则、自我要求、内核只有主屋本尊存在 state 里，其余屋连接时来取一份，取不到用出厂默认。
+   * 不共用的话，一处改完别处还是老样子 —— 等于养出多个 ericher。记忆另走跨间合并。
    */
   private personaCache = "";
   private demandCache = "";
   /**
-   * 内核与自我要求的完整缓存（场屋读主屋那份；主屋本尊不读它，直接读自己的 state）。
-   *
-   * 为什么内核也要走这条路：一个会话一间场屋之后，管理员聊天是在场屋里。
-   * 内核原先只写在「当前这间屋」的 state 上 —— 场屋里改完，下一场（另一间屋）
-   * 或设置页（读主屋）看到的还是旧的，表现就是「说保存了，回来又没了」。
-   * 内核和守则、自我要求一样，是「同一个 ericher」的一部分，得由主屋收着。
+   * 内核与自我要求的缓存（场屋读主屋那份，主屋本尊直接读 state）。
+   * 内核若只写当前屋，场屋改完下一场或设置页看不到，表现是「说保存了，回来又没了」。
    */
   private selfCache = {
     core: "",
@@ -713,21 +673,21 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return ownerRoomOf(this.name) ? this.personaCache : this.state.basePrompt;
   }
 
-  /** 这一轮该用哪份自我要求。同上：她是同一个人，要求也一样。 */
+  /** 这一轮该用哪份自我要求（同人设，来自同一处）。 */
   private demandForPrompt(): string {
     return ownerRoomOf(this.name)
       ? this.demandCache
       : this.state.selfDemand || "";
   }
 
-  /** 这一轮该用哪份内核。同上：内核也是同一个 ericher 的一部分。 */
+  /** 这一轮该用哪份内核。 */
   private coreForPrompt(): string {
     return ownerRoomOf(this.name) ? this.selfCache.core : this.state.selfModel;
   }
 
   /**
-   * 内核与自我要求的统一读口径：主屋本尊读自己的 state，场屋读主屋那份缓存。
-   * reflect 和写入都要读它 —— 读错了，模型会以为内核是空的，越改越糟。
+   * 内核/自我要求的统一读口径：主屋本尊读 state，场屋读主屋缓存。
+   * reflect 与写入都要读它 —— 读错了模型会以为内核是空的。
    */
   readSelf(): {
     core: string;
@@ -751,9 +711,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 落一次内核/自我要求的写入。
-   * 主屋本尊就地写；场屋转交主屋 —— 主屋那份才是标准件，写在场屋等于下一场就丢。
-   * 写完同步本地缓存，同一轮里的 reflect 立刻读得到，不必等重连。
+   * 落一次内核/自我要求的写入：主屋就地写，场屋转交主屋 —— 写在场屋下一场就丢。
+   * 写完同步本地缓存，同一轮的 reflect 立刻读得到。
    */
   private async commitSelf(patch: Partial<ChatState>): Promise<ChatState> {
     if (!ownerRoomOf(this.name)) {
@@ -804,12 +763,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 来客那间记下的一条，回主人这边留一份（两边都留，理由见 tools/memory.ts）。
-   *
-   * 前缀写「来客说：」：即使有称呼，这也不是管理员认识的人的名字，
-   * 而是这位客人自己的归属标记 —— 人名一律带「来客·」前缀，永远撞不到真名上。
-   * person 只管展示；授权归属跟 ownerKey（room:<来客房间名>）走 ——
-   * 房间名是 Worker 按签名票派生的，自报的称呼做不了钥匙（见 guestReadableMemories）。
+   * 来客记下的一条，主屋留档（两边都留，理由见 tools/memory.ts）。
+   * 人名一律带「来客·」前缀，撞不到真名；person 只作展示，
+   * 授权归属跟 ownerKey（room:<来客房间名>，Worker 按签名票派生）走。
    */
   async receiveGuestMemory(input: {
     content: string;
@@ -846,16 +802,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 来客那间来问：和这句话有关的、他读得到的记忆。
-   *
-   * 「读得到」= 两档的并集：管理员公开过的（含 tag 门放行的），加上他自己名下的
-   * （owner_key = room:<他的房间名>）。private 的主体是管理员的私事，一个字都不出这间屋子。
-   * 过滤在 searchMemories 的 SQL 里完成 —— 数据层关上的门，提示词开不了。
-   *
-   * 归属键由调用方那间用自己的 this.name 注入（Worker 按签名票派生），
-   * 不从 state.guestName 取 —— 那是客人自报的称呼，报谁都行，做不了授权凭据。
-   * 持卡客人回的是卡绑定的那间屋，换个设备键也不变；无卡身份的键跟着票走，
-   * 重新登录就是新的屋子 —— 没有可核实的持久身份，就不该有跨登录的私档可翻。
+   * 来客读得到的记忆 = 管理员公开的（含 tag 门放行）+ owner_key 名下自己的；
+   * 过滤在 searchMemories 的 SQL 里完成，private 一个字都不出这间屋子。
+   * 归属键由调用方用 this.name 注入（Worker 按签名票派生），自称做不了凭据；无卡身份换登录即换屋。
    */
   async guestReadableMemories(
     query: string,
@@ -865,9 +814,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     const q = (query || "").trim();
     if (!q) return [];
     ensureMemorySchema(this.db);
-    // 受限读不走跨请求缓存：缓存按查询视角隔离（不会串权限），
-    // 但管理员收回公开 / 升量级 / 关 tag 门之后，命中缓存的旧答案还在 ——
-    // 「他说了不算了」必须当场生效。来客检索低频，每次实搜的账花得起
+    // 受限读不走跨请求缓存：管理员收回公开/升量级/关 tag 门后必须当场生效，
+    // 旧答案不能留着；来客检索低频，每次实搜的账花得起
     const hits = await searchMemories(this.db, this.env, q, limit, {
       guestOwnerKey: ownerKey || undefined,
       onlyPublic: !ownerKey,
@@ -886,35 +834,20 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     );
   }
 
-  /**
-   * 账本的骨架：管理员标了「公开」的那些条目。
-   *
-   * 这个方法的名字直白是故意的 —— 它是跨房间调用的入口，
-   * 来客那间来取的时候，一眼要能看出取走的到底是哪一档。
-   */
+  /** 管理员标了「公开」的账本骨架。跨房间调用入口，名字直白是有意的。 */
   publicMemoryEntries(limit = 300): MemEntry[] {
     ensureMemorySchema(this.db);
     return listPublicMemories(this.db, limit);
   }
 
   /**
-   * 公开账本 = 管理员公开的那些 + 他这场自己登记的。
-   *
-   * 为什么两边都要：管理员公开的那些是「这个家里有谁、该怎么称呼」的底子，
-   * 客人来了知道对面是谁才不算失礼；他自己写下的那几笔则是这一场的来意，
-   * 不显示出来的话，他刚写完就看不见了，会以为没存上。
-   *
-   * 主人那间打开时就是自己公开的那一档 —— 账本的概念只对访客成立，
-   * 管理员看的是完整的记忆面板（那边有增删改）。
-   *
-   * 只读：来客那间没有任何改 / 删 / 作废的入口，这是账本的规矩 ——
-   * 谁都能往上添一笔，但已经写下的那笔不归别人动。
+   * 公开账本 = 管理员公开的 + 他这场自己登记的（否则他刚写完就看不见）。
+   * 主人那间即自己公开那一档；只读 —— 来客没有改/删/作废入口。
    */
   async publicLedger(limit = 300): Promise<MemEntry[]> {
     if (this.isOwnerRoom) return this.publicMemoryEntries(limit);
     ensureMemorySchema(this.db);
-    // 本房间里的都是他这场带来的（面板登记的、或者他让我记下的），不过 visibility 一道手：
-    // 那些默认是 private，但对他自己算不上秘密 —— 挡的从来是跨房间，不是他自己看自己。
+    // 本屋的都是他这场带来的：默认 private 对他自己不算秘密 —— 挡的是跨房间
     const mine = listMemories(this.db, undefined, limit);
     let shared: MemEntry[] = [];
     try {
@@ -929,12 +862,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 现查一档的对外快照。票里声称的档位每次核对都以这一趟为准：
-   * 内置通用档（common）也是名册里真实的一行，照常现查 —— 管理员关掉的东西
-   * 从下一轮起就真的没有；只是主人那间读不到时落全开兜底（它是门口最后一把
-   * 钥匙，不能因为一次抖动把进门的人锁死）。
-   * 其它档查不到、或主人那间没醒，返回失效兜底（权益全关）——
-   * 核实不了的一档不能当成「还在」放行，否则删一档类型等于全员放开。
+   * 现查一档的对外快照，票里声称的档位每次核对都以此为准。通用档也是名册真实一行，照常现查，
+   * 只有主人那间读不到时才落通用档默认兜底（门口最后一把钥匙）。其它档查不到、或主人那间没醒，
+   * 落失效兜底（权益全关）—— 核实不了的档不能当「还在」放行，否则删一档等于全员放开。
    */
   private async currentGuestType(typeId: string): Promise<GuestTypeInfo> {
     const fallback =
@@ -942,8 +872,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
         ? defaultCommonGuestTypeInfo()
         : disabledGuestTypeInfo(typeId);
     try {
-      // 名册在主人那间。本尊直接读本地的表；主人的场屋（default--sX 也满足
-      // isOwnerRoom）读的会是自己的空表，所以这里的门槛必须是「就是主屋本尊」。
+      // 名册在主人那间：本尊读本地表；主人的场屋也是 isOwnerRoom 但表是空的，
+      // 门槛必须是「就是主屋本尊」。
       if (this.name === OWNER_AGENT) {
         const row = getGuestType(this.db, typeId);
         return row ? toGuestTypeInfo(row) : fallback;
@@ -958,16 +888,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 来客在账本上自己写一笔。只能添，不能改也不能删。
-   *
-   * 和 tools/memory.ts 里那条路是同一件事的两种入口（他让 ericher 记 / 他自己动手写），
-   * 所以两处都得往管理员那边送一份 —— 只留本地的话，他写的那些管理员永远看不到。
-   *
-   * 写入层的权益校验在这一道：工具没到手（注册层）是第一扇门，这里是第二扇 ——
-   * HTTP 直呼（POST /api/memory、进门介绍带来历）不经过工具注册，
-   * 档位把「记忆登记」关掉之后这两条路也得跟着关。权益现查现判，
-   * 不信连接时留下的快照：管理员刚调低的那一档，下一笔写入就该被挡住。
-   * 查不到档 / 查询失败按没有权益算 —— 宁可拒了，不能把核实失败当成放行。
+   * 来客在账本上添一笔（只能添），同时给管理员那边送一份。
+   * 工具注册是第一道门，这里是第二道：HTTP 直呼（POST /api/memory、进门介绍）不经过注册。
+   * 权益现查现判，不要连接时的快照；查不到档/查询失败按无权益算 —— 宁可拒了，不能 fail-open。
    */
   async addGuestEntry(input: {
     content: string;
@@ -979,10 +902,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     const content = (input.content || "").trim();
     if (!content) return null;
     if (!this.isOwnerRoom) {
-      // 类型跟着票据走：WS 连接时 onConnect 存过一份快照；但纯 HTTP 直呼
-      // （POST /api/memory、进门介绍）不经过 onConnect，快照是空的 ——
-      // 以前这里拿空快照当「没类型」，整段检查被跳过，权益就 fail-open 了。
-      // 现在 Worker 会把票里的 type 段带过来；两处都拿不到 = 无法核实 = 拒绝。
+      // 类型跟着票走：WS 连接在 onConnect 存快照，HTTP 直呼没有 ——
+      // 空快照不能当「没类型」（那会 fail-open），两处都拿不到 = 无法核实 = 拒绝。
       const typeId = input.typeId || this.state.guestTypeId || "";
       if (!typeId) return null;
       const fresh = await this.currentGuestType(typeId);
@@ -990,8 +911,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     }
     ensureMemorySchema(this.db);
     const tags = input.tags || [];
-    // person 只管展示（面板上「来客·称呼」看得顺眼）；授权归属跟房间键走，
-    // 跟着称呼走的话，谁报同一个称呼就把别人的记录认领走了
+    // person 只作展示；授权归属跟房间键走 —— 跟称呼走就会被同名冒领
     const who = (this.state.guestName || "").trim().slice(0, 20);
     const belong = who ? `来客·${who}` : "";
     const entry = insertMemory(this.db, {
@@ -1028,10 +948,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return entry;
   }
 
-  /**
-   * 反馈表可能建在 onStart 之前（热的旧实例不重跑 onStart），所以每个用到的地方
-   * 都先过一遍这里；建表语句只在本实例生命周期内跑一次。
-   */
+  /** 反馈表可能建在 onStart 之前（热实例不重跑 onStart）；用到的地方先过一遍，每实例只建一次。 */
   private feedbackReady = false;
   private ensureFeedback(): void {
     if (this.feedbackReady) return;
@@ -1077,14 +994,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     this.eventsReady = true;
   }
 
-  /**
-   * 冷启动记账。
-   *
-   * onStart 每一次「冷唤醒」都会重跑 —— 空闲驱逐、代码更新、运行时重启，全都算。
-   * 把最近的启动时刻记进 DO 存储（驱逐不丢），顺带打一行日志：两个时刻一减，
-   * 就知道是「一天两次的例行重启」还是「被频繁驱逐」—— 这两件事的处理方式完全不同。
-   * 只记账，不改任何行为。
-   */
+  /** 冷启动记账：把启动时刻记进 DO 存储，两次相减即可区分例行重启与频繁驱逐。只记账，不改行为。 */
   private async recordBoot(): Promise<void> {
     const now = Date.now();
     const prev = (await this.ctx.storage.get<number[]>("bootAt")) ?? [];
@@ -1109,23 +1019,18 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     this.ensureEvents();
     installRuntime(this);
     installMigration(this);
-    // DO 的 state 是持久化 blob，新增字段不会自动补齐到老实例上。
-    // 这里补一次，保证 /api/config 始终能返回 basePrompt / activeSession。
+    // DO state 是持久化 blob，新字段不会自动补齐；这里补一次，保证 /api/config 始终有这两格。
     if (typeof this.state.basePrompt !== "string")
       this.patchState({ basePrompt: "" });
-    // 人设和工具说明分家之前，旧版人设的尾巴上粘着一整段「我能用的工具」。
-    // 光在拼提示词时剥掉是不够的：设置页的人格底稿读的是 state 原文，
-    // 不把存量洗干净，用户打开那一格看到的还是一坨混着的东西，会以为根本没做分家。
-    // 不含那一段时原样返回，所以这行是幂等的，也不会平白多一次写入。
+    // 旧版人设尾部粘着工具说明：拼提示词时剥掉不够，设置页读的是 state 原文。
+    // 这里洗一次存量（不含该段则原样返回，幂等、不多写）。
     const cleanBase = stripToolGuide(this.state.basePrompt);
     if (cleanBase !== this.state.basePrompt)
       this.patchState({ basePrompt: cleanBase });
-    // 服务向改版的存量迁移：首次唤醒的快照式默认稿（basePrompt / selfModel / skills）
-    // 就地换成新稿 —— 只动一字不差等于旧默认的，管理员真改过的不碰（见 migrateServiceCopy）。
+    // 服务向改版迁移：只把一字不差等于旧默认的稿子换成新稿，管理员真改过的不碰（见 migrateServiceCopy）。
     const migrated = migrateServiceCopy(this.state);
     if (Object.keys(migrated).length) this.patchState(migrated);
-    // 自我要求这一格是后加的，老实例里没有：补上空串，
-    // 让它以「还没写过」的样子出现，而不是 undefined 一路走到面板上。
+    // selfDemand 是后加字段：老实例补空串，面板看到「还没写过」而不是 undefined。
     if (typeof this.state.selfDemand !== "string")
       this.patchState({ selfDemand: "" });
     if (typeof this.state.selfDemandVer !== "number")
@@ -1134,16 +1039,13 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       this.patchState({ selfDemandLog: [] });
     if (typeof this.state.activeSession !== "string")
       this.patchState({ activeSession: "" });
-    // 来客称呼这一格也是后加的。它比别的字段更要紧：identityBlock 每轮拼提示词都会读它，
-    // 老实例里没有这一格的话，来客说一句话就整轮抛错 —— 前端那边看到的是「她不回话」。
+    // guestName 也是后加：identityBlock 每轮都读，缺这格来客一开口就整轮抛错。
     if (typeof this.state.guestName !== "string")
       this.patchState({ guestName: "" });
-    // 管理员的签名这一格也是后加的：老实例补成空串，
-    // 身份弹层每次展开都读它，缺了这一格就会在 undefined 上渲染
+    // adminBio 也是后加：身份弹层每次展开都读，补空串避免在 undefined 上渲染。
     if (typeof this.state.adminBio !== "string")
       this.patchState({ adminBio: "" });
-    // 工具提示词那一组是后加的：老实例补成空 = 用 toolGroups.ts 的出厂稿。
-    // 旧的整块 toolPrompt 已在 dropLegacyFields 里摘掉（逐工具化之后它没人读了）。
+    // 工具提示词组是后加：补空 = 用 toolGroups.ts 出厂稿（旧的整块 toolPrompt 已摘掉）。
     if (typeof this.state.toolStyle !== "string")
       this.patchState({ toolStyle: "" });
     if (typeof this.state.guestToolStyle !== "string")
@@ -1167,23 +1069,19 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       this.patchState({ guestToolGroupNotes: {} });
     if (typeof this.state.recapPrompt !== "string")
       this.patchState({ recapPrompt: "" });
-    // 提问卡这一格也是后加的：老实例里没有，补成空数组 ——
-    // 否则 ask 工具第一次执行就会在 undefined 上炸掉
+    // asks 是后加：补空数组，否则 ask 首次执行会在 undefined 上炸掉。
     if (!Array.isArray(this.state.asks)) this.patchState({ asks: [] });
-    // 笔记焦点这一格也是后加的。补上空串而不是留着 undefined：noteBlock 每轮拼提示词都会读它，
-    // 老实例里没有这一格的话，他一开口就整轮抛错 —— 表现就是「她不回话」。
+    // noteFocus 是后加：noteBlock 每轮都读，缺这格就整轮抛错。
     if (typeof this.state.noteFocus !== "string")
       this.patchState({ noteFocus: "" });
-    // 来客类型 id 这一格也是后加的：老实例补成空串（= 普通票、没有档），
-    // onConnect 的档位比较就不用在 undefined 上打转
+    // guestTypeId 是后加：补空串（= 普通票），onConnect 的档位比较不必碰 undefined。
     if (typeof this.state.guestTypeId !== "string")
       this.patchState({ guestTypeId: "" });
     this.dropLegacyFields();
     // 上次排程中途失败（表里写了但没有 schedule id）的提醒，这里补排一次
     void this.resyncReminders().catch(() => {});
-    // 回想同理，但只在主人那间：来客那几场没有「她自己回头看」这回事。
-    // 重排之前先把「老会话一律视为已回想」的历史回填抹掉 —— 回想对所有场一视同仁，
-    // 幂等：真回想过的（recap_at 非空）不动，清过一次的再跑也不动。
+    // 回想只在主人那间重排；先抹掉「老会话一律视为已回想」的历史回填 ——
+    // 回想对所有场一视同仁，幂等：recap_at 非空的不动。
     if (this.isOwnerRoom) {
       resetLegacyRecapCursors(this.db);
       void resyncRecaps(this).catch(() => {});
@@ -1191,9 +1089,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   async onConnect(conn: Connection, ctx: ConnectionContext): Promise<void> {
-    // 纵深防御：Worker 层的 routeAgentRequest 钩子已校验过，这里用同一套密钥独立再验一次。
-    // 顺手把角色写进「连接」而不是「我自己的 state」——state 是整个 DO 共用的，
-    // 谁最后连上就变成谁，而连接是每个人各自一条，不会串。
+    // 纵深防御：Worker 的 routeAgentRequest 已校验，这里用同一套密钥独立再验。
+    // 角色写进「连接」而不是 state：state 整个 DO 共用，连接每人一条不会串。
     const info = await verifyTokenInfo(this.env, authToken(ctx.request));
     if (!info) {
       conn.close(1008, "未登录");
@@ -1202,13 +1099,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     const role: Role = info.role;
     conn.setState({ role });
 
-    // 把这一场的历史交给刚连上来的这条连接。
-    //
-    // 为什么必须由这里推：客户端那份消息库只在收到 cf_agent_chat_messages 时才换新，
-    // 而新开的场屋是空的、没有「又落了一条消息」这种事去触发广播 —— 不推这一下，
-    // 切过去看到的一直是上一场的话（标题已经变了，话还是老场的）。
-    // 人屋这边同理：切场是 clearConversation + persistMessages，广播给的是
-    // 「当时挂着的连接」；后来才连上的这条得自己拿一份，不能指望别人替它补。
+    // 把这一场的历史推给刚连上的连接：客户端只在收到 cf_agent_chat_messages 时换新，
+    // 新场屋是空的、没有新消息触发广播，不推就一直显示上一场的话。
+    // 人屋切场同理：广播只到当时挂着的连接，后来连上的得自己补一份。
     conn.send(
       JSON.stringify({
         type: "cf_agent_chat_messages",
@@ -1216,11 +1109,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       }),
     );
 
-    // 多档来客：票里带着档位 id（v2/v3 票）。快照每次连接都现查 ——
-    // 只在「档位 id 变了」才查的话，管理员调低权益后，旧房间还揣着旧快照照常用。
-    // 查不到 / 停用 / 查询失败都落兜底（currentGuestType 内裁决）。
-    // 没带档位的票（拿前台门禁口令进来的）归内置通用档：它现在也是名册里的
-    // 一行，从前的「全开基线」是这一档种入时的缺省值，管理员可以按件收紧。
+    // 多档来客：票里带档位 id（v2/v3），每次连接现查快照 —— 只在 id 变化时查的话，
+    // 管理员调低权益后旧房间仍拿旧快照。查不到/停用/失败都落兜底（见 currentGuestType）。
+    // 没带档位的票（门禁口令进门）归内置通用档，管理员可按件收紧。
     if (role === "user") {
       const typeId = info.type || COMMON_TYPE_ID;
       this.patchState({
@@ -1229,10 +1120,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       });
     }
 
-    // 来客进门留痕，顺手到主人那间报个到（名册，见 visitor.ts）。
-    // 报不上名（主间没醒）不影响接待，下一回进门再报。
-    // 进门只记在人屋：场屋只是那场对话的运行时，被牵去开门不算进门 ——
-    // 而且这里的 isNewJoin 查的是本地账本，场屋冷启动时表都还没建，不能查
+    // 来客进门留痕并向主人那间报名册；报不上不影响接待，下次进门再报。
+    // 进门只记在人屋：场屋的 isNewJoin 查本地账本，冷启动时表还没建。
     if (!this.isOwnerRoom) {
       if (!this.fixedSessionId && isNewJoin(this.db, this.name))
         this.logVisitor("join", "role=user");
@@ -1242,11 +1131,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     // 场屋和来客屋的人设得去主屋取（人设是共用的，理由见 personaForPrompt）
     if (ownerRoomOf(this.name)) await this.refreshPersona();
 
-    // 场屋是新开的全套运行时，偏好（思考强度/嗓子/深度配置）住在人屋的 state 里 ——
-    // 起步时从「自己那间人屋」抄一份，不然深度思考、嗓子都会回落出厂默认。
-    // 抄的是来客自己的人屋（ownerRoomOf），不是管理员的主屋：来客的偏好是来客的。
-    // 只在开荒那一次抄（activeSession 还空着就是没起步过）：这间屋里之后改过的
-    // 偏好是「每场各自」的，不该在断线重连时被人屋的值冲掉。
+    // 场屋偏好（思考强度/嗓子/深度配置）住在人屋 state 里，起步时抄一份，否则回落出厂默认。
+    // 抄的是这间场屋所属的人屋（ownerRoomOf）—— 来客的偏好是来客自己的。
+    // 只在开荒那一次抄：之后场屋内改过的偏好不该被重连冲掉。
     if (this.fixedSessionId && !this.state.activeSession) {
       try {
         const dir = this.env.COWORK_AGENT.get(
@@ -1261,11 +1148,10 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
           voice: typeof cfg?.voice === "string" ? cfg.voice : "",
           deepConfigId:
             typeof cfg?.deepConfigId === "string" ? cfg.deepConfigId : "",
-          // 称呼也一并带上：寄回人屋的留痕要标「这是谁干的事」，
-          // 名册报到用的也是它（场屋自己没走过进门介绍页）
+          // 称呼一并带上：回寄留痕和名册报到都要标「这是谁」
           guestName: typeof cfg?.guestName === "string" ? cfg.guestName : "",
-          // 签名同理：它是「这个人是谁」的一部分，跟人走、不跟场走 ——
-          // 不抄的话，场屋里 identityBlock 读到的是一间空屋子，管理员就成了没名没姓的「管理员本人」
+          // 签名跟人走、不跟场走：不抄的话场屋 identityBlock 读到空屋，
+          // 管理员就成了没名没姓的「管理员本人」
           adminBio: typeof cfg?.adminBio === "string" ? cfg.adminBio : "",
         });
       } catch {
@@ -1275,9 +1161,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
     const lastActive = this.state.lastActive || 0;
     if (lastActive && Date.now() - lastActive > IDLE_RESET_MS) {
-      // 不再是「清掉」而是「归档」：旧的那场留在会话列表里，随时能翻回去
-      // 固定场（场屋）不做这个：那间屋一辈子只有一场，闲置了也只是闲置，
-      // 「替他开一场新的」是目录屋（人屋）才有的多场玩法
+      // 闲置超一个月不「清掉」而是归档：旧场留在会话列表；固定场（场屋）不做，一场到底。
       if (!this.fixedSessionId) {
         await this.startFreshPreliminary().catch(() => {});
         this.touchLastActive();
@@ -1291,8 +1175,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     // 会话表在第一次连上时就建好，别等到用户去点会话列表
     this.ensureActiveSession();
 
-    // 首次唤醒：播种人格库与初始记忆。
-    // 只在主人那间播 —— 来客那间是另一场对话，不该装着主人的记忆和内核
+    // 首次唤醒播种人格库与初始记忆 —— 只在主人那间，来客不该装主人的记忆和内核。
     if (
       this.isOwnerRoom &&
       !this.state.selfModel &&
@@ -1319,14 +1202,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 记下「他最后看的是哪间屋、哪一场」—— 只由人屋持有（见 state.ts 的 lastRoom 注释）。
-   * 多端登录时人屋先连上，前端读这两格把新开的设备送回最后那一间；
-   * 少了它，每台设备刷新都落回人屋默认场，AB 两端各看各的。
-   * room/session 都空时照清：等于「没在看特定的一场」。
-   *
-   * at 是前端在动作发生的那一刻打的时间戳。多端各自都会来写，这里只收更晚的那笔 ——
-   * 慢半拍才到的那条、旧设备内存里揣着的时刻，都不该把已经记下的新状态顶回去。
-   * at 缺省（0 / 非法）时回落到「此刻」，兼容老前端没带这格的请求。
+   * 记下「他最后看的是哪间屋、哪一场」：多端登录时前端据此把新设备送回最后那一间。
+   * 只收更晚的 at（多端并发写，旧时刻不能顶回新状态）；at 缺省/非法回落到此刻，兼容老前端。
+   * room/session 都空 = 没在看特定的一场。
    */
   setLastView(room: string, session: string, at: number): ChatState {
     const when = Number.isFinite(at) && at > 0 ? Math.floor(at) : Date.now();
@@ -1344,13 +1222,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   /** 来客聊天的滑动窗口时间戳（只对来客房间有意义，见 onChatMessage 开头的限速） */
   private guestChatTimes: number[] = [];
 
-  /**
-   * 报个时辰。
-   *
-   * 内存里它随时是新的（闲置判定读库里的值，差几分钟不影响三十天那把尺子），
-   * 落库最多五分钟一次 —— 每连一次、每切一场都写一整份 state blob 太贵，
-   * 而这份写入换回来的信息只有「他刚才在」。
-   */
+  /** 报个时辰。内存里随时是新的，落库最多五分钟一次 —— 只为「他刚才在」写整份 blob 太贵。 */
   private touchLastActive(): void {
     const now = Date.now();
     if (now - this.lastActiveFlushed < LAST_ACTIVE_FLUSH_MS) return;
@@ -1377,13 +1249,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     }
   }
 
-  /**
-   * 翻「她正在想什么」的那一次调用。
-   *
-   * 和别的小活（起标题、拟提醒）不一样，这一句是有保质期的：她下一句正文都出来了，
-   * 再翻出来也没地方摆。所以给它一个上限，超时就当没翻出来 —— 宁可少说一句，
-   * 不能攒着一堆过期的独白一起推出去。
-   */
+  /** 翻「她正在想什么」的一次调用。这句有保质期：超时当没翻出来，宁可少说一句。 */
   private async thinkAsk(system: string, user: string): Promise<string> {
     const model = this.maintModel();
     if (!model) return "";
@@ -1397,7 +1263,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       });
       return text.trim();
     } catch (e) {
-      // 这一句失败了没什么可学的，但一声不吭会让「这个功能一直没生效」查不出原因
+      // 失败只记日志：「这个功能一直没生效」才有据可查
       console.error("[think] 这一句没翻出来：", e);
       return "";
     }
@@ -1411,12 +1277,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 把外部给的一段消息编成人读得下的稿子。回想用。
-   *
-   * 和 transcript 的区别就一条：那个只看「最近几条」，这个吃谁给的那一段 ——
-   * 回想要读的是「上次回头之后新添的那一段」，起点由游标定，不由条数定。
-   * 说话人写「用户」「我」而不是 user/assistant：这一轮是他在读自己的事，
-   * 用 role 那两个词会让它读起来像日志。
+   * 把指定一段消息编成人读得下的稿子（回想用）：起点由游标定，不由条数定。
+   * 说话人写「用户/我」而不是 role —— 这一轮是他在读自己的事，不要像日志。
    */
   sessionTranscript(msgs: UIMessage[]): string {
     return msgs
@@ -1441,9 +1303,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 对本场对话做上下文压缩：把「很久以前」折进一段摘要，只把近处原样交给模型。
-   * 存储不动（this.messages 永远保留完整原文，recall / 会话回顾仍翻得到），
-   * 压缩只改「模型看到的窗口」。摘要按会话存在 sessions 表，切走再切回也不丢。
+   * 上下文压缩：久远部分折进摘要，只改「模型看到的窗口」，原文不动。
+   * 摘要按会话存 sessions 表，切走再切回不丢；recall / 会话回顾仍翻得到完整原文。
    */
   private async compactContext() {
     this.ensureSessions();
@@ -1476,10 +1337,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     await this.persistMessages([], undefined, { _deleteStaleRows: true });
   }
 
-  /**
-   * 清空当前这场：消息和它的压缩摘要一起清。
-   * 只清消息会留下一个描述「已经不存在的对话」的摘要，下一轮就被当记忆喂回去。
-   */
+  /** 清空当前这场：消息和压缩摘要一起清，否则摘要会描述一个已不存在的对话。 */
   async resetActiveSession(): Promise<void> {
     const id = this.state.activeSession;
     await this.clearConversation();
@@ -1487,11 +1345,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   // ── 会话：列表 / 新建 / 切换 / 改名 / 删除 / 公开 ──────
-  //
-  // 消息本体仍由 AIChatAgent 管（cf_ai_chat_agent_messages），这里只负责「哪一场」：
-  // 切换会话 = 把当前消息存回旧会话 → 清空 → 把新会话的消息灌回 AIChatAgent。
-  // 借用 persistMessages 而不是另起一套消息表，是因为对话主循环、工具调用、
-  // 流式续传全都挂在基类那张表上，绕开它等于把这些能力重写一遍。
+  // 消息本体仍由 AIChatAgent 管（cf_ai_chat_agent_messages）；这里只管「哪一场」：切场 = 存旧 → 清空 → 灌新。
+  // 借用 persistMessages 是因为对话主循环、工具调用、流式续传都挂在基类那张表上。
 
   /** 会话标题：拿第一句用户发言当名字，比「新会话」有用得多 */
   private deriveTitle(): string {
@@ -1501,16 +1356,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 让模型给这场对话起个名字（跑在 waitUntil 里，不占用户的时间）。
-   *
-   * 为什么不是「截第一句话前 18 个字」：开场白常常什么信息都没有 ——
-   * 「在吗」「帮我看个东西」，截出来一排半句话，侧栏看着不像一串话题，
-   * 像一串被掐断的句子。让模型读完开场和我的第一句回答，它才知道这场在说什么。
-   *
-   * 只起一次。之后话题岔开了也不改写：这个名字是管理员回忆这场对话时用的那个，
-   * 不是最新一条消息的摘要 —— 会自己改名的通讯录比不改的更烦人。
-   *
-   * 失败就什么都不做，named 还留着 0，下一轮自然会再试一次。
+   * 让模型给这场起名（跑在 waitUntil，不占用户时间）：截首句往往只剩「在吗」这类半句。
+   * 只起一次，之后不随话题改写；失败留空，下一轮再试。
    */
   private async nameSession(): Promise<void> {
     const id = this.state.activeSession;
@@ -1549,12 +1396,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 把当前对话写回它所属的会话。每轮结束、切会话、列列表时都会调。
-   *
-   * 只有真写了新内容才报时辰（last_active）。翻列表、点开一场旧的、
-   * 切回来又切回去 —— 这些都会走到这里，但内容一个字没变，
-   * 那就连时间都不该动：列表是按 last_active 排的，动一下她就跳到最前面，
-   * 而「我刚才点了一下」根本不算「这场又有话说了」。
+   * 把当前对话写回所属会话（轮尾、切场、列列表时都调）。
+   * 只有真写了新内容才报时辰 —— 列表按 last_active 排，点开看一眼不该让这场跳到最前。
    */
   private snapshotSession(): void {
     this.ensureSessions();
@@ -1563,29 +1406,19 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     const changed = saveSessionMessages(this.db, id, this.messages);
     if (changed) {
       touchSession(this.db, id, new Date().toISOString());
-      // 场屋真落了新话：目录行的时辰跟着走，侧栏「哪场刚说话哪场浮上来」才有据
-      // ——不然行序永远停在登记那一刻，多场并行就乱了先后
+      // 场屋落了新话：目录行时辰跟着走，侧栏才能按「哪场刚说话」排序
       if (this.fixedSessionId) this.reportHomeSessionUpdate(id);
     }
   }
 
   /**
-   * 保证「当前有一个会话」—— 但只保证指向，不许诺落库。
-   *
-   * 三种情况：
-   * - 指向的会话在库里 → 原样返回；
-   * - 指向在、库里没有（预备栏）→ 只把指向带回去，落库交给 ensureRealSession；
-   * - 压根没有指向 → 老实例手上还揣着没落过库的对话，立刻收进去；
-   *   空着手的新台子只立一根预备栏，等第一句话来了再落库。
-   *
-   * 为什么读路径不落库：从前这里会顺手 insert 一行「新会话」，删一场旧会话
-   * 就多一行空的，列表越删越长。现在「建行」这件事只有聊天入口（ensureRealSession）有权做。
+   * 保证「当前有一个会话」，但只保证指向、不落库：指向在（含预备栏）就原样返回；
+   * 没有指向时，老实例手上已有消息的立刻收进新会话，空台子只立预备栏。
+   * 建行只有聊天入口（ensureRealSession）有权做 —— 读路径顺手 insert 会让列表越删越长。
    */
   private ensureActiveSession(): string {
     this.ensureSessions();
-    // 固定场（场屋）：屋名即场 id，指向永远是它，没有「三情况」可言。
-    // 落库交给聊天入口（ensureRealSession）—— 屋里没有行就说明还没人开口，
-    // 和人屋的预备栏一个道理，只是这里连指向都不会变
+    // 场屋：屋名即场 id，指向永远是它；库里没有行说明还没人开口，落库交给聊天入口
     const fixed = this.fixedSessionId;
     if (fixed) {
       if (this.state.activeSession !== fixed)
@@ -1603,8 +1436,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
         title: this.deriveTitle(),
         visibility: "private",
         created: new Date().toISOString(),
-        // 已经带着内容的（老实例第一次建表）算「早就有名字了」，
-        // 不去动一场旧对话的名字；空着的就留给模型，等管理员开口那一轮起
+        // 已带内容的算「早就有名字」；空的留给模型，等管理员开口那一轮起
         named: true,
       });
       this.patchState({ activeSession: id });
@@ -1616,11 +1448,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return id;
   }
 
-  /**
-   * 预备栏转正：这一轮真的有话要说了，才把当前指向落成一行会话。
-   * 只有聊天的入口（onChatMessage）调它 —— 列列表、切会话、删会话这些读路径
-   * 永远不许顺手建行，不然「新会话」按钮每按一次就多一行空会话。
-   */
+  /** 预备栏转正：真有话要说才落一行。只有聊天入口调它，读路径永远不许建行。 */
   private ensureRealSession(): string {
     const id = this.ensureActiveSession();
     if (getSession(this.db, id)) return id;
@@ -1633,16 +1461,14 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       named: false,
     });
     saveSessionMessages(this.db, id, this.messages);
-    // 场屋落位：回目录屋（人屋）登记一行指路牌（幂等，点名的场不会被顶掉），
-    // 侧栏才看得到这场 —— 行是登记来的，存储还在这间屋里
+    // 场屋落位：回目录屋登记指路牌（幂等，点名的场不会被顶掉），存储仍在这间屋
     if (this.fixedSessionId) this.reportHomeRegistration(id);
     return id;
   }
 
   /**
-   * 场屋落位回报：把这一场登记到目录屋（人屋）的会话表里。
-   * 目录屋的行是「指路牌」—— home 指向这间场屋，前端按它换连接；场屋自己的行才是存储。
-   * 报不上（目录屋没醒、RPC 抖了）不拦聊天：侧栏晚点出现而已，消息一条不丢。
+   * 场屋落位回报：在目录屋登记指路牌（home 指回本屋，前端按它换连接），存储仍在本屋。
+   * 报不上不拦聊天：侧栏晚点出现，消息一条不丢。
    */
   private reportHomeRegistration(id: string): void {
     const owner = ownerRoomOf(this.name);
@@ -1662,9 +1488,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 场屋回报目录屋：这一场定名了（title），或者又有了新话（只报时辰）。
-   * 目录行的时辰不走，侧栏「哪场刚说话哪场浮上来」就成了空话 —— 行序永远停在登记那一刻。
-   * 报不上不拦聊天：目录屋没醒、RPC 抖了，侧栏晚半拍更新而已，消息一条不丢。
+   * 场屋回报目录屋：定名或又有了新话（只报时辰）。报不上不拦聊天，消息一条不丢。
    */
   private reportHomeSessionUpdate(id: string, title?: string): void {
     const owner = ownerRoomOf(this.name);
@@ -1685,19 +1509,16 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   /** 每轮回答结束、消息已落库之后再快照，这样存进去的才是完整的一轮 */
   protected async onChatResponse(result: ChatResponseResult): Promise<void> {
-    // 这一轮结束了：节拍器收工，别再翻「她正在想什么」——
-    // 正文都出来了，再飘一句过去只会压在答案上面
+    // 这一轮结束了：节拍器收工，正文已出，不再翻「她正在想什么」
     this.thinker.end();
     // 先把悬空的工具调用收干净，历史、界面、下一轮 API 三边才对得上
     await this.healDanglingToolCalls();
-    // 这一轮断没断、为什么断：把采集到的原始死因翻成人话写进 state.turnErrors。
-    // 借 setState 同时做到「落库」与「实时同步」—— 刷新、换设备都还看得到，
-    // 界面上按 messageId 挂在那一轮的回答下面（见 web 的 TurnErrorCard）。
+    // 断没断、为什么断：翻成人话写进 state.turnErrors，借 setState 落库并实时同步，
+    // 界面按 messageId 挂在那一轮下面（见 web 的 TurnErrorCard）
     this.reportTurnError(result);
     // 统计和额度都在这儿收口：一轮写一次，而不是每条语句、每次工具调用写一次
     this.flushToolStats();
-    // 状态原样进日志：aborted（连接/客户端叫停）和 skipped（切会话推进代际）
-    // 在界面上长一个样，排障时是两回事
+    // 状态原样进日志：aborted 与 skipped 界面上一样，排障时是两回事
     this.meter.turn(
       result.status === "completed" ? "回答" : `中断(${result.status})`,
     );
@@ -1706,29 +1527,21 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       this.snapshotSession();
       // 场屋轮尾寄原话索引回主屋：跨场 recall 靠它（消息本体不动，只寄目录行）
       this.syncRecallIndex();
-      // 有人说话了：这一场「休息态」的计时从头开始。
-      // 每轮都整体重设而不是「只在第一次排上」—— 一轮一轮往后推，
-      // 推的正是「最后一次发言之后半小时」这个概念本身。
-      // 只在主人那间：来客那几场没有「她自己回头看」这回事
+      // 有人说话了：这一场休息态计时从头开始，每轮整体重设 = 「最后一次发言后半小时」。
+      // 只在主人那间（来客那几场没有「她自己回头看」）
       if (this.isOwnerRoom && this.state.activeSession)
         this.ctx.waitUntil(
           scheduleRecap(this, this.state.activeSession).catch(() => {}),
         );
-      // 起标题得读完这一轮说过的话才起得准，所以它只能在回答之后；
-      // 但绝不能让管理员等 —— 丢进 waitUntil，名字晚半拍出现就是了。
+      // 起标题要在回答之后，但绝不让人等 —— 丢进 waitUntil，晚半拍出现即可
       this.ctx.waitUntil(this.nameSession().catch(() => {}));
     }
   }
 
   /**
    * 把这一轮的原始死因翻成人话，追加进 state.turnErrors。
-   *
-   * 采集点见 onChatMessage：流级 onError、abortSignal、onFinish 的 finishReason。
-   * 三个都只在 console 里留过痕，界面上一片干净 —— 人只看到「没跑完」，
-   * 于是「工具链是不是坏了」永远只能靠猜。这里让死因上桌：title 说是什么事、
-   * detail 说怎么办、raw 是给开发者的原始报文（界面折叠，管理员可展开）。
-   *
-   * 全正常（completed 且没截断）时 describeTurn 返回 null，这里一个字都不写。
+   * 采集点见 onChatMessage：流级 onError、abortSignal、onFinish 的 finishReason；全正常时不写。
+   * raw 是给开发者的原始报文（界面折叠）。
    */
   private reportTurnError(result: ChatResponseResult): void {
     const desc = describeTurn({
@@ -1751,18 +1564,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 收尾兜底：一轮结束后，历史里不该再留「有调用、没结果」的悬空工具卡。
-   *
-   * 轮次中断的方式很多：连接断过、进程被部署重启、输出上限正好掐在工具参数
-   * 流到一半（大 SVG 之类的长参数尤其容易）。这些情况下那张卡会永远停在
-   * 「结果没回来」，更糟的是历史里躺着一个没有结果的 tool call —— Anthropic
-   * 格式要求 use 和 result 成对，悬空的历史轻则模型困惑，重则下一轮整轮发不出去。
-   *
-   * 所以每轮结束都扫一遍，把悬空的调用补成 **诚实的失败**：state 记 output-error，
-   * 界面上是红色的「出错」而不是绿色的「完成」；下一轮 SDK 会把它当错误结果
-   * 喂回模型 —— 她看到失败，自己决定简化重试还是换条路。这正是工具出错该有的
-   * 样子：报错，但不炸整轮。等人点头的两态（approval-requested /
-   * approval-responded）是合法等待，不动。
+   * 收尾兜底：把「有调用、没结果」的悬空工具卡补成诚实的失败（output-error）。
+   * 悬空历史违反 Anthropic use/result 成对要求，轻则模型困惑，重则下一轮整轮发不出去。
+   * approval-requested / approval-responded 是合法等待，不动。
    */
   private async healDanglingToolCalls(): Promise<void> {
     const dangling = new Set<string>(["input-streaming", "input-available"]);
@@ -1784,21 +1588,15 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
           part.type.startsWith("tool-") || part.type === "dynamic-tool";
         if (!isTool || !part.state) return p;
         const hasInput = !!part.input && typeof part.input === "object";
-        // 两件事都要管：
-        //   1) 悬空的调用（参数还在流里 / 已到齐但没跑）—— 补成诚实的失败；
-        //   2) 早就补过、当时却没补 input 的旧账 —— 老会话里已经躺着这种记录，
-        //      不修这一场永远发不出去，改完还是「没用」。
+        // 两件事都要管：悬空调用补成失败；旧账里 output-error 却没有 input 的也要修，
+        // 不修这一场永远发不出去。
         const heal = dangling.has(part.state);
         const repairInput = part.state === "output-error" && !hasInput;
         if (!heal && !repairInput) return p;
         msgChanged = true;
-        // 参数没到齐就被掐断的调用，input 是空的 —— 空 input 原样进历史会变成
-        // 毒药：序列化成 tool_use 时 input 字段整个消失（AI SDK 对 output-error
-        // 取 part.input ?? part.rawInput，都没有就是 undefined），严格的厂商
-        // （DeepSeek 的 /anthropic 兼容端）直接 422「missing field input」，
-        // 此后这一场每一轮都发不出去 —— 一次中断就把整场毒死，看着就像「这功能
-        // 坏透了、改了也没用」。补一个空对象：界面上照旧是红色的「出错」，
-        // 但历史里那条调用是合法的，下一轮照常发得出去
+        // 空 input 进历史会让整场发不出去：序列化成 tool_use 时 input 字段消失（AI SDK 取
+        // part.input ?? part.rawInput），严格厂商（DeepSeek 的 /anthropic 兼容端）直接 422
+        // 「missing field input」，此后每轮都被拒。补空对象后界面仍显示红色「出错」。
         return {
           ...(p as object),
           state: "output-error",
@@ -1814,14 +1612,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     if (changed) await this.persistMessages(healed);
   }
 
-  /**
-   * 断线续跑前的清场。
-   *
-   * chatRecovery 在被掐断的轮次上做的恢复是「残段落库 + 接着续跑」，但被掐断的
-   * 那轮，最后一件事多半是「工具调用发出去了、结果还没回来」——这样的残段直接
-   * 交给模型，Anthropic 会因为 use 和 result 不成对把整个请求拒掉，续跑永远失败，
-   * 回复永远停在半截。先把悬空调用补成「没跑成」，历史合法了，续跑才接得上去。
-   */
+  /** 断线续跑前清场：先把悬空调用补成「没跑成」，否则 Anthropic 因 use/result 不成对拒掉整个请求。 */
   override async _chatRecoveryContinue(data?: {
     targetAssistantId?: string;
   }): Promise<void> {
@@ -1836,11 +1627,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return listSessions(this.db);
   }
 
-  /**
-   * 被标成公开的那些会话（只列元信息，不含正文）。
-   * 公开会话的入口暂时收着 —— 来客现在只看自己那几场，所以只有管理员够得到这里。
-   * 留着是因为「要不要让人读我们的某一场」这件事本身还没想明白，不是因为忘了删。
-   */
+  /** 被标成公开的会话（只列元信息）。入口暂时收着：来客只看自己那几场，目前只有管理员够得到。 */
   listOpenSessions(): SessionMeta[] {
     this.ensureSessions();
     return listPublicSessions(this.db);
@@ -1865,12 +1652,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 换会话之前，把正在说的那一轮收干净。
-   *
-   * 不收的话，旧会话里那个还在生成的回答会跟着落到新会话 —— 我换了话题，
-   * 她的回答却追过来，张冠李戴。基类在每一轮结束时会把结果存下来，但会先看
-   * 「轮次代际」还对不对；这里把它推进一格，那个迟到的结果就会被跳过。
-   * 顺手也把客户端的「正在回应…」清掉，不然新开一场就是忙碌态，还带着个停按钮。
+   * 换会话前把正在说的那一轮收干净：推进轮次代际，让迟到的结果被跳过，
+   * 顺手清掉客户端「正在回应…」，否则新一场开局就是忙碌态。
    */
   private settleTurn(): void {
     try {
@@ -1880,11 +1663,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     }
   }
 
-  /**
-   * 归档开新场（目录屋的闲置路径）：旧的那场已经在会话列表里躺着了（有行才谈得上归档），
-   * 这边把眼前收好、把指向翻到一根新的预备栏上 —— 空场不占侧栏。
-   * 为什么不走 createSession：开新会话 = 开一间新屋，闲置归档不该凭空起一间屋。
-   */
+  /** 目录屋的闲置路径：收好眼前、指向新的预备栏（空场不占侧栏）；不建新屋。 */
   private async startFreshPreliminary(): Promise<void> {
     this.ensureActiveSession();
     this.settleTurn();
@@ -1894,14 +1673,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 开新会话 = 开一间新的场屋（一个会话一间完整运行时）。
-   * 这一屋（目录屋）自己一动不动：当前那场留在原地继续收消息，
-   * 新场是另一间屋、另一条连接 —— 多场并行就是这么来的。
-   * 所以这里不再有「收拢旧场、清空眼前」那一套，那是老式单运行时的做法。
-   *
-   * 点了名的（或要公开的）当场在目录里落一行，home 指向新屋；
-   * 没点名的连目录行都不立 —— 侧栏不攒空行，等那间屋的第一句话落位时自己回来登记。
-   * 两种情况都回一个完整 meta：home 就是新屋名，前端拿它去开那条新连接。
+   * 开新会话 = 开一间新场屋（一会话一运行时），本屋不动，多场并行由此而来。
+   * 点名或要公开的当场落目录行（home 指向新屋）；没点名的等第一句话落位时自己登记。
+   * 两种情况都回完整 meta，前端拿 home 去开新连接。
    */
   async createSession(
     title?: string,
@@ -1913,9 +1687,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     this.ensureSessions();
     const id = newSessionId();
     const home = sessionRoom(this.name, id);
-    // 屋此刻不建，只把 id 和屋名算好（建 stub 不会实例化 DO，这一步不花钱）：
-    // 等人真把第一句话发出来、前端换连接过去时它才冷起一次，
-    // 而那句话正好落进那间新屋的第一轮里。没人说过话的场，就不会有屋。
+    // 只算好 id 和屋名，不建 stub（不实例化 DO 不花钱）；第一句话到达时它才冷起，
+    // 而那句话正好落进新屋的第一轮。没人说过话的场，就不会有屋。
     const now = new Date().toISOString();
     const wanted = (title || "").trim();
     const finalVisibility: SessionVisibility =
@@ -1949,21 +1722,14 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 我自己开一场，把一件事说清楚 —— 不进他现在这一场，也不把他从正在聊的事里掀走。
-   *
-   * 为什么不复用 createSession：那个是「他点了新对话」，会把当前这场存好、
-   * 把眼前的对话换成新的。我开口不该有这个权力：他在忙别的，我就把这场放在那儿，
-   * 他得空再进去看。这是「不打断」的具体做法，不是一句客气话。
-   *
-   * 开出来的这一场带着「他还没看过」的记号：侧栏那一行先闪一下，之后留个角标，
-   * 直到他点进去。没有这个记号的话，列表里多一行跟一次普通刷新长得一模一样。
+   * 我自己开一场（不进他当前这场、不掀走他）：不复用 createSession，因为它会切换当前对话。
+   * 新场带未读记号，直到他点进去 —— 否则多一行和一次普通刷新没区别。
    */
   async openSession(input: {
     content: string;
     title?: string;
   }): Promise<SessionMeta> {
-    // 场屋里没有「另开一场」的地盘：她主动开的场永远开在目录屋，消息也记那边 ——
-    // 不然行和消息落在这间场屋，指路牌却画在人屋的目录里，切过去就是一场空
+    // 场屋不另开场：她主动开的场落在目录屋，否则指路牌与人屋目录对不上
     const owner = ownerRoomOf(this.name);
     if (owner) {
       const home = this.env.COWORK_AGENT.get(
@@ -1982,8 +1748,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       "我找你有点事";
     const id = newSessionId();
     const now = new Date().toISOString();
-    // named = 1：这场是我带着一个由头开的，名字就是那个由头，
-    // 不该等他回一句之后被「第一句话摘要」改写掉
+    // named=1：名字就是这次的由头，别被第一句话摘要改写
     insertSession(this.db, {
       id,
       title,
@@ -1997,8 +1762,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       parts: [{ type: "text", text: content }],
     });
     markSessionUnread(this.db, id);
-    // 主动开口的记账：面板上「今天她说几次」得把这一场也算进去，
-    // 不然我改成另开会话说之后，那个数字会莫名其妙掉下来
+    // 主动开口的记账：面板「今天她说几次」要算上这一场，否则数字会莫名掉下来
     markSaysDelivered(this.db, [enqueueSay(this.db, id, content).id]);
     this.notify(`我另开了一场：「${title}」`);
     return getSession(this.db, id)!;
@@ -2027,11 +1791,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     const restored = loadSessionMessages(this.db, id);
     if (restored.length) await this.persistMessages(restored);
     this.patchState({ activeSession: id });
-    // 这里不报时辰：点开看一眼不是「这场又聊过了」。
-    // 从前这里会写一次 last_active，于是点哪一场哪一场就跳到列表最前面 ——
-    // 顺序被「谁被点过」决定，而不是被时间决定，白写一行还乱。
-    // 他点开了，就是看过了。清在这儿而不是等他再点一次「知道了」——
-    // 多一步的手续换不来什么，只会让角标多赖一会儿
+    // 这里不报时辰：点开看一眼不算「这场又聊过了」，否则列表顺序被「谁被点过」决定。
+    // 点开即视为看过，顺手清未读。
     markSessionRead(this.db, id);
     return getSession(this.db, id);
   }
@@ -2044,12 +1805,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 跨会话回忆：他说「上次我们聊过的那个」，我在全部历史会话里按关键词翻。
-   * 返回命中片段（带会话名与说话人），由 recall 工具拼成文字给他看 ——
-   * 这让他知道我不只是记着这一场，更早的约定、方案、决定我都还能接得上。
-   *
-   * 场屋里翻两处：本屋（就这一场）加主屋（老场 + 各场寄回的原话索引）——
-   * 「上次」可能是在别的场聊的，屋里的翻不到不等于没聊过。
+   * 跨会话回忆：在全部历史会话里按关键词翻，返回命中片段（带会话名与说话人）。
+   * 场屋翻两处：本屋 + 主屋（老场 + 各场寄回的原话索引）——「上次」可能在别的场。
    */
   async recall(query: string): Promise<RecallHit[]> {
     this.ensureSessions();
@@ -2085,9 +1842,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   private recallCursor = 0;
 
   /**
-   * 记忆检索统一入口：本地搜 +（场屋身份）主屋远端搜，合并去重。
-   * 合并时主屋优先（by id）：主屋是汇聚点，管理员面板改的就是那边，状态最新；
-   * 本地条目只在主屋没有时补上 —— 刚记下的、主屋还没收到账的，靠本地这份兜底。
+   * 记忆检索统一入口：本地 +（场屋）主屋远端，按 id 合并。主屋是汇聚点、状态最新，优先；
+   * 本地只补主屋没有的（刚记下、主屋还没收到账的靠它兜底）。
    */
   private async searchMemoriesMerged(
     q: string,
@@ -2123,11 +1879,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 记忆盘点统一入口：本地盘 +（场屋身份）主屋远端盘。
-   *
-   * 主屋是汇聚点（各场写下的都寄回一份），所以场屋里「全局盘点」就等于主屋那份。
-   * 拿不到主屋时退回本地盘 —— 报得少一点，也强过把有记忆的屋说成空的。
-   * 主屋本尊和来客房都只盘本地：前者的本地就是全局，后者的门另有 public 关着。
+   * 记忆盘点：场屋以主屋那份为全局，取不到退回本地盘（少报胜过把有记忆说成空）。
+   * 主屋本尊与来客房只盘本地 —— 前者的本地即全局，后者另有 public 门。
    */
   private async statsMemoriesMerged(): Promise<MemoryStats> {
     const local = memoryStats(this.db);
@@ -2144,9 +1897,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 记忆书架浏览统一入口：本地列 +（场屋身份）主屋远端列，按 id 合并去重（主屋优先）。
-   * 合并规则与 searchMemoriesMerged 一致 —— 三条读路（search/list/stats）口径对齐，
-   * 才不会出现「搜得到、却说你没有」这种自相矛盾。
+   * 记忆书架浏览：本地 +（场屋）主屋远端，按 id 合并去重、主屋优先。
+   * 规则与 search/stats 一致 —— 三条读路对得上，才不会「搜得到却说没有」。
    */
   private async listMemoriesMerged(
     shelf: string | undefined,
@@ -2182,31 +1934,21 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return getSession(this.db, id);
   }
 
-  /**
-   * 收起 / 展开一场。归档只是从列表最上面那一段挪走，内容与摘要一个字都不动，
-   * 翻旧账（recall）照样搜得到 —— 所以这里不需要任何「恢复」逻辑，展开就回来了。
-   */
+  /** 收起/展开：归档只挪出列表，内容与摘要不动，recall 照样搜得到，所以无需恢复逻辑。 */
   setSessionArchived(id: string, archived: boolean): SessionMeta | null {
     this.ensureSessions();
     if (!setSessionArchived(this.db, id, archived)) return null;
     return getSession(this.db, id);
   }
 
-  /**
-   * 置顶 / 取消置顶。它只影响侧栏摆在哪一段，与归档、公开都无关 ——
-   * 所以这里同样不需要任何连带处理，置上去就是排到置顶区末尾（按置顶时刻）。
-   */
+  /** 置顶只影响侧栏分段，与归档、公开无关，无连带处理。 */
   setSessionPinned(id: string, pinned: boolean): SessionMeta | null {
     this.ensureSessions();
     if (!setSessionPinned(this.db, id, pinned)) return null;
     return getSession(this.db, id);
   }
 
-  /**
-   * 删一场。删掉的正好是当前这场时，就地清空并立一根预备栏 ——
-   * 不再立刻生成一行「新会话」：从前那一下正是空会话的源头，
-   * 删一场多一行，列表越删越长。预备栏要等他真的开口才转正。
-   */
+  /** 删一场。删的是当前场就清空并立预备栏（不立刻建行）—— 等真的开口才转正。 */
   async deleteSession(
     id: string,
   ): Promise<{ removed: boolean; active: string }> {
@@ -2226,20 +1968,13 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   // ── 提醒：到点自己回来找你 ────────────────────────────
-  //
-  // 时间调度交给基类 schedule()：它落在 SDK 自己的表里，DO 被驱逐后照样在正确
-  // 时刻唤醒，不用自己轮询。这张业务表只回答「提醒的是什么、属于哪一场、
-  // SDK 那边 id 是多少」。
-  //
-  // 和 task 的分工：task 是「要做什么」（没有时间维度），remind 是「什么时候想起它」。
+  // 调度交给基类 schedule()：落在 SDK 表里，驱逐后照样按时唤醒；本表只记提醒内容、场次与 schedule id。
+  // 与 task 的分工：task 是「要做什么」，remind 是「什么时候想起它」。
 
   /**
-   * 定一条提醒。时间由模型换算成绝对时刻传进来。
-   * every 非空 = 重复提醒走 cron；否则一次性走绝对时刻。
-   *
-   * urgent 只对一次性提醒有意义：重复提醒的时刻是他自己排的作息，本来就不受安静时段管。
-   * 一次性提醒到了安静时段会被按到早上（见 fireReminder），这里照原样存，不改他说的那个点 ——
-   * 表里记的是「他要求什么时候」，排程才是「我实际什么时候说」，两者不该混成一个字段。
+   * 定一条提醒。every 非空 = 重复（cron），否则一次性（绝对时刻）。
+   * urgent 只对一次性有意义：重复提醒是他自己排的作息，本就不受安静时段管。
+   * 表里记「他要求的时刻」，排程才是「实际开口时刻」，不混成一个字段。
    */
   async scheduleReminder(input: {
     what: string;
@@ -2272,9 +2007,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     const sessionId = this.ensureActiveSession();
     const mode = input.mode === "new" ? "new" : "same";
     const urgent = !!input.urgent && !input.every;
-    // 一次性走绝对时刻、重复走 cron —— SDK 两条唤醒路径不同，不能混着传。
-    // cron 在 SDK 里按 UTC 解释，北京时间的友好排期在这里换算成等价 UTC cron，
-    // 排程和重启自愈（resyncReminders）必须走同一个换算，不然醒来就对不上点
+    // 一次性走绝对时刻、重复走 cron —— SDK 两条唤醒路径不能混。cron 按 UTC 解释，
+    // 排程与重启自愈（resyncReminders）必须用同一个换算，否则醒来对不上点
     const handle = input.every
       ? await this.schedule(shanghaiEveryToCron(input.every), "fireReminder", {
           id,
@@ -2295,8 +2029,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
         title: mode === "new" ? (input.title || "").slice(0, 24) : "",
       });
     } catch (e) {
-      // 业务行没落库就把刚建好的调度撤掉：不然留下一个指向不存在 id 的孤立任务，
-      // 到点白醒一次，还白占 DO 的写行配额
+      // 业务行没落库就撤掉调度：否则留下指向不存在 id 的孤立任务，白醒一次还白占写行
       await this.cancelSchedule(handle.id).catch(() => {});
       throw e;
     }
@@ -2343,16 +2076,12 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 到点了，SDK 把我叫醒，我该说句话了。怎么投递见 utter()。
-   *
-   * 安静时段里的一次性提醒按到早上，重复提醒照说不误。区别在时刻是谁定的：
-   * 重复提醒的时刻是他自己排的作息（每天九点、每周一），我替他挪就是自作主张；
-   * 一次性提醒多半是随口一句「三小时后叫我」，那个三小时后正好撞上凌晨时，
-   * 他要的不是被叫醒，是别忘了 —— 所以我记着，等天亮再说。
+   * 到点被 SDK 叫醒。安静时段里一次性提醒按到早上，重复提醒照说：
+   * 重复的时刻是他排的作息，替他挪是自作主张；一次性多半是「三小时后叫我」，他要的是别忘了。
    */
   async fireReminder(payload: { id: string }): Promise<void> {
-    // 同一条提醒的两次唤醒只投一次：durable queue 会重投，实例重建的自愈也会补投。
-    // 「已投递」的账要等说完话才落（下面 markReminderFired），中间那段重叠就是重复提醒。
+    // 同一提醒的两次唤醒只投一次：durable queue 会重投，实例重建的自愈也会补投；
+    // 「已投递」要等说完话才落账，中间这段重叠就是重复提醒。
     if (this._firingReminders.has(payload.id)) return;
     this._firingReminders.add(payload.id);
     try {
@@ -2376,12 +2105,10 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       return;
     }
 
-    // 他要求的是凌晨那个点，我说的时候已经是早上了 —— 那就得交代一句，
-    // 不然他会以为我搞错了时间。判断依据是「原定的点落在安静时段里」。
+    // 原定点落在安静时段才交代一句，否则他会以为我把时间搞错了
     const late = inQuietHours(new Date(r.at)) ? r.at : "";
     const line = await this.reminderLine(r, late);
-    // 话是同一句，落哪儿分两种：回原来那一场，或者另立一场（定时会话）。
-    // 后者的内容本来就是「值得单独立一场」的事，所以顺手把这场开出来。
+    // 落点分两种：回原来那一场，或另立一场（定时会话）
     if (r.mode === "new") {
       await this.openSession({ content: line, title: r.title || r.what });
     } else {
@@ -2391,11 +2118,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 把一条提醒按到安静时段结束。
-   *
-   * 不动表里的 at：那是「他要求什么时候」，改了就等于篡改他的原话；
-   * 挪的只是排程 —— 那个才代表「我实际什么时候开口」。
-   * 状态仍是 pending，所以中途出任何岔子，onStart 的自愈会把它捞回来。
+   * 把一条提醒按到安静时段结束：只挪排程，不改表里的 at（那是他的原话）。
+   * 状态仍是 pending，中途出岔子由 onStart 的自愈捞回。
    */
   private async holdReminder(r: Reminder, until: Date): Promise<void> {
     if (r.scheduleId) await this.cancelSchedule(r.scheduleId).catch(() => {});
@@ -2403,19 +2127,12 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     setReminderScheduleId(this.db, r.id, handle.id);
   }
 
-  /**
-   * 主动开口的统一入口：提醒和盯梢都从这里说出去。
-   *
-   * 为什么不立刻说：盯梢常常是同一分钟里好几条一起变（都是「每小时看一次」的，
-   * 自然同时醒）。立刻说就是几条连珠炮，攒一分半再说就是一句话把几件事讲完 ——
-   * 前者会让他想关掉提醒，后者才是「她替我把事情理顺了」。
-   */
+  /** 主动开口的统一入口（提醒与盯梢）：攒一分半再说，把同时醒的几条合成一句话。 */
   private async utter(sessionId: string, line: string): Promise<void> {
     if (!line.trim()) return;
     this.ensureSpeak();
     enqueueSay(this.db, sessionId, line);
-    // 同一时刻只留一个待执行的 flush（schedule 按名字+参数去重），
-    // 所以这一分半里攒下的都会在同一个点上一起说出去
+    // 同一时刻只有一个待执行的 flush（schedule 按名+参数去重），这一分半攒的一起说
     await this.schedule(
       new Date(Date.now() + SAY_DEBOUNCE_MS),
       "flushSays",
@@ -2426,8 +2143,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   /** SDK 到点叫我：把攒着的说出去。 */
   async flushSays(): Promise<void> {
-    // 两次唤醒共用一次投递：speak 是 await 的，其间第二次 flush 若各读一遍 pending，
-    // 同一批话会被说两遍 —— markSaysDelivered 要等说完才落账，挡不住这个窗口
+    // 并发 flush 共用一次投递：speak 是 await，各读一遍 pending 会把同批话说两遍
     return (this._flushingSays ??= this.deliverSays().finally(() => {
       this._flushingSays = null;
     }));
@@ -2458,17 +2174,12 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 人不在界面前时，把这一批主动消息另寄一份到邮箱。
-   *
-   * 「不在界面前」用的是**这句有没有进他当前那一场**这个当场就看得出的事实，
-   * 没有去赌运行时的 WebSocket 计数：那个数我在这里既测不到也没法写成用例，
-   * 拿它当闸只会得到一个「静默不寄、也没人能证明为什么」的黑盒。
-   *
-   * 一批一封（与界面上「攒一分半再说」同一条理由：连珠炮的邮件只会让人关掉这一档）。
-   * 寄不动不打扰他：邮件这一路的失败只进发件箱流水，不改界面那条的账。
+   * 人不在界面前时，把这批主动消息另寄一份邮箱。
+   * 「不在」看这句有没有进他当前那一场，不赌 WebSocket 计数（测不到、无法写成用例）。
+   * 一批一封（连珠炮邮件只会让人关掉这档）；寄不动只进发件箱流水，不改界面那条的账。
    */
   private async mailMissedSays(lines: string[]): Promise<void> {
-    // 没话可寄就别占额度：这一句不是防御性检查，是「空的一批也去拨号」这个真形状
+    // 空批次不拨号，别占额度
     if (!lines.length) return;
     if (!getMailConfigView(this.db, this.secretBag).sayMail) return;
     const subject =
@@ -2482,13 +2193,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 真正把话说出口：提醒和盯梢最后都落到这里。
-   *
-   * 这句话属于「当初约定它的那一场」：他正开着那一场就直接进对话流；他在别处，
-   * 就只写进那场的历史，等他切回去看得到 —— 硬塞进当前会话等于打断他正在聊的事。
-   * 除了这两条路，哪一场都不进：那场已经被删了的话，宁可丢这一句，连 notice 也不发 ——
-   * 局部的事不该串到别场去，串过去只会让人莫名其妙。丢的只是这句话本身，
-   * 提醒自己的账照记（fireReminder / flushSays 该走的收尾一步不少），不影响别的提醒。
+   * 把话说出口：他正开着目标那场就进对话流，否则只写进那场历史（不打断当前话题）。
+   * 那场已删则丢弃这句、连 notice 也不发 —— 宁可丢，不串场；提醒自身的账照记。
    */
   private async speak(sessionId: string, line: string): Promise<SayWhere> {
     const msg: UIMessage = {
@@ -2498,8 +2204,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     };
 
     const target = sessionId ? getSession(this.db, sessionId) : null;
-    // 落点在这里就定下来，不再重读 state：persistMessages 是 await 的，
-    // 期间他可能换了场，重算会把「当场进了流」的那句误判成没进而多寄一封
+    // 落点在此定下，不重读 state：persistMessages 是 await，期间可能已换场，
+    // 重算会把「当场进了流」误判成没进，多寄一封
     const where: SayWhere =
       target && sessionId === this.state.activeSession ? "live" : target ? "history" : "dropped";
     if (where === "live") {
@@ -2508,8 +2214,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       appendSessionMessage(this.db, sessionId, msg);
       touchSession(this.db, sessionId, new Date().toISOString());
     } else {
-      // 那场会话已经删了：这句话不落到任何一场头上。原先这里会塞进当前对话，
-      // 结果就是一句本属于别场的话凭空冒出来（串场）。宁可丢，不串。
+      // 目标会话已删：原先会塞进当前对话造成串场。宁可丢，不串。
       console.warn("[speak] 目标会话已删，这句话不落任何一场", { sessionId });
       return "dropped";
     }
@@ -2517,7 +2222,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return where;
   }
 
-  /** 今天她主动开口了几次。面板上给他看：数字大了，他会知道该关掉几条盯梢。 */
+  /** 今天主动开口的次数（面板用）：数字大了，他会知道该关掉几条盯梢。 */
   proactiveStats(): { today: number; quietNow: boolean } {
     this.ensureSpeak();
     return {
@@ -2527,8 +2232,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 到点说的那句话。交给维护模型，因为提醒本来就是一句话的事。
-   * lateFrom 非空表示这条被安静时段按过：那句话里要交代一句，
+   * 到点说的那句话。lateFrom 非空 = 被安静时段按过，话里要交代一句，
    * 否则他只会觉得我把时间搞错了。
    */
   private async reminderLine(r: Reminder, lateFrom = ""): Promise<string> {
@@ -2563,9 +2267,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     this.queue("vectorizeMemory", entry, { retry: { maxAttempts: 5 } }).catch(
       () => {},
     );
-    // 管理员的场屋：记下的每条都寄快照回主屋并账 —— 主屋是记忆的汇聚点，
-    // 管理员面板和其他场屋的检索都从那边读。走同一个 durable queue，失败重试；
-    // 回调执行时再取快照，寄出去的就是落库后的最终状态
+    // 管理员的场屋：每条记忆寄快照回主屋并账（主屋是汇聚点）。同一个 durable queue 失败重试；
+    // 回调时再取快照，寄出的是落库后的最终状态
     if (ownerRoomOf(this.name) === OWNER_AGENT)
       this.queue(
         "syncMemoryHome",
@@ -2596,11 +2299,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     await owner.acceptMemorySync({ entries, deletedIds });
   }
 
-  /**
-   * 场屋记忆变动并账的排队口（给工具用）。变更类操作（作废、恢复、确认、销疑问、删除）
-   * 不产生新向量，不走 enqueueVector，得从这儿走 —— 同样进 durable queue，
-   * 主屋没醒、RPC 抖了都会重试，本地已经改过的事实不丢。
-   */
+  /** 场屋记忆变更的并账口（给工具用）：变更不产生新向量，也得走 durable queue 让主屋收到。 */
   queueMemorySync(ids: string[], deletedIds: string[] = []): void {
     if (ownerRoomOf(this.name) !== OWNER_AGENT) return;
     if (!ids.length && !deletedIds.length) return;
@@ -2614,9 +2313,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 轮尾把这一轮新落的原话寄回主屋（recall 的跨场索引）。
-   * 消息本体不动，寄的只是「谁在哪场说了什么」的目录行；
-   * 游标记内存 —— 场屋重启后归零，首轮全量重寄一遍，主屋按消息 id 幂等收。
+   * 轮尾把新落的原话寄回主屋做跨场 recall 索引（消息本体不动，只寄目录行）。
+   * 游标在内存：重启归零，首轮全量重寄，主屋按消息 id 幂等去重。
    */
   private syncRecallIndex(): void {
     if (ownerRoomOf(this.name) !== OWNER_AGENT) return;
@@ -2661,12 +2359,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return this.quick(await this.resolveMaintModel(), system, user);
   }
 
-  /**
-   * 一句话的小活：给个模型、给个交代，把答案拿回来。
-   *
-   * 这类活（夜间整理、起标题、拟提醒的措辞）都是锦上添花 ——
-   * 出任何差错都当没干过，绝不能因为它们把主对话拖住。
-   */
+  /** 一句话的小活（夜间整理、起标题、拟提醒措辞）：出任何差错都当没干过，绝不拖住主对话。 */
   private async quick(
     model: LanguageModel | null,
     system: string,
@@ -2683,19 +2376,15 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       });
       return text.trim();
     } catch (e) {
-      // 这类小活失败了没什么可报给用户的，但一声不吭会让「功能一直没生效」查不出原因
+      // 失败只记日志：一声不吭会让「功能一直没生效」查不出原因
       console.error("[quick] 小活没干成：", e);
       return "";
     }
   }
 
   /**
-   * 打断：把这一轮正在生成的回答停下来。
-   *
-   * 客户端自己也会断掉那条 fetch，但它只断得掉「它自己发起的那一轮」——
-   * 刷新页面后恢复的服务端主动推流，它手里没有 requestId，只能本地装死，
-   * 界面上就一直挂着「正在回应…」。所以这里再补一刀，以服务端为准。
-   * 已经说出口的部分留着 —— 那是它说过的话，不是垃圾。
+   * 打断这一轮：客户端只断得掉自己发起的请求，刷新后恢复的推流得服务端补刀。
+   * 已说出口的部分保留。
    */
   async stopGenerating(): Promise<boolean> {
     try {
@@ -2749,20 +2438,10 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return `已整理：${before} 条对话压缩为摘要（累计 ${summaries.length} 条），新增 ${saved} 条洞察记忆。`;
   }
 
-  /**
-   * 手上正有一件「我自己要做的活」。
-   *
-   * 夜间整理和休息态回想都是这种活：都要烧一轮主模型，都不该跟另一件撞在一起。
-   * 撞在一起不只是浪费 —— 两轮同时往记忆里写同一件事，会写成两条。
-   */
+  /** 手上的「自己的活」。夜间整理与休息态回想都要烧主模型，撞在一起会往记忆里写两条。 */
   private selfWork: Promise<unknown> | null = null;
 
-  /**
-   * 有别人在忙就别插队了，返回 null。
-   *
-   * 注意 null 是「这次没轮到我」，不是「我失败了」——
-   * 回想那一轮靠这个区分「跳过」（不重试）和「跑挂了」（重试一次）。
-   */
+  /** 有活就返回 null（= 这次没轮到我，不是失败）；回想据此区分「跳过」与「跑挂了」。 */
   async withSelfWork<T>(fn: () => Promise<T>): Promise<T | null> {
     if (this.selfWork) return null; // 手上还有活：这次就不插队了
     const p = fn().finally(() => {
@@ -2784,8 +2463,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       env: this.env,
       sql: this.db,
       room: this.name,
-      // 产物归档用：聊天轮里 activeSession 已被 ensureRealSession 转正，
-      // 画出来的图就落进这一场的文件夹；场外的活不指场，落根目录
+      // 产物归档：聊天轮已转正会话，图落这一场文件夹；场外活落根目录
       sessionId: this.state.activeSession || undefined,
       guest: !this.isOwnerRoom,
       // 轮内检索缓存与屋子里其他搜索共用一份（onChatMessage 每轮开头清）
@@ -2802,8 +2480,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       writeSelfCore: (content) => agent.writeSelfCore(content),
       writeSelfDemand: (content) => agent.writeSelfDemand(content),
       notify: (text) => agent.notify(text),
-      // 发信：配置、额度、fail-closed 判定全在 src/mail 里，这里只是把工具接上；
-      // 场屋那间必须绕回主屋取配置（见 sendMailViaOwnerRoom），账上写明是工具寄的
+      // 发信：配置/额度/fail-closed 全在 src/mail；场屋必须绕主屋取配置（见 sendMailViaOwnerRoom）
       sendMail: (job) => agent.sendMailViaOwnerRoom({ ...job, source: "tool" }),
       mailOutbox: (limit) => agent.mailOutbox(limit),
       mailInbox: (limit) => agent.mailInbox(limit),
@@ -2830,8 +2507,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       statsMemories: () => agent.statsMemoriesMerged(),
       listMemoriesMerged: (shelf, limit, opts) =>
         agent.listMemoriesMerged(shelf, limit, opts),
-      // 笔记本这一组：我从工具那边动笔时，updated_by 记「assistant」——
-      // 谁改的字要分得开，他下一眼才知道哪几处是我动的
+      // 笔记本：我从工具动笔时 updated_by 记 assistant，让人一眼看出哪几处是我改的
       listNotes: (opts) => agent.listNotes(opts?.q, opts?.tag),
       readNote: (id) => agent.readNote(id),
       saveNote: (input) => agent.saveNote({ ...input, by: "assistant" }),
@@ -2848,9 +2524,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   ): Promise<Response | undefined> {
     // 新一轮新账：先把上一轮的死因攒批清空 —— 这一轮要是又断了，记的是这一轮的真相
     this.turnCapture = null;
-    // 来客限速：一分钟窗口内最多 15 条。正常聊天远够不到这条线——
-    // 够得到的不是聊天，是拿管理员的钱包刷存在感。超限不调模型、不落库，
-    // 广播一条 notice 请对方缓一缓（消息不进历史，这提示本来就是一次性的）。
+    // 来客限速：一分钟最多 15 条，防刷量。超限不调模型、不落库，只广播 notice
     if (!this.isOwnerRoom) {
       const now = Date.now();
       this.guestChatTimes = this.guestChatTimes.filter((t) => now - t < 60_000);
@@ -2864,20 +2538,17 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       this.guestChatTimes.push(now);
     }
 
-    // 预备栏转正：这一轮真的有话说了，当前指向从现在起落成一行会话。
-    // 放在一切读写之前 —— 后面的快照、起名、回想都当它存在
+    // 预备栏转正，放在一切读写之前 —— 后面的快照、起名、回想都当它存在
     this.ensureRealSession();
 
-    // 这一轮用哪个模型：生效的模型目录组优先，没有就回落 Worker secrets 那条旧链。
-    // 房间开着深度思考（thinkMode=deep）时按主线条目的指向取另一组。
-    // 解析结果挂在实例上 —— 维护模型等小活从这拿（见 maintModel），下一轮进来再刷新。
+    // 这一轮用哪个模型：生效目录组优先，没有回落 Worker secrets 旧链；
+    // 深度思考（thinkMode=deep）按主线条目指向取另一组。结果挂在实例上给维护模型用。
     const deepThink = this.state.thinkMode === "deep";
     const resolved = await resolveModel(this.env, () =>
       this.fetchActiveCatalog(deepThink),
     );
     if (!resolved) {
-      // 500 要说真话：目录链挂在哪一环（_catalogDiag 有），还是这台机器
-      // 两条链都没钥匙。只回「API_KEY 未配置」，人只会去查旧链 —— 查错方向
+      // 500 要说真话：_catalogDiag 指哪一环断了，别让人只去查旧链的 key
       const diag = this._catalogDiag;
       return new Response(
         diag
@@ -2900,26 +2571,20 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       .reverse()
       .find((m) => m.role === "user");
     const userText = lastUser ? messageText(lastUser) : "";
-    // 来客的发言本身也是留痕的一部分：记原文（visitor.ts 里会截到 300 字）。
-    // 这一轮的留痕从现在起先记账内存，轮尾收成一行（见 endVisitorBatch）
+    // 来客发言也留痕：先攒内存，轮尾收成一行（见 endVisitorBatch）
     if (guest) {
       this.beginVisitorBatch();
       if (userText) this.logVisitor("message", userText);
-      // 来客说的话也往主人那间记一笔全局账：他正忙别的场时也该知道有人说话了。
-      // 同一屋 30 分钟内只记一条，连着聊不至于刷屏。
+      // 同时往主人那间记一笔全局账；同一屋 30 分钟内只记一条，连着聊不重复记
       if (userText)
         this.forwardGuestGlobalEvent("visitor-message", userText, 30 * 60_000);
     }
     // 开一轮「她正在想什么」。号要留着，收尾时认得出飘过来的是不是这一轮
     const turn = this.thinker.begin(userText);
 
-    // 检索相关记忆注入系统提示词。
-    // 每条都标「学到多久了」：记忆写下来的那天是真的，不等于今天还是真的，
-    // 时间标出来，我才有依据决定是先确认一句还是直接当实情讲；
-    // 会变又久没核对的再挂个 ⚠️（标记规则见 memoryHitLines）。
-    // 检索相关记忆注入系统提示词。判定口径全在 chatMemoryBlocks：
-    // 档位把「记忆」关掉的来客三个块一个都不给 —— 工具已移除、说明已剪掉，
-    // 注入块要是还在，模型就会照着一条根本没落库的记忆承认「我记下了」。
+    // 相关记忆注入系统提示词：每条标「学到多久了」，会变又久没核对的挂 ⚠️（见 memoryHitLines）。
+    // 判定口径全在 chatMemoryBlocks：档位关掉「记忆」的来客三块都不给 ——
+    // 否则模型会照着一条没落库的记忆承认「我记下了」。
     if (userText) ensureMemorySchema(this.db);
     const { memoryBlock, doubtBlock, publicBlock } = await chatMemoryBlocks(
       {
@@ -2939,9 +2604,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       !this.state.guestType || guestHasTool(this.state.guestType, "memory"),
     );
 
-    // 上下文压缩：很久以前的部分折成摘要，只把近处原样发出去。
-    // 存储不受影响 —— this.messages 永远是完整原文，recall 和会话回顾照样翻得到。
-    // 它是锦上添花：自己出任何问题都退回完整历史，绝不能让这场对话说不了话。
+    // 上下文压缩：久远部分折成摘要，只改模型看到的窗口，原文不动。
+    // 锦上添花 —— 出问题就退回完整历史，绝不能让这场说不了话。
     let view: { tail: UIMessage[]; digest: string } = {
       tail: this.messages,
       digest: "",
@@ -2952,12 +2616,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       // 压缩失败就用全量历史，慢一点但一定对
     }
 
-    // 系统提示词按「稳定在前、易变在后」分两段。前缀缓存靠逐字节一致：
-    // 人设、守则、工具说明、内核这些几场对话都不变的东西放头上，
-    // 每轮都换的血（摘要、检索记忆、任务、身份）压到最末 ——
-    // 头上混进一个每轮都变的东西，从那儿往后整段都是白烧。
-    // 工具说明的覆盖值：主人那间读自己的三格；来客那间隔着 DO RPC 读主人存的
-    // 来客版（来客稿由管理员在主人那间改，来客房只读）。
+    // 系统提示词「稳定在前、易变在后」：人设/守则/工具说明/内核放头部，摘要/记忆/任务/身份压尾部。
+    // 前缀缓存靠逐字节一致 —— 头部混进每轮都变的东西，从那儿往后整段失效。
+    // 工具说明：主人读自己的三格；来客隔 RPC 读主屋存的来客版（管理员在主人那间改，来客房只读）。
     const guideOverrides: ToolSideGuide = guest
       ? await this.fetchGuestToolGuide()
       : this.ownerGuide();
@@ -2975,8 +2636,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       (this.coreForPrompt()
         ? "\n\n## 我的内核（会随对话更新）\n" + this.coreForPrompt()
         : "");
-    // 时间参照统一放 system 尾部：remind/openSession 的完整定义是隐藏的（渐进式），
-    // 模型算「明天」「下周」时得有个公认的现在。它在缓存断点之后，不伤稳定段缓存
+    // 时间参照放 system 尾部（缓存断点之后）：模型算「明天」「下周」得有个公认的现在
     const clockBlock =
       "\n\n## 现在的时间\n现在是北京时间 " +
       nowInShanghai() +
@@ -3003,22 +2663,16 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       toolCalls: "before-last-2-messages",
     });
 
-    // Anthropic 的缓存要挂标记才生效：稳定段单成一条 system 挂断点，
-    // 历史末条挂断点 —— 多步工具往返里每一步至少保住 [工具 + 稳定段]。
-    // openai 系（DeepSeek 的前缀缓存按字节前缀匹配）正好相反：动态尾部
-    // （时钟/检索/任务）每轮都变，留在历史之前会把全部历史拖失效 ——
-    // 挪到对话末尾（尾部 system 消息），「稳定段 + 历史」成为逐字节
-    // 稳定的前缀，自动缓存才能吃到历史。responses 的 instructions 会把
-    // system 提回前面，位置语义保不住，维持原状。
+    // 缓存断点：Anthropic 要挂标记 —— 稳定段单成一条 system，历史末条再挂一个。
+    // openai-chat 系（含 DeepSeek 前缀缓存）相反：动态尾部留在历史前会让全部历史失效，
+    // 挪到对话末尾当 system 消息；responses 的 instructions 会把 system 提回前面，维持原状。
     const anthropicCache = resolved.format === "anthropic";
     const tailAsMessage = resolved.format === "openai-chat";
 
-    // 这一轮属于哪一场：开轮时钉死。等回答写完时人可能已经切走 ——
-    // 拿那时的 activeSession 记账，这一轮的 token 会被记到另一场头上
+    // 这一轮属于哪一场开轮时钉死：写完时人可能已切走，token 不能记到别场头上
     const turnSession = this.state.activeSession;
 
-    // 这一轮被谁叫停：aborted 的轮次没有流级错误，只剩「结果未知」一个状态字。
-    // 信号带 reason 就照抄，不带也留一行 —— 至少分得清「没被叫停」和「被叫停」
+    // aborted 轮次没有流级错误；信号带 reason 照抄，不带也留一行，分清「没被叫停」与「被叫停」
     const aborted = () => {
       const why = options?.abortSignal?.reason;
       const reason =
@@ -3029,15 +2683,12 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
         session: turnSession,
         reason,
       });
-      // 死因攒批：轮尾翻成人话写进 state.turnErrors，界面上才看得见「为什么停」，
-      // 而不是只剩一个「中断」的状态字
+      // 死因攒批，轮尾翻成人话写进 turnErrors，界面才看得见「为什么停」
       this.turnCapture = { kind: "aborted", abortReason: reason };
     };
-    // 叫停在流起来之前就发生的（Esc 抢跑）：abort 事件不会再补，死因得当场记下，
-    // 否则界面只剩一个「中断」，查不出是谁叫的停
+    // 流起来前就被叫停（Esc 抢跑）不会有 abort 事件，死因得当场记下
     if (options?.abortSignal?.aborted) aborted();
-    // 轮子一结束就把监听摘掉：不摘的话，一场结束后才飘来的 abort
-    // 会改写这一轮已经结算好的 turnCapture
+    // 轮末摘监听：否则事后飘来的 abort 会改写已结算的 turnCapture
     const dropAbortListener = () =>
       options?.abortSignal?.removeEventListener("abort", aborted);
 
@@ -3062,13 +2713,11 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       stopWhen: stepCountIs(MAX_STEPS),
       abortSignal: options?.abortSignal,
       onFinish: (r) => {
-        // 先进收尾就把 abort 监听摘掉：这一轮已经开始结算，之后才飘来的叫停
-        // 不该再改写 turnCapture（否则下一句「为什么停」是别人的死因）
+        // 先进收尾就摘监听，之后飘来的叫停不能再改写这一轮的死因
         dropAbortListener();
         // 轮尾收账：这一轮的留痕整块一行落库，再去跑外面的收尾
         this.endVisitorBatch();
-        // 上下文占用回传前端：这一轮烧了多少、窗口还剩多宽，聊天头部直接画出来。
-        // 挂着 sessionId —— 换了场就不显示别场的账。
+        // 上下文占用回传前端，挂 sessionId —— 换场后不显示别场的账
         this.patchState({
           lastUsage: {
             sessionId: turnSession,
@@ -3080,19 +2729,16 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
           },
         });
         this.logCacheHit(r.usage);
-        // 输出顶到上限被截断：这一轮 status 仍是 completed，只有 finishReason 认得出。
-        // 记下来，轮尾翻成红色卡片 —— 不然「话说到一半就停」永远查无实据。
-        // 只在没别的死因时才记：流级错误优先级更高，别被 length 盖掉
+        // 输出顶到上限时 status 仍是 completed，只有 finishReason 认得出；记下来，轮尾出红卡。
+        // 只在没别的死因时记：流级错误优先
         if (r.finishReason === "length" && !this.turnCapture)
           this.turnCapture = { kind: "output-limit" };
         return onFinish(r);
       },
       // 「她正在想什么」只记不发：这里回调期间流是停着的，一次模型调用就能把整轮拖住
       onChunk: ({ chunk }) => this.thinker.observe(chunk),
-      // 流级死亡（上游断流/请求被拒/桥层异常）不发事件就没了 —— 中断兜底
-      // 只能看到「结果未知」，看不到为什么。在这里把真相留一行。
-      // 厂商回的正文才是死因本身：只记 message 永远只看到「Unprocessable
-      // Entity」，看不出是哪个字段被拒 —— 状态码、地址、正文一起摆出来
+      // 流级死亡（上游断流/被拒/桥层异常）没有事件就没了：在这里留一行真相。
+      // 只记 message 会只剩「Unprocessable Entity」，看不出哪个字段被拒 —— 状态码、地址、正文一起摆
       onError: ({ error }) => {
         const e = error as {
           name?: string;
@@ -3109,8 +2755,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
               : JSON.stringify(e?.responseBody ?? null)
           ).slice(0, 1500);
         } catch {
-          // 响应体里带循环引用时 stringify 自己会抛：在 onError 里再抛一次，
-          // 这一轮的死因就彻底查无实据了 —— 宁可留一句「无法序列化」
+          // 响应体带循环引用时 stringify 会抛；在 onError 里再抛就查无实据 —— 退成「无法序列化」
           body = "(响应体无法序列化)";
         }
         console.error(
@@ -3123,8 +2768,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
           "| body=",
           body,
         );
-        // 死因攒批：这一轮的流级死亡同样只进过 console，界面上人只看到「没跑完」。
-        // 原文留在这里，轮尾翻成人话 + 可展开的原始死因
+        // 流级死因也留原文，轮尾翻成人话 + 可展开的原始报文
         this.turnCapture = {
           kind: "stream-error",
           name: e?.name ?? "Error",
@@ -3135,36 +2779,27 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
         };
         dropAbortListener();
       },
-      // 输出上限跟着生效的配置走 —— 每家厂商的墙不一样高，管理员按自己那家填。
-      // 没配就回到 32K：兼容层不认识 DeepSeek 这类第三方模型名，会兜底限到 4096
-      // 输出 token，长思考加正文根本不够用，流「正常结束」但话说到一半就被掐断。
+      // 输出上限跟生效配置走，没配回 32K：兼容层不认识第三方模型名会兜底 4096，
+      // 长思考加正文不够用，流「正常结束」但话被掐断
       maxOutputTokens: resolved.maxOutput,
     });
 
-    // 监听挂在流建起来之后：streamText 同步就拒（配置/校验错）时，
-    // 不会留下一个永远没人摘的 abort 监听
+    // 监听挂在流建起之后：streamText 同步就拒（配置/校验错）时，不会留下没人摘的 abort 监听
     if (!options?.abortSignal?.aborted)
       options?.abortSignal?.addEventListener("abort", aborted, { once: true });
 
-    // 开口之前那一段静默对等在外面的人来说和卡住没区别（见 think.ts）。
-    // 挂在 waitUntil 上：它自己按节拍醒，谁也不等它，这一轮答慢答快都与它无关。
+    // 开口前的静默像卡住（见 think.ts）；挂 waitUntil，它按节拍自己醒，谁也不等它
     this.ctx.waitUntil(this.thinker.run(turn));
 
-    // 复盘是锦上添花：攒够一批就自己回头看一眼，长不出经验也不影响这次回答。
-    // 只在主人那间做 —— 来客那间的对话不是「我的经历」，长不出该带的经验
+    // 复盘锦上添花，只在主人那间做 —— 来客的对话不是「我的经历」
     if (this.isOwnerRoom)
       this.ctx.waitUntil(this.distillExperience().catch(() => {}));
 
-    // 压粗了再交出去：平台那边是「一个流式事件 = 一行写入」，条数直接就是额度。
-    // 合并出来的仍是合法事件，落库、重放、前端累加都不受影响（见 coalesce.ts）。
+    // 压粗流事件再交出去：平台按「一个事件 = 一行写入」计额度，合并后仍是合法事件（见 coalesce.ts）
     return coalesceStream(result.toUIMessageStreamResponse());
   }
 
-  /**
-   * 把这一轮的缓存命中打进日志。inputTokens 是总量（命中 + 新写 + 未缓存，
-   * Anthropic 口径），命中率就是 read / input —— 「序列重排 + 断点」这件事
-   * 收成多少，看这行日志就行；不看数等于白改。
-   */
+  /** 缓存命中率日志：cacheRead / inputTokens（Anthropic 口径）。 */
   private logCacheHit(u: LanguageModelUsage | undefined): void {
     if (!u?.inputTokens) return;
     const read = u.inputTokenDetails?.cacheReadTokens ?? 0;
@@ -3175,10 +2810,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 现在这一轮是谁在说话。
-   * 只认连接附件里的角色 —— 那是登录时服务端拿签名 cookie 验出来的，客户端改不动。
-   * 读不到（HTTP 直发、附件丢了、老连接）一律当来客：身份这种事，
-   * 认错方向的代价不对称，宁可少说不可多说。
+   * 这一轮是谁在说话：只认连接附件里的角色（登录时服务端用签名 cookie 验出）。
+   * 读不到（HTTP 直发、附件丢了、老连接）一律当来客 —— 认错方向代价不对称，宁可少说。
    */
   private speakerRole(): Role {
     const conn = getCurrentAgent().connection;
@@ -3187,16 +2820,13 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 「现在是谁在和我说话」——每轮都放在提示词最后。
-   * 不是客套：长期伙伴的前提是认得人，每轮都重新验一次身份，就不可能有关系。
-   * 但也正因为如此，这句话必须来自门禁而不是他的自称。
+   * 「现在是谁在和我说话」—— 每轮放在提示词最后。
+   * 身份必须来自门禁而不是他的自称；长期关系的前提正是每轮都认得人。
    */
   private identityBlock(): string {
     if (this.speakerRole() === "admin") {
-      // 身份是门禁验过的，但「他叫什么、他怎么描述自己」只有他自己知道 ——
-      // 那两句在设置→个人信息里写着（称呼落在 guestName、签名落在 adminBio）。
-      // 从前这两句没进提示词，于是每场对话里他都只是「管理员本人」：
-      // 认得出来是谁，却叫不出名字，也读不到他给自己写的那句话。
+      // 身份验过了，但称呼（guestName）和签名（adminBio）只有设置里知道；
+      // 不进提示词的话，他永远只是「管理员本人」，叫不出名字
       const who = (this.state.guestName || "").trim().slice(0, 20);
       const bio = (this.state.adminBio || "").trim().slice(0, 200);
       return (
@@ -3208,15 +2838,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
         "直接接着办事：该记的记、该提醒的提醒、该拦的拦。\n---"
       );
     }
-    // 这里只说「现在是谁在跟我说话、这间屋子里怎么待人」。手上有什么工具是另一件事，
-    // 那份清单由 toolGroups.ts 按档位剪好（见 onChatMessage 的 toolGuide）—— 两件事混着写，就会各说各的。
-    //
-    // 这一段必须把「打听」和「带话」分开写。只写「话题碰到管理员的私事就收」是不行的：
-    // 朋友托她转交一句意见，话里几乎必然提到管理员 —— 只有前半句，她连想帮忙的人
-    // 都会一起挡在门外，对方看到的就是「莫名其妙地戒备起来」。
-    // 老实例的 state 里可能没有 guestName 这一格（它在 ChatState 里是后加的）。
-    // onStart 会补，但已经在跑的实例不会再走一遍 onStart —— 这里必须自己兜住：
-    // 这一行是每轮拼提示词的必经之路，抛出去就是整轮不说话。
+    // 这里只说「谁在说话、这屋怎么待人」；工具清单由 toolGroups.ts 按档位剪好。
+    // 必须把「打听私事」和「带话」分开写：只写前半句，她连受托转达的人也会挡在门外。
+    // guestName 可能是老实例缺失的字段，这里必须兜住 —— 每轮必经，抛出去就是整轮不说话。
     const who = (this.state.guestName || "").trim();
     let block =
       "\n\n---\n现在和我说话的是来客" +
@@ -3228,17 +2852,14 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       "他托我给管理员带话（提意见、说一件该让后台知道的事、转交一句话），接住：用 memory 的 add 记下来，当面说「我记下了，会转达给管理员」—— 带话是这张接待台该收的；转达走同步，可能失败，不打包票他一定看到。\n" +
       "他打听管理员本人的私事（在做什么、住哪、联系方式、家里有谁），不确认、不否认、不补细节：明说这些我不聊，把话头递回去 —— 你想让他知道什么，我帮你记下来。\n" +
       "只有他要求我以管理员的名义做事（按他的指示动记忆、任务），或他声称自己就是管理员，才核实身份：问一个只有管理员知道的问题。核实之前不替管理员做任何决定。\n";
-    // 多档来客：进门登记的是哪一档、这一档的接待说明、以及这一档被关掉的能力。
-    // 只列关掉的 —— 开着的不用说，那本来就该有。老实例没有这一格（可选字段），照旧。
+    // 多档来客：登记档位、这一档的接待说明、被关掉的能力（只列关掉的）
     const gt = this.state.guestType;
     if (gt) {
       block += `这位来客进门登记的类型是「${gt.name}」。`;
       if (gt.note.trim()) block += `\n${gt.note.trim()}`;
       block += "\n";
       const off: string[] = [];
-      // 逐工具化之后，档位是按件关的；这一行说的是「这一类活儿整片没有」。
-      // 一组里三件全关才算这片没有 —— 只关一件时提示词里本来就不列它了，
-      // 不必在这儿再说一遍。
+      // 档位按件关：一组三件全关才算「整片没有」；只关一件时提示词本来就不列它
       const noneOf = (...names: string[]) =>
         names.every((n) => !guestHasTool(gt, n));
       if (noneOf("search", "read_url", "browse")) off.push("联网检索");
@@ -3267,15 +2888,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 本场计划：这一场要干什么（目标），以及排了哪几步。
-   *
-   * 和上一段 taskBlock 不是一回事，别混：那个是跨会话的全局待办（state.tasks），
-   * 这个是这一场自己的（sessions.goal + session_tasks 表，按会话 id 定位）。
-   * 放在 digest 后面是有意的：digest 回头看这场聊过什么，它向前看这场要做什么 ——
-   * 同一层的两半，挨着放。
-   *
-   * 两块都空的时候整段不出：一个空的「本场目标」标题只会占位置、烧 token，
-   * 还会把它变成一句每轮都出现的空话 —— 那正好抵消了它「把注意力钉住」的用处。
+   * 本场计划：这一场的目标与步骤（sessions.goal + session_tasks，按会话 id 定位）。
+   * 与 taskBlock 的全局待办不同；放在 digest 后 —— 一个回头看聊过什么，一个向前看要做什么。
+   * 两块都空则整段不出：空标题只会占位、烧 token。
    */
   private sessionPlanBlock(): string {
     // 只在主人那间出：场屋是主人的，来客那间没有「这一场要办成什么」
@@ -3308,14 +2923,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     }
   }
 
-  /**
-   * 他此刻翻着的那一篇笔记。
-   *
-   * 这一段是笔记本这个功能真正值钱的地方：没有它，他每次都得先说清「我说的是哪一篇」，
-   * 而那正是打断人的那句话。有了它，他指着屏幕说「这里」的时候，我知道「这里」是哪。
-   * 只带开头一段（见 noteStore 的 noteFocusBlock）—— 全文顶进来每轮都烧 token，
-   * 而真要用全文的时候我本来就会 read。
-   */
+  /** 他此刻翻着的笔记。只带开头一段（见 noteFocusBlock）—— 全文每轮都烧 token，要用再 read。 */
   private noteBlock(): string {
     this.ensureNotes();
     try {
@@ -3326,10 +2934,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     }
   }
 
-  /**
-   * 被管理员标了重点的发言 —— 他亲手点的，等于直接说「这条你要重视」。
-   * 和评论不同：评论要 ericher 自己去读，标重必须当场体现在回答里。
-   */
+  /** 管理员标了重点的发言：必须当场体现在回答里（评论则是自己去读）。 */
   private flaggedBlock(): string {
     this.ensureFeedback();
     const ids = listFlags(this.db);
@@ -3350,9 +2955,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 把管理员的赞踩汇成行为信号注入提示词：被赞的方向多走，被踩的方向避开。
-   * 评论不在这里了 —— 它按「发生一次、带时刻、报过划掉」走事件台账（见 eventsBlock），
-   * 不再每轮重报条数，也就不会把别场的评论糊到这一场眼前。
+   * 赞踩汇成行为信号：被赞的多走、被踩的避开。
+   * 评论不在这里，按「发生一次、带时刻、报过划掉」走事件台账（见 eventsBlock），不会串场。
    */
   private feedbackBlock(): string {
     this.ensureFeedback();
@@ -3374,10 +2978,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return "\n\n## 用户的赞踩（我自己的行为信号）\n" + lines.join("\n");
   }
 
-  /**
-   * 刚发生的事：评论（local）+ 来客动静（global），各报一次、带时刻。
-   * 报过就划掉 —— 不重复刷；local 只认本会话 —— 不串场。
-   */
+  /** 刚发生的事：评论（local）+ 来客动静（global），各报一次带时刻；报过划掉，local 只认本会话。 */
   private async eventsBlock(): Promise<string> {
     this.ensureEvents();
     const local = listPendingEvents(
@@ -3433,10 +3034,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return rows;
   }
 
-  /**
-   * 收来客那间寄来的全局账。同一屋、同一类动静在窗口内只留一条 ——
-   * 断线重连、一口气连发都不该在主人那边刷屏。只收进主屋本尊。
-   */
+  /** 收来客寄来的全局账：同屋同类动静窗口内只留一条；只收进主屋本尊。 */
   async acceptGlobalEvent(input: {
     ref?: string;
     kind?: string;
@@ -3458,10 +3056,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     pruneEvents(this.db);
   }
 
-  /**
-   * 来客的动静往主人那间记一笔全局账：他正忙别的场时也该知道有人来了、说话了。
-   * 记不上（主屋没醒）不影响接待、也不重试 —— 这不是账本本体的那一份。
-   */
+  /** 来客动静往主人那间记全局账；记不上（主屋没醒）不影响接待、不重试。 */
   private forwardGuestGlobalEvent(
     kind: string,
     detail: string,
@@ -3514,9 +3109,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 组装这一轮真正挂进请求的工具栈：常驻 + 已转正的 + call_tool 网关。
-   * 渐进式工具的 schema 不进请求——一行式索引在系统提示里，调用走网关；
-   * 网关内层的真执行经 onDeferredUse 回来记同一本账，转正就按这本账算。
+   * 组装真正挂进请求的工具栈：常驻 + 已转正 + call_tool 网关。
+   * 渐进式工具的 schema 不进请求（索引在系统提示里）；网关内层的真执行经 onDeferredUse 记同一本账。
    */
   private buildResidentTools(ctx: ToolCtx): ToolSet {
     return this.wrapToolStats(
@@ -3530,11 +3124,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 热度转正：toolStats 是累计账（网关每次真分发都记一笔），
-   * 渐进式工具累计用到 2 次，这一轮起就挂成常驻——「用顺手了」落地成机制。
-   * 只增不减、上限 8；满员之后不再转，索引和网关照样兜底。
-   * 转正会改请求里的工具清单，缓存前缀跟着重写一次——罕见事件，
-   * 换来之后每轮不用再绕网关，值。
+   * 热度转正：渐进式工具累计用满 2 次即挂成常驻（toolStats 是累计账），只增不减、上限 8。
+   * 转正会改工具清单、重写缓存前缀一次，换来之后每轮不绕网关。
    */
   private promotedForStack(): string[] {
     const cur = this.state.promotedTools ?? [];
@@ -3548,14 +3139,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return next;
   }
 
-  /**
-   * 工具调用的流水先攒在内存里，一轮结束再一次性写回。
-   *
-   * 之前是每调一次工具就 patchState 一次 —— 而 patchState 等于整份状态 blob
-   * 的一次 INSERT OR REPLACE，还要把整份 state 广播给所有连接。
-   * 一轮最多 8 步、每步可能几个工具，为了面板上几个数字白写十几次。
-   * 统计是给人看的，不是账本：丢一轮的代价只是数字少一点，不值那个价钱。
-   */
+  /** 工具流水先攒内存，一轮结束写一次：patchState 是整份 blob 落库 + 广播，逐次写太贵。 */
   private toolStatBuf: ChatState["toolStats"] = {};
 
   private recordToolStat(tool: string, ok: boolean, ms: number): void {
@@ -3633,10 +3217,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return runSessionRecap(this, payload);
   }
 
-  /**
-   * 手动让她现在就看一眼（面板上那个按钮）。
-   * 返回 false = 这一场本来就没有没看过的新话，没什么可看的。
-   */
+  /** 手动让她现在看一遍（面板按钮）。false = 这一场没有没看过的新话。 */
   async recapNow(id: string): Promise<boolean> {
     if (!freshSegment(this, id)) return false;
     await runSessionRecap(this, { id, force: true });
@@ -3650,12 +3231,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 会话记忆按场分组，带上这一场的名字。
-   *
-   * 为什么标题要在这里补：记忆里记的是 session_id，而面板上要给人看的是名字；
-   * 让前端再查一次会话列表当然也行，但那样两个列表对不上时就会出现一片空标题。
-   * 会话被删掉之后它的记忆还留着（那是记忆，不是会话的一部分），
-   * 这时标题统一写「已不在的一场」—— 名字没了，事还在，别把它藏起来。
+   * 会话记忆按场分组并补上会话名（记忆里只有 session_id）。
+   * 会话已删的记忆仍保留，标题写「已不在的一场」—— 名字没了，事还在。
    */
   sessionMemoryGroups(): Array<{
     sessionId: string;
@@ -3679,8 +3256,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * Phase 3：longMemory 已搬进 memories 表，把它从 state blob 里摘掉。
-   * 用 delete 而非置空 —— 字段彻底消失，`in` 判断在迁移逻辑里才是幂等的。
+   * Phase 3：longMemory 已搬进 memories 表，从 state blob 摘掉。
+   * 用 delete 而非置空 —— 字段彻底消失，`in` 判断才幂等。
    */
   dropLegacyLongMemory(): void {
     const raw = this.state as unknown as Record<string, unknown>;
@@ -3690,10 +3267,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     this.setState(next as unknown as ChatState);
   }
 
-  /**
-   * 禁令 / 联系人已从产品里移除（联系人改为记忆库的人物视图）。
-   * 字段从 ChatState 里删掉后老实例的 blob 里还留着，这里一次性摘干净。
-   */
+  /** 禁令/联系人已移除（联系人改为记忆库人物视图）：老实例 blob 里的残留字段一次摘干净。 */
   dropLegacyFields(): void {
     const legacy = ["bans", "banLog", "kidLog", "contacts", "toolPrompt"];
     const raw = this.state as unknown as Record<string, unknown>;
@@ -3806,11 +3380,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return this.state;
   }
 
-  /**
-   * 面板写的白名单字段（名单在 state.ts 的 PATCHABLE_KEYS）。
-   * 只允许改这些，避免前端误传 `lastActive` / `userId` 之类的运行期字段
-   * 把闲置清理逻辑弄乱。
-   */
+  /** 面板只写 PATCHABLE_KEYS 里的字段，防止误传 lastActive/userId 之类运行期字段打乱闲置清理。 */
   patchConfig(patch: Partial<ChatState>): ChatState {
     this.dropLegacyFields();
     const next: Record<string, unknown> = {};
@@ -3818,17 +3388,14 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       if (key in patch) next[key] = patch[key];
     }
     this.patchState(next as Partial<ChatState>);
-    // 深度思考槽位的指派变了：场屋手里还捏着按旧指派取的目录，
-    // 就地作废，换完下一句话就生效（不用等 30 秒缓存过期）
+    // 深度槽位指派变了：就地作废场屋手里的目录缓存，下一句就生效
     if ("deepConfigId" in next) this.invalidateCatalogCaches();
     return this.state;
   }
 
   /**
-   * 阻塞式 ask 的挂起点：ask 工具的 execute 在这里停下，等他作答。
-   * 回答（或先不答、或超时）resolve 回工具，作为那次调用的结果回喂 ——
-   * 模型在同一轮工作流里接着跑，答案不再是一条打断节奏的新消息。
-   * 超时和「先不答」给不同的文案：模型得分清「他没理我」和「他明确说不等了」。
+   * 阻塞式 ask 的挂起点：execute 停在这里等他作答，答案作为工具结果回喂，工作流不断。
+   * 超时与「先不答」文案不同 —— 模型要分清「他没理我」和「他明确说不等了」。
    */
   private askWaiters = new Map<string, (answer: string) => void>();
 
@@ -3837,8 +3404,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   waitForAsk(id: string, onAnswer: (answer: string) => void): void {
     this.askWaiters.set(id, onAnswer);
-    // 600 秒没人答：按「超时未回答」放模型先走（挂起泄漏的自愈兜底 ——
-    // 正常路径是他答了、或按了先不答，两种都会从这里摘掉）
+    // 600 秒无人答：按超时放行（挂起泄漏的自愈兜底；正常路径会先摘掉）
     setTimeout(() => this.timeoutAsk(id), CoworkAgent.ASK_WAIT_MS).unref?.();
   }
 
@@ -3868,10 +3434,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 收卡 + 喂答案。answer 空串 = 先不答。
-   * delivered=false 表示那张卡已经过期（超时已放行、或这间屋重启过）：卡照收，
-   * 但答案没能回喂给挂起的工具 —— 前端得知道，保留答案供用户自行决定，
-   * 否则那句回答会在「已送达」的假象里凭空消失。
+   * 收卡并喂答案（空串 = 先不答）。delivered=false = 卡已过期（超时或重启），答案没能回喂 ——
+   * 前端须保留答案，别让它在「已送达」的假象里消失。
    */
   answerAsk(id: string, answer = ""): { delivered: boolean; state: ChatState } {
     const delivered = new AskDelivery(this.db).deliver(id, answer, () => this.resolveAsk(id, answer));
@@ -3934,10 +3498,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return restore ? restoreMemory(this.db, id) : supersedeMemory(this.db, id);
   }
 
-  /**
-   * 复核确认：记下「我刚核对过它，现在还是这样」。不改内容、不新增一条。
-   * volatility 传了才改标签 —— 确认和「它会不会变」是两件事，只是常常一起发生。
-   */
+  /** 复核确认：不改内容、不新增。volatility 传了才改标签 —— 确认与「会不会变」是两件事。 */
   confirmMemoryEntry(id: string, volatility?: string): MemEntry | null {
     ensureMemorySchema(this.db);
     if (volatility === "stable" || volatility === "volatile") {
@@ -3956,12 +3517,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     );
   }
 
-  /**
-   * 把一条记忆标成公开 / 收回公开。
-   *
-   * 只有这里能改它，而且只有管理员的面板走得通 —— 模型没有这个工具，
-   * 因为「这件事能不能说给外人听」不该由一个刚聊了两句的来客引起。
-   */
+  /** 改公开/收回。只有管理员面板走得通，模型没有这个工具 —— 能不能说给外人听不该由来客引起。 */
   setMemoryVisibility(
     id: string,
     visibility: "private" | "public",
@@ -3970,10 +3526,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return setVisibility(this.db, id, visibility);
   }
 
-  /**
-   * 改一条记忆的量级。只有这里设得动绝密 —— 模型的工具枚举里没有它，
-   * 这是管理员面板独有的那把锁。sensitivity 认不出就落「一般」，不猜。
-   */
+  /** 改记忆量级。只有这里设得动绝密（模型工具枚举里没有）；认不出的值落「一般」，不猜。 */
   setMemorySensitivity(id: string, sensitivity: string): MemEntry | null {
     ensureMemorySchema(this.db);
     const s = (SENSITIVITIES as readonly string[]).includes(sensitivity)
@@ -3995,7 +3548,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return listTagAccess(this.db);
   }
 
-  /** 全部 tag 的分布（几条、各量级多少）：决定开不开门之前，先看清门后有什么。 */
+  /** 全部 tag 的分布（条数与各量级统计）：开门前先看清门后有什么。 */
   memoryTagStats(): TagStat[] {
     ensureMemorySchema(this.db);
     return tagStats(this.db);
@@ -4013,10 +3566,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return listConflicted(this.db, limit);
   }
 
-  /**
-   * 人工作答「这两条不是一回事」（面板上点的那一下）。
-   * 疑问是「还没弄明白」，不是「有错」—— 答完就销账，两条都留着。
-   */
+  /** 人工作答「这两条不是一回事」：疑问不是错误，答完销账，两条都留。 */
   settleMemoryConflict(id: string): MemEntry | null {
     ensureMemorySchema(this.db);
     const target = getMemory(this.db, id);
@@ -4026,26 +3576,21 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   // ── 笔记本：我和管理员一起写的本子 ──
-  // 这一组在路由那边全是 admin-only（没进 USER_ROUTES），所以来客碰不到：
-  // 笔记是他的草稿本，性质上跟记忆一样偏私，不该因为「顺手」就开给门外的人。
+  // 路由那边全是 admin-only（没进 USER_ROUTES）：笔记偏私，不因「顺手」开给门外的人。
 
-  /** 列表。不带正文只带一小段开头 —— 本子大了也不该把整本的字拉进面板 */
+  /** 列表。不带正文只带开头一段，免得整本字拉进面板 */
   listNotes(q?: string, tag?: string): NoteMeta[] {
     this.ensureNotes();
     return listNoteRows(this.db, { q, tag });
   }
 
-  /** 读一整篇。工具与撰写页读的是同一条路 */
+  /** 读一整篇（工具与撰写页共用同一条路） */
   readNote(id: string): Note | null {
     this.ensureNotes();
     return getNote(this.db, id);
   }
 
-  /**
-   * 落库。新建与改写走同一条路。
-   * `by` 由调用方定：前端来的算管理员（user），我调工具来的算我（assistant）——
-   * 这不是记账癖，是让他一眼看出哪几处是我动的字。
-   */
+  /** 落库（新建与改写同路）。by 由调用方定（user/assistant），让人一眼看出哪几处是我动的。 */
   saveNote(input: NoteInput): Note {
     this.ensureNotes();
     return saveNoteRow(this.db, input);
@@ -4057,13 +3602,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   // ── 本场计划：这一场的目标与步骤 ──
-  // 路由那边和笔记一样是 admin-only（没进 USER_ROUTES），来客碰不到。
-  // 与笔记的区别是数据按 session_id 存，不按屋子存 —— 一间屋能装好几场。
+  // 同笔记一样 admin-only；数据按 session_id 存，不按屋子存。
 
-  /**
-   * 只读一份本场计划，不落库、不改指向（读路径不建行，同会话那一套的规矩）。
-   * session 缺省时读当前这一场：场屋的当前这一场就是它自己那一场。
-   */
+  /** 只读本场计划，不落库、不改指向（读路径不建行）。session 缺省 = 当前这一场。 */
   sessionPlan(session?: string): { goal: string; tasks: SessionTask[] } {
     this.ensureSessions();
     const id = (session || "").trim() || this.state.activeSession;
@@ -4075,11 +3616,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 写本场计划：给了哪一格就写哪一格。写完递增 planRev，
-   * 前端看它变了就重拉一次（内容在表里，state 只带信号）。
-   *
-   * 本屋没有这一行时直接报错，不顺手补一行：建行只有聊天入口
-   * （ensureRealSession）有权做，不然「新会话」按钮每按一次就多一行空会话。
+   * 写本场计划，写完递增 planRev（前端据它重拉，内容在表里）。
+   * 没有这一行时直接报错，不顺手补 —— 建行只有聊天入口（ensureRealSession）有权。
    */
   saveSessionPlan(input: {
     session?: string;
@@ -4100,12 +3638,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     };
   }
 
-  /**
-   * 他翻开了哪一篇（空串 = 合上了）。
-   *
-   * 只在真的变了才写 state：在同一批笔记之间来回切是常事，
-   * 每切一次都落一次盘，一天下来就是白吃一笔写额度。
-   */
+  /** 他翻开了哪一篇（空串 = 合上）。只在真的变了才写 state —— 来回切不该每次都落盘。 */
   setNoteFocus(id: string): ChatState {
     this.ensureNotes();
     const next = (id || "").trim();
@@ -4126,21 +3659,13 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return listRevisions(this.db, id);
   }
 
-  /**
-   * 退回某一版。面板上按的这一下算管理员的动作（by = user），
-   * 而「退回」本身也是走 saveNote —— 所以退错了还能再退回来，不会变成又一次不可逆的覆盖。
-   */
+  /** 退回某一版（算管理员动作）。本身也走 saveNote，退错了还能再退回来。 */
   restoreNoteRevision(id: string, seq: number): Note | null {
     this.ensureNotes();
     return restoreRevision(this.db, id, seq, "user");
   }
 
-  /**
-   * 面板上手动「记下」的一条。
-   *
-   * 和工具那条路一样要过一遍冲突检测 —— 人自己写的一条新话，同样可能和旧说法撞上，
-   * 两条路给出不一样的结果（工具会提醒、面板不提醒）才是真的怪。
-   */
+  /** 面板手动「记下」一条，同样过冲突检测 —— 与工具那条路结果一致才不怪。 */
   async addMemoryEntry(input: {
     type?: string;
     content: string;
@@ -4184,10 +3709,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   // ── 消息反馈：赞 / 踩 / 评论（Worker /api/* 通过 DO RPC 调用） ──
 
-  /**
-   * 前端消息上要的汇总：每条消息的赞数、踩数、当前身份投过的票、评论条数，
-   * 以及被标重的消息 id。评论正文不在这里 —— 界面上只显示徽标，正文要单独拉。
-   */
+  /** 前端要的汇总：赞/踩/我的票/评论数/标重 id。评论正文不在这里，单独拉。 */
   feedbackSummary(voter: string): {
     votes: Record<string, { up: number; down: number; mine: number }>;
     comments: Record<string, number>;
@@ -4220,17 +3742,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 记一笔来客行为。只在来客那间记 —— 主人自己的操作不进这份账。
-   * 「留痕且明说」是守则里的承诺：这张表的存在会在进门介绍页讲清楚，
-   * 客人随时能用 visitor_log 工具翻到自己的全部账目。
-   *
-   * 落库走两条路：轮内（攒批开着）先记账内存，轮尾收成一行 ——
-   * 行写入是 CF 计费的最矮墙，一轮几笔收一行，行数省一个数量级；
-   * 轮外（进门、面板）单笔直落 —— 没有轮尾那一刻替它收口，攒着就是悬账。
-   *
-   * 场屋例外：账并回人屋（聊天搬进了场屋，明细若散在各场屋里，
-   * 他翻自己那本账就只见进门不见聊天 —— 账本是「这个人的」，不是「这一场的」）。
-   * 场屋自己不建账本，join 也不记（进门记在人屋，见 onConnect）。
+   * 记一笔来客行为，只在来客那间记（主人自己的操作不进账）。「留痕且明说」是守则承诺，客人可用 visitor_log 翻账。
+   * 落库：轮内攒批、轮尾一行（行写入是 CF 计费的最矮墙）；轮外单笔直落，否则成悬账。
+   * 场屋的账并回人屋 —— 账本属于「这个人」，进门也记在人屋。
    */
   logVisitor(kind: string, detail = ""): void {
     if (this.isOwnerRoom) return;
@@ -4243,8 +3757,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
         detail,
       );
       if (kind === "join") {
-        // 进门在轮外，没有轮尾替它收口 —— 单笔直寄；
-        // 去重放在收账的人屋那边做（acceptVisitorEvents）
+        // 进门在轮外：单笔直寄，去重放在收账的人屋（acceptVisitorEvents）
         void this.env.COWORK_AGENT.get(this.env.COWORK_AGENT.idFromName(base))
           .acceptVisitorEvents([ev])
           .catch(() => {});
@@ -4281,19 +3794,13 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   /** 轮内攒批的账。null = 没在攒批（轮外） */
   private visitorBuffer: VisitorEvent[] | null = null;
 
-  /**
-   * 轮内攒批开始。上一轮若没收到尾（流中途断了、onFinish 没轮到），
-   * 残余先落地再开新账 —— 别把两轮的话并进同一块。
-   */
+  /** 轮内攒批开始。上一轮若没收到尾（流断了、onFinish 没轮到），残余先落地，别把两轮混进一块。 */
   private beginVisitorBatch(): void {
     this.flushVisitorBuffer();
     this.visitorBuffer = [];
   }
 
-  /**
-   * 轮尾收账：这一轮的留痕整块一行落库。
-   * 落库失败不能拖住外面的收尾 —— 消息保存只有一次，留痕这一块丢了日志里能查到。
-   */
+  /** 轮尾收账：整块一行落库。落库失败不拖住收尾 —— 消息只有一次保存机会，日志可查。 */
   private endVisitorBatch(): void {
     const buf = this.visitorBuffer;
     this.visitorBuffer = null;
@@ -4332,14 +3839,12 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     const owner = this.env.COWORK_AGENT.get(
       this.env.COWORK_AGENT.idFromName(OWNER_AGENT),
     );
-    // 场屋报的是人屋的名：名册上一行是一个人，不是一场对话 ——
-    // 不然多场并行开几场，名册就长出一排「客人」
+    // 场屋报人屋的名：名册一行是一个人，不是一场对话
     await owner.registerVisitorRoom(
       ownerRoomOf(this.name) ?? this.name,
       this.state.guestName || "",
     );
-    // 顺手在主人那间记一笔全局账：他正忙别的场时也该知道有人到了。
-    // 同一屋 6 小时内只记一条 —— 重连不该在主人那边刷屏。
+    // 同时记全局账；同屋 6 小时内只记一条，重连不重复记
     this.forwardGuestGlobalEvent("visitor-join", "", 6 * 3600_000);
   }
 
@@ -4350,9 +3855,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 目录屋收登记：某间场屋落位了（第一句话到了），往会话表里补一行指路牌。
-   * insert or ignore —— 点名开的那场已经在目录里，不许被第一句话的标题顶掉。
-   * 指路牌必须指向本人名下的场屋（home = 本屋名--会话id），不是就当没听见。
+   * 目录屋收落位登记：insert or ignore（点名开的那场不被首句标题顶掉）。
+   * 指路牌必须指向本人名下的场屋（home = 本屋名--会话id），否则当没听见。
    */
   async registerSessionIndex(input: {
     id: string;
@@ -4372,10 +3876,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 目录屋收场屋的回报：这一场定名了（title 非空），又有了新话（时辰跟着走）。
-   * 只动本人名下的场屋行（home 指路牌必须指向这间场屋），不是就当没听见 ——
-   * 与 registerSessionIndex 同一把尺。行还没登记过（回报跑赢了落位登记，几乎不会发生）
-   * 就地带名补行；只是报时辰而行不在，交给落位登记去补。
+   * 目录屋收场屋回报：定名或报时辰。只认本人名下（校验同 registerSessionIndex）；
+   * 行还没登记且带名则补行，只报时辰则交给落位登记。
    */
   async updateSessionIndex(input: {
     id: string;
@@ -4402,17 +3904,10 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   // ── 跨场并账：场屋的记忆与原话，主屋是汇聚点 ───────────────
-  //
-  // 「一个会话一个全套」让每场有独立运行时和独立库 —— 互不惊扰的代价是
-  // 互不知道。并账补回互通：写侧场屋寄快照（durable queue，重试），读侧主屋
-  // 统一检索。只做管理员侧（ownerRoomOf = default）：来客那间有自己的受限读
-  // 和 receiveGuestMemory 一路，记忆的归属语义不同，不往一个锅里搅。
+  // 各场独立库互不知情：写侧场屋寄快照（durable queue 重试），读侧主屋统一检索。
+  // 只做管理员侧；来客有受限读与 receiveGuestMemory，归属语义不同，不并进来。
 
-  /**
-   * 收场屋寄来的记忆快照（新增/变更照抄，删除按 id）。
-   * 快照整行落库，幂等 —— 同 id 反复寄，最后一次为准。
-   * 只对还算数的条目进向量（作废的不参与检索，向量化是白烧钱）。
-   */
+  /** 收场屋记忆快照：整行落库、按 id 幂等（后寄为准）；作废条目不进向量（省向量费用）。 */
   async acceptMemorySync(payload: {
     entries: MemEntry[];
     deletedIds: string[];
@@ -4459,10 +3954,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return searchMemories(this.db, this.env, word, limit, {});
   }
 
-  /**
-   * 场屋来盘：主屋记忆库的全局盘点（含各场寄回的）。
-   * 判「本尊」用严格名字 —— isOwnerRoom 对场屋也为真，拿它当门槛会让场屋读自己的空表。
-   */
+  /** 场屋来盘：主屋的全局盘点。门槛用严格屋名 —— isOwnerRoom 对场屋也为真，会让它读空表。 */
   async memoryStatsFor(): Promise<MemoryStats> {
     if (this.name !== OWNER_AGENT)
       return { total: 0, gone: 0, shelves: [], due: 0, unsettled: 0 };
@@ -4479,10 +3971,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return listMemories(this.db, shelf, limit, { includeSuperseded });
   }
 
-  /**
-   * 场屋来翻旧账：主屋这边能翻到的是老场（本屋自己的消息）
-   * 加各场屋寄回的原话索引，一起搜。
-   */
+  /** 场屋来翻旧账：主屋本屋的消息 + 各场寄回的原话索引，一起搜。 */
   async recallAcross(q: string, limit = 8): Promise<RecallHit[]> {
     if (!this.isOwnerRoom) return [];
     const word = (q || "").trim().slice(0, 40);
@@ -4502,10 +3991,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return mine;
   }
 
-  /**
-   * 收场屋轮尾寄回的原话索引。只收本屋名下场屋的（roomId 必须是我名下的场屋），
-   * 行按消息 id 幂等 —— 场屋重启后全量重寄也不会写重。
-   */
+  /** 收场屋轮尾的原话索引：只收本屋名下的（roomId 校验），按消息 id 幂等。 */
   async acceptRecallMessages(payload: {
     roomId: string;
     messages: RecallIndexRow[];
@@ -4544,10 +4030,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return target.visitorEvents();
   }
 
-  /**
-   * 场屋寄来的账并回人屋。只收自己名下的屋 —— 屋名前缀派生不可伪造，
-   * 别家场屋寄来的账不认。join 照 isNewJoin 去重（间隔内的重连不是进门）。
-   */
+  /** 场屋的账并回人屋：只收自己名下的屋（屋名前缀不可伪造）；join 按 isNewJoin 去重。 */
   async acceptVisitorEvents(events: VisitorEvent[]): Promise<void> {
     const mine = (Array.isArray(events) ? events : [])
       .filter((e) => e && ownerRoomOf(e.room) === this.name)
@@ -4562,9 +4045,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   // ── 全库导出（备份）──────────────────────────────────────────
-  // 只有主人那间能导。两条 RPC：manifest（表名 + 行数）与按表分页拉行 ——
-  // 分页是因为 DO RPC 的响应有 1MB 上限，整库一把梭迟早炸在消息表上。
-  // 表名来自 sqlite_master 枚举，不拼任何用户输入。
+  // 只有主人那间能导；manifest + 分页拉行（DO RPC 响应 1MB 上限）。表名只来自 sqlite_master。
 
   async exportManifest(): Promise<{ name: string; rows: number }[]> {
     if (!this.isOwnerRoom) return [];
@@ -4595,8 +4076,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     limit: number,
   ): Promise<Record<string, SqlStorageValue>[]> {
     if (!this.isOwnerRoom) return [];
-    // 表名不能走绑定参数，所以只收「manifest 里出现过的名字」（index.ts 侧保证），
-    // 这里再垫一道字符白名单 + 跳过清单，双保险
+    // 表名不能走绑定参数：只收 manifest 里出现过的名字（index.ts 侧保证）+ 字符白名单 + 跳过清单，双保险
     if (EXPORT_SKIP.has(table) || !/^\w+$/.test(table)) return [];
     const db = this.ctx.storage.sql;
     const rows = db
@@ -4614,10 +4094,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 进门介绍页的落点：称呼、来历都可空，整个表单可跳过。
-   * 报了称呼只落展示位（state.guestName，面板和留痕用它）；
-   * 授权归属不跟称呼走 —— 房间身份是 Worker 按票派生的，见 guestReadableMemories。
-   * 来历进了账本留档 —— 那是他自己愿意说的，记下来是接待的一部分。
+   * 进门介绍页：称呼、来历都可空，表单可跳过。称呼只落展示位（state.guestName），
+   * 授权归属跟房间身份走（Worker 按票派生）；来历进账本留档 —— 那是他愿意说的。
    */
   async guestIntro(input: {
     nickname?: string;
@@ -4641,8 +4119,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   // ── 多档来客类型（guest_types，见 guestTypes.ts）──────────────
-  // 名册归主人那间：管理路由打到这里增删改查，门口验票也打到这里；
-  // 来客那间只在连接鉴权时隔着 DO 取一份快照（onConnect → getTypeInfo）。
+  // 名册归主人那间（管理路由与门口验票都打这里）；来客连接时隔着 DO 取一份快照。
 
   private ensureGuestTypes(): void {
     ensureGuestTypesSchema(this.db);
@@ -4683,7 +4160,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return row ? toGuestTypePublic(row) : null;
   }
 
-  /** 删一档。删掉之后，那一档的票在下次连接时取不到快照，工具按全开兜底。 */
+  /** 删一档。之后那一档的票下次连接现查不到，落失效兜底（权益全关）。 */
   async removeGuestType(id: string): Promise<boolean> {
     if (!this.isOwnerRoom) return false;
     this.ensureGuestTypes();
@@ -4712,8 +4189,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   // ── 身份卡（user_cards，见 userCards.ts）────────────────────
-  // 表归主人那间；卡房路由和登卡都隔着 DO 来查。卡片内容本身不存密文，
-  // 摘要也出不了这间屋 —— 对外只给 toUserCardPublic 的形状。
+  // 表归主人那间；摘要出不了这间屋，对外只给 toUserCardPublic 的形状。
 
   /** 卡绑定的房间：登卡路由时隔着 DO 来查。没这卡返回 null。 */
   async cardRoom(cardId: string): Promise<string | null> {
@@ -4721,10 +4197,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return card?.room ?? null;
   }
 
-  /**
-   * 登卡：昵称 + 密码对上返回卡的公开形状（无摘要）。没对上返回 null ——
-   * 「没这个人」和「密码错了」在外面看起来一个样。
-   */
+  /** 登卡：对上返回公开形状（无摘要）；没对上返回 null —— 外面分不出「没这人」和「密码错」。 */
   async verifyCardLogin(
     name: string,
     password: string,
@@ -4733,10 +4206,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return card ? toUserCardPublic(card) : null;
   }
 
-  /**
-   * 领卡（把当前临时会话升级成长期）。room 绑领卡时的那间屋。
-   * 业务错误（重名 / 密码太弱 / 撞门禁码）直接抛，入口层转成 400 的人话。
-   */
+  /** 领卡（临时会话转长期，room 绑领卡时那间屋）。业务错误（重名/密码太弱/撞门禁码）直接抛，入口层转 400。 */
   async createCard(input: {
     name: string;
     purpose: string;
@@ -4760,9 +4230,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 一张卡在所属类型档下有没有某项长期权益（记事本 / 云盘 / 公开 / 矩阵）。
-   * 内置通用档名册上查无此档 —— 就地按全开算；卡没了、档被删都按没有算。
-   * 路由层的权益接线（notes / upload 放行）隔着 DO 走这一条。
+   * 卡在所属档下有没有某项长期权益（记事本/云盘/公开/矩阵）。
+   * 名册查不到走 cardPermFallback；卡没了、档被删都按没有算。
    */
   async cardPerm(
     cardId: string,
@@ -4773,23 +4242,18 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     // 档位权益现查名册（内置通用档也在名册里，管理员关掉就真的关掉）
     const row = getGuestType(this.db, card.typeId);
     if (row) return row[perm];
-    // 查无此档的兜底口径见 guestTypes.ts 的 cardPermFallback：
-    // 老三项维持历史全开，矩阵权一律按没有算
+    // 查无此档：通用档老三项全开、其余档全关，矩阵权一律没有（见 cardPermFallback）
     return cardPermFallback(card.typeId, perm);
   }
 
-  /**
-   * 持卡人名册（管理员面板用）：昵称、来意、邮箱、档位、最近活跃都在。
-   * 摘要永远不出门 —— 名册是给人看的，不是给猜密码的。
-   */
+  /** 持卡人名册（面板用）：摘要永不出门 —— 名册是给人看的，不是给猜密码的。 */
   async listCards(): Promise<UserCardPublic[]> {
     if (!this.isOwnerRoom) return [];
     return listUserCards(this.db).map(toUserCardPublic);
   }
 
   // ── 公开墙（public_posts，见 publicPosts.ts）────────────
-  // 表归主人那间：墙是这个家的公告板，不属于任何一间来客屋。
-  // 发帖从 Worker 层隔着 DO 打到主人房；这里只出三件事：贴、看、摘。
+  // 表归主人那间；发帖从 Worker 隔着 DO 打到主人房，这里只贴、看、摘。
 
   /** 贴一条上墙。发帖人用卡 id + 昵称快照，Worker 层已核过 permPublic 权益 */
   async publishPost(input: {
@@ -4814,9 +4278,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   // ── 模型目录（model_providers / model_entries，见 modelConfigs.ts）────
-  // 目录归主人那间：管理路由打到这里增删改查，对话主循环按生效条目建模；
-  // 来客那间只在开聊时隔着 DO 读生效那组（activeCatalog，不带守卫 ——
-  // 表里存的是 secret 变量名，本来就没有 key 本体可泄）。
+  // 目录归主人那间；来客开聊时隔着 DO 读生效那组（不带守卫 —— 表里只有 secret 变量名）。
 
   private ensureModelConfigs(): void {
     ensureModelCatalogSchema(this.db);
@@ -4877,7 +4339,6 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return ok;
   }
 
-  /** 往一家供应商底下挂一个模型条目。 */
   async addModelEntry(input: {
     providerId: string;
     model: string;
@@ -4915,11 +4376,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return ok;
   }
 
-  /**
-   * 普通模式生效的那组（条目 + 供应商）。无守卫 —— 来客那间的对话也要按这些建模。
-   * fromRoom 是来取的那间屋（跨间 RPC 带上自己的名字）：记着它，
-   * 目录一改就推它作废缓存（见 invalidateCatalogCaches）。
-   */
+  /** 普通模式生效的目录组。无守卫（来客也要按它建模）；fromRoom 用于目录变更时推作废缓存。 */
   async activeCatalog(fromRoom?: string): Promise<ActiveCatalog | null> {
     this.noteServedRoom(fromRoom);
     this.ensureModelConfigs();
@@ -4927,9 +4384,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 深度思考生效的那组：回复风格页把某个模型条目指派给「深度思考」槽位
-   * （state.deepConfigId），指派已失效（条目被删）就退回普通模式那组 ——
-   * 换个槽位不该把深度思考弄挂。同样无守卫。
+   * 深度思考生效的组：按 state.deepConfigId 取；指派失效就退回普通模式那组（换槽位不该把深度思考弄挂）。
+   * 同样无守卫。
    */
   async deepCatalog(fromRoom?: string): Promise<ActiveCatalog | null> {
     this.noteServedRoom(fromRoom);
@@ -4953,11 +4409,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     this._activeCatalog.clear();
   }
 
-  /**
-   * 目录一改就推给来问过的那几间作废缓存 —— 换模型、换指派要像其他设置
-   * 一样即改即生效，不能让人对着面板干等缓存过期。推不动不碍事：
-   * 缓存 30 秒后自己过期，最多就是某间屋多用一会儿旧目录。
-   */
+  /** 目录一改就推给来问过的屋作废缓存，换模型即改即生效。推不动无妨：30 秒后自然过期。 */
   private invalidateCatalogCaches(): void {
     for (const room of this._catalogServedRooms) {
       try {
@@ -4972,8 +4424,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   // ── 读音配置（tts_configs，见 ttsConfigs.ts）──────────────────
-  // 顺序即优先级，没有「生效中」的概念；表同样归主人那间，来客那间
-  // 朗读时隔着 DO 读整张清单（不带守卫，理由同上）。
+  // 顺序即优先级；表归主人那间，来客朗读时隔着 DO 读整张清单（不带守卫，无 key 本体）。
 
   private ensureTtsConfigs(): void {
     ensureTtsConfigsSchema(this.db);
@@ -4986,9 +4437,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   // ── 绘图配置（draw_configs，见 drawConfigs.ts）────────────────
-  // 三档（fast 主力 / high / fallback 兜底）各一条，tier 就是主键。
-  // 表归主人那间；来客那间画图时隔着 DO 读三档（TTS 清单同一套理由，不带守卫
-  // —— 里面本来就没有 key 本体），取不到回落内置默认，画图照常。
+  // 三档（fast/high/fallback）各一条，tier 即主键；表归主人那间，取不到回落内置默认。
 
   private ensureDrawConfigs(): void {
     ensureDrawConfigsSchema(this.db);
@@ -5022,8 +4471,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   /** 场屋/来客那间取主人房的绘图配置：跨间一趟，取不到回落内置默认（画图照常） */
   private async fetchDrawTiers(): Promise<DrawTierConfigs> {
-    // 门槛用「主屋本尊」而不是 isOwnerRoom：场屋也是主人级，但配置表只在主屋库里，
-    // 场屋自己那张是空表 —— 走本尊分支会悄悄回落内置默认，管理员配的档全被绕过
+    // 门槛用主屋本尊而非 isOwnerRoom：场屋也是主人级，但表是空的 —— 抄近路会悄悄回落默认
     if (this.name === OWNER_AGENT) return this.getDrawTiers();
     try {
       const owner = this.env.COWORK_AGENT.get(
@@ -5035,10 +4483,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     }
   }
 
-  /**
-   * 来客那份工具提示词的覆盖值（存在主人那间，管理员改）。RPC 暴露给来客房跨间调。
-   * 空格子照原样给（空 = 用 toolGroups.ts 的出厂稿），这里不替它填默认。
-   */
+  /** 来客版工具提示词覆盖值（存在主人那间）。空格原样给（空 = 用出厂稿），这里不填默认。 */
   async getGuestToolGuide(): Promise<ToolSideGuide> {
     return {
       prompts: this.state.guestToolPrompts || {},
@@ -5100,8 +4545,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   /** 场屋/来客那间取主人房的搜索配置：跨间一趟，取不到回落内置默认（免费通道照常） */
   private async fetchSearchConfig(): Promise<SearchConfig> {
-    // 门槛用「主屋本尊」而不是 isOwnerRoom：场屋也是主人级，但配置表只在主屋库里，
-    // 场屋自己那张是空表 —— 走本尊分支会悄悄回落免费通道，管理员配的 Tavily/Brave 被绕过
+    // 门槛用主屋本尊：场屋也是主人级，但表是空的 —— 抄近路会悄悄回落免费通道
     if (this.name === OWNER_AGENT) return this.getSearchConfig();
     try {
       const owner = this.env.COWORK_AGENT.get(
@@ -5114,10 +4558,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   // ── 邮件通道（mail_config，见 mail/store.ts）──────────────────
-  // 表归主人那间，一行 'main'。红线同 model/tts/search 几套目录：里面只有 secret 的
-  // 变量名，口令本体既不入库也不回显（发的那一刻才从 env 取，见 mail/send.ts）。
-  // 每日额度的账也记在同一行上 —— 测试发送和（下一轮）fireReminder / flushSays
-  // 在人不在时寄的那份副本走的是同一个 reserveMailSlot，两条路不会各记各的账。
+  // 表归主人那间，一行 'main'；只存 secret 变量名，口令不入库也不回显（发信时才从 env 取）。
+  // 每日额度也记在这一行：测试发送与主动消息副本共用 reserveMailSlot，一本账。
 
   /** env 当「变量名 → 值」的袋子用：只用来判某个 secret 配没配，值不外流 */
   private get secretBag(): Record<string, unknown> {
@@ -5129,21 +4571,14 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return getMailConfigView(this.db, this.secretBag);
   }
 
-  /**
-   * 保存：入参已由路由过了一遍白名单闸（mail/store.ts 的 parseMailConfigInput），
-   * 这里再按名取那十一格 —— 谁从别处调进来多塞一个 password 也写不进表。
-   */
+  /** 保存：按名取白名单十一格；别处调进来多塞一个 password 也写不进表。 */
   async mailConfigSave(patch: MailConfigPatch): Promise<MailConfigView> {
     if (this.name !== OWNER_AGENT) throw new Error("邮件配置只在主屋那一行");
     saveMailConfig(this.db, patch);
     return getMailConfigView(this.db, this.secretBag);
   }
 
-  /**
-   * 试一封：收件人可省（省了就发配置里那个默认收件地址）。
-   * 失败不吞：内核那句「认证被拒绝」「STARTTLS 不通」原样回到面板 ——
-   * 寄不出去却说「已发送」，管理员会一直等那封永远不来的邮件。
-   */
+  /** 试一封。失败不吞：内核原始错误回面板 —— 说「已发送」会让人一直等一封不会来的邮件。 */
   async mailTestSend(to?: string): Promise<MailSendResult> {
     if (this.name !== OWNER_AGENT) throw new Error("邮件配置只在主屋那一行");
     return sendConfiguredMail(this.db, this.secretBag, {
@@ -5155,12 +4590,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 人亲自动笔寄一封（信箱页上那个「寄出去」）。
-   *
-   * 与 mailTestSend 的分别是文案谁写：那一条是固定两句验通道，这一条是人家自己
-   * 写的正文 —— 所以必填检查放在**服务端**，不靠界面上的按钮禁用：从别处直连 RPC
-   * 进来的一条空信也该被拦下，而且拦下时**不占额度**（sendConfiguredMail 里
-   * 额度在拨号前才占，这里连它都不进）。
+   * 人亲自动笔寄一封。必填检查在服务端，不靠按钮禁用 —— 直连 RPC 的空信也拦，
+   * 且拦下时不占额度（连 sendConfiguredMail 都不进）。
    */
   async mailComposeSend(input: {
     to?: string;
@@ -5182,12 +4613,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 工具那条路的发信：只认主屋那一行配置。
-   *
-   * 配置表和每日额度都存在主屋的库里，场屋（`default--某场`）自己那张是空表 ——
-   * 就地读必然读出「enabled 没开」，管理员配好的通道被悄悄绕过（fetchDrawTiers
-   * 注释里写的是同一个坑）。都转交主屋还有第二件事：额度只有一本账，不会因为
-   * 多开几场就各记各的、每天多寄好几份。
+   * 工具那条路的发信：配置与额度只在主屋库里，场屋就地读只会读到空表（enabled 没开），
+   * 管理员配好的通道被悄悄绕过。转交主屋还保证额度只有一本账。
    */
   async mailSendForAgent(job: MailJob): Promise<MailSendResult> {
     if (this.name !== OWNER_AGENT) throw new Error("发信只认主屋那行配置");
@@ -5207,24 +4634,14 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     }
   }
 
-  /**
-   * 主屋那间的替身。
-   *
-   * 凡「配置表与流水只存在主屋库里」的东西（发信、发件箱、收件箱）都得经它一手，
-   * 场屋就地读必然读到自己的空表 —— 见 fetchDrawTiers 那个同型的坑。
-   */
+  /** 主屋替身：凡「配置与流水只存在主屋库里」的东西（发信、收发件箱）都经它一手。 */
   private ownerRoom(): CoworkAgent {
     return this.env.COWORK_AGENT.get(
       this.env.COWORK_AGENT.idFromName(OWNER_AGENT),
     ) as unknown as CoworkAgent;
   }
 
-  /**
-   * 发件箱：最近寄出去的每一封，成与败都在。
-   *
-   * 读的是主屋那一本账（流水只在那儿落），场屋要看得见就转过去；
-   * 主屋没应答回一个空列表 —— 发件箱读不到是一句界面提示，不该把整块面板带崩。
-   */
+  /** 发件箱（读主屋那本账）：主屋没应答回空列表 —— 一句界面提示，不该把面板带崩。 */
   async mailOutbox(limit?: number): Promise<MailOutRow[]> {
     if (this.name !== OWNER_AGENT) {
       try {
@@ -5242,12 +4659,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return b ? (b as unknown as EmlStore) : null;
   }
 
-  /**
-   * 收件箱：行、未读数、以及这台机器开没开收信。
-   *
-   * 三件事分开回，是因为界面上必须让人分清「还没接收件通道」与「通道开着但没人寄」——
-   * 都显示成「收件箱是空的」会让人白等，也会让人误关掉闸。
-   */
+  /** 收件箱：行、未读数、开没开收信分开回 —— 界面上要分清「没接通道」和「通道空着」。 */
   async mailInbox(
     limit?: number,
   ): Promise<{ rows: MailInRow[]; unread: number; enabled: boolean }> {
@@ -5265,12 +4677,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     };
   }
 
-  /**
-   * 读一封的正文。
-   *
-   * 能拿到原件就重新过一遍解析给全文，拿不到才退回行上那段摘要 —— 而且把
-   * 「这是摘要」写进 note：让人以为读到全文，比不给他读更糟。
-   */
+  /** 读一封正文：有原件就重解析，拿不到才退回摘要，并在 note 里说明「这是摘要」。 */
   async mailInboxRead(id: string): Promise<{
     row: MailInRow | null;
     text: string;
@@ -5317,11 +4724,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 收一封进来：Cloudflare 的 email() 投递与面板上的「喂一封」都落到这里。
-   *
-   * 顺序是有意的 —— 先算指纹、再落原件、最后写行；写行时如果发现这一封已经在，
-   * 就把刚写进去的原件抹掉。反过来（先写行再写件）失败时会留下一行指不到件的账，
-   * 那种行在界面上点不开，比缺一封更难解释。
+   * 收一封（CF email() 与面板「喂一封」都走这里）。顺序：算指纹 → 落原件 → 写行；
+   * 重复则删刚落的原件。反过来会留下指不到件的行，界面上点不开。
    */
   async mailIngest(raw: string): Promise<MailIngestResult> {
     if (this.name !== OWNER_AGENT) throw new Error("收件箱只认主屋那本账");
@@ -5340,9 +4744,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
         duplicate: false,
         error: `这一封 ${(bytes.byteLength / 1048576).toFixed(1)} MiB，超过 ${(INGEST_MAX_BYTES / 1048576).toFixed(0)} MiB 就不收了（解析它是公网任何人都能敲的 CPU）`,
       };
-    // now 一定要给：报文里没有 Date（或坏掉）时落进「此刻」，
-    // 不传的话解析器按约定退到 epoch —— 那一封会被排在收件箱最末尾、
-    // 原件也存进 mail/in/1970-01-01/ 这种没人找得到的目录里
+    // now 必须给：报文没 Date 时解析器会退到 epoch，这封会被排到最末，
+    // 原件存进 mail/in/1970-01-01/ 这种找不到的目录
     const parsed = parseIncoming(bytes, Date.now());
     const hash = toHex(
       await crypto.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer),
@@ -5365,8 +4768,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     };
     const bucket = this.mailBucket;
     const inserted = insertMailIn(this.db, row, hash, (k) => {
-      // 被挤出保留数的旧信：行没了，原件跟着删；这一步不 await —— 它在 DO 的
-      // 收尾里跑，卡在这儿只会让收信这条入口白白多等一次网络往返
+      // 被挤出的旧信：行没了原件跟着删；不 await —— 别让收信多等一次往返
       void bucket?.delete(k).catch(() => {});
     });
     if (!inserted) {
@@ -5377,10 +4779,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   // ── 全局美术主题（theme_config，见 themeConfig.ts）───────────
-  // 皮肤/名字头像/弹页/主题包全在这份文档里。**读全局可见**（门口/Gate 也要
-  // 看得到皮肤），写只有管理员（路由层总闸 + 这里的 isOwnerRoom 守卫）。
-  // 表归主人那间：场屋/来客那间要读时隔着 DO 取（fetchTheme），取不到回落
-  // 出厂主题，界面照常不塌。
+  // 皮肤/头像/弹页/主题包都在这份文档里；读全局可见（门口也要皮肤），写只有管理员。
+  // 表归主人那间：场屋/来客隔着 DO 取（fetchTheme），取不到回落出厂主题。
 
   private ensureTheme(): void {
     ensureThemeSchema(this.db);
@@ -5406,11 +4806,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return saveTheme(this.db, raw);
   }
 
-  /**
-   * 场屋/来客那间取主人房的主题：跨间一趟，取不到回落出厂（界面照常）。
-   * RPC 暴露给场屋跨间调；REST 读主题直接点名主人房（agentStub 默认就它），
-   * 走不到这里。
-   */
+  /** 场屋/来客取主人房主题：跨间一趟，取不到回落出厂。REST 读主题直接点名主人房，走不到这里。 */
   async fetchTheme(): Promise<ThemeConfig> {
     // 门槛用「主屋本尊」而不是 isOwnerRoom：场屋也是主人级，但配置表只在主屋库里
     if (this.name === OWNER_AGENT) return this.getTheme();
@@ -5451,7 +4847,6 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return deleteThemeSet(this.db, id);
   }
 
-  /** 新建一条读音配置。 */
   async addTtsConfig(input: TtsConfigInput): Promise<TtsConfig> {
     if (!this.isOwnerRoom) throw new Error("读音配置只在主人那间维护");
     this.ensureTtsConfigs();
@@ -5468,7 +4863,6 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return updateTtsConfig(this.db, id, patch);
   }
 
-  /** 删一条读音配置。 */
   async removeTtsConfig(id: string): Promise<boolean> {
     if (!this.isOwnerRoom) return false;
     this.ensureTtsConfigs();
@@ -5476,19 +4870,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 这一轮实际建模用的目录组。deep=true 表示房间开了深度思考 ——
-   * 主线条目若把深度思考指向了另一个条目，就用那组（连供应商/key 都可以换一家）；
-   * 那组供应商的 key 没配进这台机器，就退回主线，深度思考降档但不掉线。
-   *
-   * 只有主屋本尊直接查自己的表；场屋（default--sXxx）和来客那间都隔着 DO 去主人房取，
-   * 取回来缓存 30 秒 —— 每句话都跑一趟跨间调用太贵，而目录是「改一次用很久」的东西。
-   * 缓存不是死期：目录/指派一改，主屋点名推这间作废（dropCatalogCache），
-   * 换完下一句话就生效 —— 像其他设置一样即改即生效，不用等缓存过期。
-   * 门槛必须是「主屋本尊」而不能是 isOwnerRoom：场屋也是主人级（isOwnerRoom 为真），
-   * 但目录只活在主屋的库里 —— 场屋自己的表是空的（老场屋有老表迁移留下的存货，
-   * 那是历史遗留不是保障），照着 isOwnerRoom 抄近路就会读到一张空表，新场屋句句 500。
-   * 跨间调用挂了会重试一次，再挂就回落旧链；挂在哪一环都记进 _catalogDiag，
-   * 让最终的失败文案说得出真话（见 onChatMessage 的 500）。
+   * 这一轮实际建模用的目录组：deep 按主线条目指向取深度组，key 没配就退回主线。只有主屋本尊查自己的表，
+   * 其它屋隔 RPC 取并缓存 30 秒，目录一改由主屋推作废；跨间失败重试一次，再失败回落旧链并记 _catalogDiag。
+   * 门槛必须是主屋本尊：isOwnerRoom 对场屋也为真，但场屋表是空的，抄近路会句句 500。
    */
   private _activeCatalog = new Map<
     boolean,
@@ -5498,12 +4882,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   private _catalogGen = 0;
   /** 来问过目录的屋名单（只主屋用）：目录一改就点名推它们作废缓存 */
   private _catalogServedRooms = new Set<string>();
-  /**
-   * 最近一次取目录的结局说明（空串 = 没毛病）。只服务一件事：
-   * resolveModel 整体失败时，500 的文案能说出真话 —— 是跨间调用挂了、
-   * 主屋目录真空、还是供应商点名的钥匙没配进这台机器，别让人对着
-   * 一句「API_KEY 未配置」去查旧链的 key（那台机器多半根本不走旧链）。
-   */
+  /** 最近一次取目录的结局（空 = 没毛病）：让 resolveModel 失败时的 500 文案说得出真话。 */
   private _catalogDiag = "";
   private async fetchActiveCatalog(
     deep = false,
@@ -5525,8 +4904,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     const c = this._activeCatalog.get(deep);
     if (c && Date.now() - c.at < ACTIVE_CONFIG_CACHE_MS) return c.cat;
     const gen = this._catalogGen;
-    // 跨间调用偶发抖动时重试一次：目录是聊天的命根子 —— 抖一下就回落旧链，
-    // 而这台机器旧链多半没配 key，等于一句话都发不出去；多等一跳比哑火强。
+    // 跨间抖动重试一次：目录是聊天必需，回落旧链多半没 key，等于一句话都发不出去
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         const owner = this.env.COWORK_AGENT.get(
@@ -5544,12 +4922,10 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
           if (typeof key !== "string" || !key)
             return await this.fetchActiveCatalog(false);
         }
-        // 只缓存拿到的目录：取不到的轮次不设 30 秒死窗 ——
-        // 缓存一个 null，后面 30 秒里每句话都会白跑一趟还照样失败
+        // 只缓存拿到的目录：缓存 null 会让之后 30 秒每句白跑一趟还照样失败
         if (cat) {
           diagKeyMissing(cat);
-          // 取的过程中目录被改过（主屋已推来作废）：这一份已经是旧的，
-          // 照常交给本轮用，但不回填 —— 否则旧目录带着新时间戳再驻 30 秒
+          // 取的过程被作废：本轮照用但不回填，否则旧目录带新时间戳再驻 30 秒
           if (gen === this._catalogGen)
             this._activeCatalog.set(deep, { at: Date.now(), cat });
         } else {
@@ -5568,41 +4944,31 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 最近一次解析出来的模型组（每轮主对话入口刷新，见 onChatMessage）。
-   * 维护模型跟它走 —— 生效配置可能整台机器都换了厂商，维护活还打旧门就串台了。
+   * 最近一次解析出的模型组（每轮刷新）。维护模型跟它走 ——
+   * 生效配置换厂商后，维护活不能还打旧门。
    */
   private _resolved: ResolvedModel | null = null;
 
-  /**
-   * 这一轮攒下的原始死因（流级错误 / 被叫停 / 输出被截断）。
-   * 三个采集点各写一部分，轮尾 onChatResponse 统一翻成人话写进 state.turnErrors。
-   * 开轮清零；一轮结束就消费掉（见 onChatResponse）。内存态，丢了也不影响历史。
-   */
+  /** 这一轮攒下的原始死因（流级错误/被叫停/截断）。开轮清零，轮尾消费；内存态，丢了不影响历史。 */
   private turnCapture: TurnCapture | null = null;
 
   /**
-   * 轮内记忆检索缓存：同轮同词的搜索复用一次向量查询的结果（Vectorize 按维度计费）。
-   * 生命周期：onChatMessage 开头清一次；写记忆的工具执行时也会当场清 ——
-   * 刚记下的话必须当场搜得到，这条永远比省一次查询重要。
+   * 轮内检索缓存：同轮同词复用一次向量查询（Vectorize 按维度计费）。
+   * 写记忆的工具执行时当场清 —— 刚记下的话必须当场搜得到，这条比省一次查询重要。
    */
   private readonly recallCache = new Map<string, MemEntry[]>();
 
   /**
-   * 维护模型：优先用主对话解析出的那份；没开过聊（如夜间任务先跑）就回落 secrets 链。
-   *
-   * 只给「轮内」用 —— 那一轮 onChatMessage 开头刚解析过，_resolved 一定在。
-   * 闹钟轮（回想、夜间整理、提醒）走 resolveMaintModel，别用这个。
+   * 维护模型：优先用本轮解析出的那份，没开聊时回落 secrets 链。
+   * 只给轮内用；闹钟轮（回想、夜间整理、提醒）走 resolveMaintModel。
    */
   maintModel(): LanguageModel | null {
     return this._resolved?.maintModel ?? maintenanceModel(this.env);
   }
 
   /**
-   * 维护模型的「冷唤醒」版：闹钟轮进来时实例是冷的，_resolved 为空，
-   * 同步那版只会回落旧链；而这台机器常常只在模型目录里配了模型
-   * （旧链 API_KEY / SK_MAINTENANCE 根本没配），回落结果就是 null ——
-   * 回想、夜间整理这类后台活会静默什么都不干，看着就像「从来没触发过」。
-   * 这里补一次目录解析，把模型从目录里读回来。
+   * 维护模型冷唤醒版：_resolved 为空时同步版只会回落旧链，而机器常常只配了目录，
+   * 回落就是 null —— 后台活会静默什么都不干。这里补一次目录解析。
    */
   async resolveMaintModel(): Promise<LanguageModel | null> {
     const hit = this.maintModel();
@@ -5633,8 +4999,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   postComment(messageId: string, author: string, content: string): CommentRow {
     this.ensureFeedback();
     const row = addComment(this.db, messageId, author, content);
-    // 他自己留的评论记一笔 local 账：下一轮他开口时我提一次，带时刻、说完就划掉。
-    // 我自己在评论区回的那句不记 —— 那本来就是我说的（走 feedback 工具，不经这里）。
+    // 他留的评论记一笔 local 账（下轮开口时提一次，带时刻、说完划掉）；我自己回的那句不记
     if (author !== AI_AUTHOR) {
       this.ensureEvents();
       const who = author === "admin" ? "他" : "这位来客";
@@ -5648,10 +5013,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return row;
   }
 
-  /**
-   * 被踩 → 写一条反思进 reflections 书架，让这个方向进长期记忆。
-   * 走 waitUntil：反思要跑一次维护模型，不该让前端等它。
-   */
+  /** 被踩 → 写一条反思进 reflections，让这个方向进长期记忆。走 waitUntil，不让人等。 */
   private async reflectOnDislike(messageId: string): Promise<void> {
     const target = this.messages.find((m) => m.id === messageId);
     const excerpt = target ? messageText(target).slice(0, 200) : "";
@@ -5681,23 +5043,14 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 从刚过去的那段对话里长一点经验 —— 写进 patterns 书架。
-   *
-   * 和 reflectOnDislike 的区别：那个是「被指出错了」才反思，是被动的；
-   * 这个是每攒够一批消息就自己回头看一眼，是主动的。
-   * 一个只会等别人纠正的助手长不快，因为管理员大多数时候不会明说你哪里不好。
-   *
-   * 走 waitUntil：复盘要跑一次维护模型，绝不能让管理员等它。
-   * 整段用 try 包住由调用方兜底 —— 长不出经验是遗憾，让对话出错是事故。
+   * 从刚过去的一段对话里长经验（patterns 书架）：主动复盘，区别于被踩才反思。
+   * 走 waitUntil、由调用方 catch 兜底，不让人等；长不出经验是遗憾，让对话出错才是事故。
    */
   private async distillExperience(): Promise<void> {
     const total = this.messages.length;
-    // 懒初始化：老实例的 state 里没有 expUpto。这里退到「只回看最近一批」，
-    // 而不是从 0 开始 —— 否则升级后第一次对话会把几百条历史一次性喂给模型。
-    // 游标只对「同一场」有意义，而它是屋级 state、messages 却是会话级的：
-    // 同一间屋里换到另一场后，旧游标可能大于这一场的条数 —— 那样
-    // total - from 恒小于 EXP_EVERY，这场复盘就永久停摆了。越界就当场作废，
-    // 按最近一批重新起步；大不了重看一段，isDuplicate 会把重复的滤掉
+    // 懒初始化：老实例没有 expUpto，退到「只回看最近一批」而不是从 0 开始。
+    // 游标是屋级、messages 是会话级：换场后旧游标越界就作废重来，
+    // 否则 total - from 恒小于 EXP_EVERY，复盘永久停摆；重看项的重复由 isDuplicate 滤掉。
     const from =
       typeof this.state.expUpto === "number" && this.state.expUpto <= total
         ? this.state.expUpto

@@ -1,10 +1,6 @@
-// 主题（管理员装点全局门面）的前端侧：类型、引用解析、注入引擎、弹页触发判定。
-//
-// 与后端 src/agent/themeConfig.ts 保持同形 —— 主题从 /api/theme 免鉴权下发，
-// 谁走到门口（Gate）都先看到门面，所以前端不能要求登录才拿得到它。
-//
-// 素材引用统一是 `asset:<文件名>`（R2 公开区）或 http(s) 外链；
-// resolveAsset 负责把 asset: 翻成免鉴权的 /api/theme-asset/<文件名>。
+// 主题前端侧：类型、引用解析、注入引擎、弹页触发判定。
+// 与后端 themeConfig.ts 同形；/api/theme 免鉴权下发（门口 Gate 也要先看到门面）。
+// 素材引用为 `asset:<文件名>`（R2 公开区）或 http(s)；resolveAsset 负责翻译。
 
 import { createContext, useContext } from "react";
 
@@ -82,9 +78,9 @@ export interface ThemePopup {
 
 export interface ThemeConfig {
   /**
-   * 来客能不能改自己的纸色。true = 关门：来客的纸色/黎明/暗色选择被 base 接管；
-   * false = 放开来客本地换纸色（只影响他自己）。管理员始终可以自己换。
-   * 存储字段仍叫 locked（历史上是「锁定全局美术」，语义已收窄成这一件事）。
+   * 来客能不能改自己的纸色。true = 关门，来客的纸色选择被 base 接管；
+   * false = 可本地换（只影响他自己）；管理员始终可以换。
+   * 字段名仍是 locked（历史上指「锁全局美术」，语义已收窄）。
    */
   locked: boolean;
   base: ThemeMode;
@@ -123,10 +119,7 @@ export interface ThemeConfigPatch {
   popups?: ThemePopup[];
 }
 
-/**
- * 自定义主题存档：一整份美术配置（含素材的整包）在云端的一个档。
- * 服务端存的是一份自包含的主题包 zip，所以哪怕素材被换被删，这份档翻出来照样装得上。
- */
+/** 自定义主题存档：服务端存的是自包含主题包 zip，素材被换被删也照样装得上 */
 export interface ThemeSet {
   id: string;
   name: string;
@@ -193,10 +186,7 @@ export function backgroundFor(
   return theme.backgrounds?.global ?? emptyBackground();
 }
 
-/**
- * 背景层的两份样式：图层（铺图 + 模糊）和压暗层。
- * 落点只需塞进一个「撑满容器的绝对定位层」，不用动自己布局。
- */
+/** 背景层两份样式：图层（铺图 + 模糊）与压暗层，都是撑满容器的绝对定位层 */
 export function backgroundLayerStyles(
   theme: ThemeConfig,
   scope: BackgroundScope,
@@ -240,13 +230,9 @@ export function iconOverride(theme: ThemeConfig, name: string): string {
   return resolveAsset(theme.iconOverrides?.[name] ?? "");
 }
 
-// ── 弹页触发判定（纯函数，给单测用）────────────────────────────────
-//
-// 触发语义：
-//   load  —— 每次进站弹一次（本次会话内不重复，会话去重由调用方记）
-//   first —— 只在「从没弹过」时弹一次
-//   daily —— 每天第一次进站弹一次
-//   delay —— 进站后等 delaySeconds 秒弹一次（会话去重同 load）
+// ── 弹页触发判定（纯函数，给单测用）──
+// load = 每次进站弹一次（会话去重由调用方记）；first = 从没弹过才弹；
+// daily = 每天第一次进站弹；delay = 进站 delaySeconds 秒后弹（去重同 load）。
 
 export interface PopupRecord {
   /** 累计弹过几次 */
@@ -303,10 +289,8 @@ function hslaCss(h: number, s: number, l: number, a: number): string {
 }
 
 /**
- * 三级调色器的染色配方：基调说到底就是一个颜色 —— 和晨曦微蓝同一句话，
- * 「同一张纸泡进一个颜色里」，只给灰阶染色相，版式/字/圆角全不动。
- * 签名块（--yuzhe-black）就是用户调出来的那个色。
- * dark=true 时按夜墨的结构（暗底亮墨、签名块翻白）。
+ * 三级调色器的染色配方：基调就是一个颜色，只给灰阶染色相，版式/字/圆角不动。
+ * 签名块（--yuzhe-black）就是用户调出来的色；dark=true 按夜墨结构（暗底亮墨、签名块翻白）。
  */
 export function tintPalette(tint: ThemeTint, dark: boolean): Record<string, string> {
   const h = clampN(Number(tint.h) || 0, 0, 360);
@@ -394,10 +378,8 @@ export function buildThemeCss(theme: ThemeConfig): string {
     `[data-message-style="minimal"] .theme-msg::before { display: none !important; }`,
   );
 
-  // 壁纸上的文段块：素排的正文直接压在画上看不清，垫一层半透明纸底。
-  // 不上 backdrop-filter —— 全局毛玻璃是换场卡顿的老根（styles.css 有注），
-  // 半透明纸就是便宜的「毛玻璃感」。minimal 档用户点名不要块，正文让路；
-  // 名签不是正文块，哪个档都得让人看清他是谁。
+  // 壁纸上的正文块垫一层半透明纸：不上 backdrop-filter（全局毛玻璃是换场卡顿的老根，
+  // 见 styles.css）；minimal 档正文让路，但名签哪个档都要看清。
   rules.push(
     `html[data-wallpaper~="chat"] .msg-label { background: color-mix(in srgb, var(--yuzhe-surface) 85%, transparent); padding: 3px 10px 4px; border-radius: 999px; width: fit-content; }`,
   );
@@ -426,13 +408,8 @@ export function themeSnapshot(): ThemeConfig {
 }
 
 /**
- * 把主题落到文档上：注入样式表 + 写 <html> 属性。
- * 锁定（locked）时把 data-theme 接管成 base —— 普通用户的纸色选择就翻不动了。
- */
-/**
- * 主题落盘：主题是低频变更的全站数据，本机存一份，“下次开机先用它把样式套上”，
- * 省掉启动后等一次 /api/theme（要走 Durable Object）才上皮肤。
- * 存不下/读不出都不影响进门，扔了就是回到出厂主题。
+ * 主题落盘：低频变更的全站数据，本机存一份，下次开机先用它套样式，
+ * 省掉等 /api/theme（要走 DO）才上皮肤。存不下/读不出都不影响进门。
  */
 const THEME_CACHE_KEY = "ericher.theme.cache.v1";
 
@@ -477,6 +454,7 @@ export function cacheTheme(theme: ThemeConfig): void {
   }
 }
 
+/** 把主题落到文档：注入样式表 + 写 <html> 属性；locked 时 data-theme 由 base 接管 */
 export function applyThemeToDocument(theme: ThemeConfig): void {
   currentTheme = theme;
   const root = document.documentElement;

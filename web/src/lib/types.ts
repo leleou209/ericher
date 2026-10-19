@@ -1,7 +1,5 @@
-// 后端 `src/agent/state.ts` 的镜像类型。
-//
-// 刻意不 import 后端文件：tsconfig.node/web 分离是为了避免 DOM 类型污染 Worker 侧，
-// 反向 import 会把 Workers 全局类型带进浏览器侧。字段若变，两边一起改。
+// 后端 src/agent/state.ts 的镜像类型。
+// 不 import 后端：会把 Workers 全局类型带进浏览器侧；字段若变，两边一起改。
 
 export const SHELVES = [
   "identity",
@@ -29,10 +27,7 @@ export const SHELF_LABEL: Record<Shelf, string> = {
   sessions: "会话",
 };
 
-/**
- * 一段话的语气。后端 src/agent/state.ts 的 SENTIMENTS 与此一一对应。
- * 只给六个：再多就没人分得清 warm 和 bright 的差别了。
- */
+/** 一段话的语气，与后端 state.ts 的 SENTIMENTS 一一对应；只留六个，再多分不清 */
 export const SENTIMENTS = [
   "calm",
   "warm",
@@ -71,10 +66,7 @@ export interface MemEntry {
   person: string;
   /** 能不能给来客看。private = 只在我和管理员之间用；public = 管理员特意点了头的那几条 */
   visibility: "private" | "public";
-  /**
-   * 显式收回：管理员最后一次手动决定是「不公开」。压过 tag 门 ——
-   * 收回之后 tag 门再开它也不出门。只听「公开 / 收回」按钮的。
-   */
+  /** 显式收回：管理员手动的「不公开」压过 tag 门，只听公开/收回按钮 */
   hold?: boolean;
   content: string;
   accessed: number;
@@ -159,11 +151,7 @@ export interface Task {
   created: string;
 }
 
-/**
- * 本场步骤的一条。字段和全局的 Task 一样，只是作用域不同：
- * 那个跨会话（存在 state.tasks 里），这个只属于当前这一场
- * （后端按 session_id 存 session_tasks 表，见 agent/sessionStore.ts）。
- */
+/** 本场步骤：字段同 Task，但只属于当前这场（后端存 session_tasks 表） */
 export interface SessionTask {
   title: string;
   desc: string;
@@ -186,10 +174,7 @@ export interface Summary {
   msgCount: number;
 }
 
-/**
- * 他正等你回答的一个问题（后端 ask 工具写进来）。
- * 只留没答的那几条 —— 答完这张卡就该消失，答案会作为普通消息留在对话流里。
- */
+/** 他正等你回答的问题（ask 工具写入）；答完卡片消失，答案作为普通消息留在对话流 */
 export interface AskEntry {
   id: string;
   /** 他问的那句话 */
@@ -213,10 +198,7 @@ export interface ChatState {
   selfDemandLog: string[];
   /** 管理员自定义的人格提示词；为空表示用内置默认 */
   basePrompt: string;
-  /**
-   * 工具守则拆成了逐工具的稿子：name → 文本（空 = 用出厂默认）。
-   * 一件工具一格，改 read_url 不影响 draw（见后端 src/agent/toolGroups.ts）。
-   */
+  /** 工具守则逐工具稿：name → 文本（空 = 出厂默认）；改一件不影响别的 */
   toolPrompts: Record<string, string>;
   /** 组尾的追加稿：groupId → 文本（空 = 用出厂默认） */
   toolGroupNotes: Record<string, string>;
@@ -232,10 +214,7 @@ export interface ChatState {
   recapPrompt: string;
   skills: Record<string, string[]>;
   tasks: Task[];
-  /**
-   * 本场计划（目标 + 步骤）改过几次。内容不在这里，得按 room/session 去
-   * /api/session-plan 拉；这个计数器当信号用 —— 它一变就重拉一次。
-   */
+  /** 本场计划改过几次；内容按 room/session 去 /api/session-plan 拉，它变了就重拉 */
   planRev: number;
   /** 还摆在我眼前、没答的问题 */
   asks: AskEntry[];
@@ -260,15 +239,9 @@ export interface ChatState {
   expCount: number;
   /** 朗读用哪副嗓子（音色 id，见 src/audio/tts.ts）；空串 = 还没挑，用默认 */
   voice: string;
-  /**
-   * 我此刻翻着的那一篇笔记（notes 表主键）；空串 = 没在看。
-   * 它不只是界面状态：后端每轮拼提示词都会读它，于是说「这篇」的时候他知道是哪篇。
-   */
+  /** 我此刻翻着的笔记 id；后端每轮拼提示词都读它，说「这篇」时他知道指哪篇 */
   noteFocus: string;
-  /**
-   * 上一轮对话的上下文占用账（后端轮尾回写）；没聊过的场没有这一格。
-   * 聊天头部拿它画「这一场聊到了窗口的几成」，顺带把缓存命中率放进提示里。
-   */
+  /** 上一轮的上下文账（后端轮尾回写）；头部用它画窗口占用与缓存命中 */
   lastUsage?: LastUsage;
   /** 异常中断的死因账（后端轮尾回写）；界面按 messageId 挂在对应回答下面 */
   turnErrors?: TurnError[];
@@ -276,17 +249,12 @@ export interface ChatState {
   lastRoom: string;
   /** 最后看的那一场（sessions 表主键）；与人屋的 activeSession 不是同一格 */
   lastSession: string;
-  /**
-   * 上面那笔记于何时（毫秒时间戳）；0 = 从没记过。
-   * 多端各自都会写回，人屋只留最晚的那笔 —— 谁的时间新就以谁为准。
-   */
+  /** 上面这几笔的时刻；0 = 没记过。多端写回时人屋只留最晚那笔 */
   lastViewAt: number;
 }
 
-/**
- * 一次异常中断的死因（后端 src/agent/turnReport.ts 判定后写进 state）。
- * title/detail 是给所有人看的人话；raw 是给开发者的原始报文，界面折叠、管理员可展开。
- */
+/** 一次异常中断的死因（后端 turnReport.ts 判定）；title/detail 是人话，
+ *  raw 是原始报文，界面折叠、仅管理员可展开 */
 export interface TurnError {
   /** 绑定的助手消息 id；断在还没吐出内容时为空串，界面按尾部落单条 */
   messageId: string;
@@ -404,10 +372,7 @@ export interface SessionMeta {
   visibility: "private" | "public";
   created: string;
   lastActive: string;
-  /**
-   * 置顶时刻（ISO）；空串 = 没置顶。侧栏用它分出置顶区，
-   * 区内按这个时刻升序 —— 先顶上的一直在前，后顶上的顺次往后。
-   */
+  /** 置顶时刻；空串 = 未置顶。置顶区按它升序：先顶的在前 */
   pinned: string;
   msgCount: number;
   /** 这场更早的部分已经被压缩成摘要（原文还在，只是不再整段发给我） */
@@ -450,11 +415,7 @@ export interface Reminder {
   title: string;
 }
 
-/**
- * 今天的写额度账：一天 10 万行写入是整间屋子共用的，
- * 超了之后连「读」都会一起失败 —— 所以他每天会有一段时间整个人动不了。
- * 这个面板就是让那笔账看得见：到底是谁在写、写了多少。
- */
+/** 今日写额度账：全屋共用 10 万行，超了连读都失败；用来看谁在写、写了多少 */
 export interface WriteReport {
   /** UTC 日期，也就是额度所属的那一天（北京时间早八点换日） */
   day: string;
@@ -551,13 +512,8 @@ export interface NoteRevision {
   by: NoteAuthor;
 }
 
-/**
- * 一副嗓子的选项（读音选择界面用）。
- * 服务端把全部嗓音都回传，用不用得上一副一副标出来 ——
- * 不再把没配密钥的悄悄滤掉：那样用户只会看到「好音色怎么都没了」，却看不到原因。
- * 读音服务条目化之后：id 是读音配置的条目 id，provider 是协议名
- * （mimo-chat / doubao / glm-speech），不再枚举 —— 后端加协议不必等前端跟着改。
- */
+/** 一副嗓子的选项。服务端全量回传并逐副标出可用性（不静默滤掉，否则看不到原因）；
+ *  id 是读音配置条目 id，provider 是协议名，后端加协议不必改前端 */
 export interface VoiceOption {
   id: string;
   label: string;
@@ -599,23 +555,13 @@ export interface VisitorRoom {
 /** 来客类型的对外快照（连接鉴权/工具层流转的形状，无密码无停用位） */
 export type GuestTypeInfo = Omit<GuestType, "active" | "created">;
 
-/**
- * 来客类型（后端 guest-types 表的镜像）：一个口令就是一类来客。
- *
- * 表里第一行恒是内置通用档（id = "common"，名字「通用来客」）：用前台门禁
- * 口令进来的来客都归这一档。它一样可以按件关工具，只是口令取自 env、
- * 不可改也不可停用、更删不得 —— 它是门口最后一把钥匙。
- * 自定义档的口令在后端只存 SHA-256 摘要，不回显：忘了就重设一个。
- */
+/** 来客类型：一个口令一类来客。首行恒为内置通用档（id=common，前台门禁口令进来的都归它，
+ *  口令取自 env，不可改/停用/删除）；自定义口令后端只存 SHA-256 摘要 */
 export interface GuestType {
   id: string;
   name: string;
   note: string;
-  /**
-   * 这一档开着的对外工具名（逐工具权益的权威）。
-   * 空数组 = 显式全关；后端对老行会按旧开关推平一次。
-   * 恒开的（天气/识图/卡片/留痕）不必写进来，后端会补上。
-   */
+  /** 对外工具名（权益权威）。空数组 = 显式全关；恒开的不必写，后端会补 */
   tools: string[];
   /** 长期权益：记事本（凭身份卡解锁） */
   permNotes: boolean;
@@ -623,11 +569,7 @@ export interface GuestType {
   permFiles: boolean;
   /** 长期权益：公开内容与公开文件（凭身份卡解锁） */
   permPublic: boolean;
-  /**
-   * 长期权益：网页矩阵的全量管理权（给了就是整面：页面、连线、外观、
-   * 外站认定表、打包/装备，不拆子权限）。
-   * 可选是刻意的：老后端不回这一格，读不到就按「没有这个权」算（`?? false`）。
-   */
+  /** 网页矩阵全量管理权（页面/连线/外观/外站/打包，不拆子权限）。可选：老后端不回即视为无权 */
   permMatrix?: boolean;
   /** 停用后这个口令进不来，配置保留 */
   active: boolean;
@@ -663,9 +605,7 @@ export interface PublicPost {
 }
 
 // ── 工具名册（后端 src/agent/toolGroups.ts 的镜像，走 GET /api/tool-groups）──
-//
-// 「工具守则」面板与「来客权限」页都读它：组 → 工具，两侧（主人/来客）各自的
-// 出厂稿与当前自定义。不写死在前端 —— 名册只有后端一份，写死两份必定对不上。
+// 工具守则与来客权限页共用；名册只有后端一份，前端写死两份必定对不上。
 
 /** 工具语义组 */
 type ToolGroupId =
@@ -744,10 +684,7 @@ export interface ModelEntry {
   model: string;
   /** 单次回复的输出上限（token）；0 = 用服务端默认 */
   maxOutput: number;
-  /**
-   * 最大上下文（token）；0 = 没设，界面回落到默认档。
-   * 聊天头部拿它和 lastUsage 对比，显示这一场聊到了窗口的几成。
-   */
+  /** 最大上下文（token）；0 = 用默认档。聊天头部用它对比 lastUsage 算窗口占用 */
   contextWindow: number;
   active: boolean;
   created: string;
@@ -798,11 +735,8 @@ export interface SearchConfig {
 /** 最后一次发信的回执（形状照后端，字段一个不加不减） */
 export type MailLastSend = NonNullable<MailConfigView["lastSend"]>;
 
-/**
- * 邮件（SMTP 发信账号）：后端算好的那一份视图，单条。
- * 界面上永远不出现口令 —— `keySecret` 是 Worker secret 的变量名，口令本体不进浏览器。
- * `keyAvailable` 与 `lastSend` 是只读事实，不由这里提交。
- */
+/** 邮件（SMTP）配置视图。口令永不进浏览器：keySecret 只是 secret 变量名；
+ *  keyAvailable / lastSend 是后端只读事实，不由界面回传 */
 export interface MailConfigView {
   enabled: boolean;
   hostname: string;
@@ -822,19 +756,16 @@ export interface MailConfigView {
   lastSend: { at: string; ok: boolean; error: string; to: string } | null;
 }
 
-/**
- * 保存时提交的那九格（其余是只读事实，不该由界面回传）。
- * 从 MailConfigView 上 Pick 出来：名字与后端对不上就编译不过，抄不出第二套拼法。
- */
+/** 保存时提交的九格（其余为只读事实）。Pick 自 MailConfigView，防止抄出第二套拼法 */
 export type MailConfigPatch = Pick<
   MailConfigView,
   "enabled" | "hostname" | "port" | "secure" | "username" | "keySecret" | "from" | "to" | "dailyCap"
 >;
 
-/** 设置页左导航的条目。工具不在这些条目里 —— 它们在对话里被直接调用，只有技能配方归这里。 */
 /** 外观主题：白纸黑字 / 晨曦微蓝 / 夜墨 / 跟随系统（见 theme.css 的 token 组） */
 export type ThemeKey = "paper" | "dawn" | "dark" | "system";
 
+/** 设置页左导航条目。工具不在这里 —— 它们在对话里直接调用，只有技能配方归此页 */
 export type SettingsKey =
   | "profile"
   | "about"
@@ -875,10 +806,7 @@ export type SettingsKey =
 /** 一页的身份档：公开 / 持票来客 / 管理员 / 指定来客档位白名单 */
 export type MatrixAccess = "public" | "visitor" | "admin" | "types";
 
-/**
- * 节点类型：这个点是网页、是门卫、还是助手本体。
- * 老配置里没有这一格，读的时候一律按 page（见 src/matrix/core.ts 的 parseKind）。
- */
+/** 节点类型：网页 / 门卫 / 助手本体；老配置缺省按 page（见 matrix/core.ts） */
 export type MatrixNodeKind = "page" | "gate" | "assistant" | "app";
 
 /** 矩阵里的一页：一条层级路径 + 一档身份 + 一段正文（或一条外站链接） */
@@ -895,10 +823,7 @@ export interface MatrixPage {
   external?: string;
   /** 本页自由 CSS：只在这一页生效，排在矩阵默认样式之后 */
   css?: string;
-  /**
-   * 正文改为引用云盘里的一只文件时记的 key。有它就不出本页正文，实时读那只文件；
-   * 那只文件因此不能删/搬（后端云盘工具会拦）。
-   */
+  /** 正文引用云盘文件的 key。有它就不出本页正文，那只文件不能删/搬 */
   driveKey?: string;
   updatedAt: number;
 }
@@ -908,10 +833,7 @@ export interface MatrixNav {
   on: boolean;
 }
 
-/**
- * 矩阵外观：注入物（通路按钮、悬浮菜单）的主色与按钮形态。
- * 它管的是「矩阵加进去的那层壳」，跟页面自己写的 CSS 是两回事。
- */
+/** 矩阵注入层（通路按钮、悬浮菜单）的主色与按钮形态，与页面自身 CSS 无关 */
 export interface MatrixTheme {
   /** 主色：链接与按钮的强调色，六个十六进制位 */
   accent: string;
@@ -925,10 +847,7 @@ export interface MatrixPages {
   theme: MatrixTheme;
 }
 
-/**
- * 外站认定：列在这张表里的域名才允许从内站过去，门卫页据此放行或拦下。
- * 表外的一律拦（包括伪造跳转目标的情形），所以这份表默认是空的、安全的。
- */
+/** 外站认定表：表内域名才允许从内站过去；表外（含伪造目标）一律拦，默认空表 */
 export interface ApprovedSite {
   /** 域名（小写，不含协议与路径）；它同时放行自己的子域 */
   host: string;
@@ -947,12 +866,8 @@ export interface MatrixPageDetail {
   body: string;
 }
 
-/**
- * 按钮摆在页面里的哪里 —— 按钮本身不属于页面内容，是矩阵在渲染时拼进去的：
- *   auto   兜底：注入到页面末尾的「通路」栏
- *   anchor 填进正文里名为 name 的命名锚点（空元素，如 <div id="north"></div>）
- *   point  拖拽落点（百分比 0-100，设计器里用）
- */
+/** 按钮落点（按钮由矩阵渲染时拼入，不属于页面内容）：
+ *  auto = 页末「通路」栏；anchor = 正文里 name 的命名锚点；point = 拖拽坐标（0-100） */
 export type LinkPlace =
   | { kind: "auto" }
   | { kind: "anchor"; name: string }
@@ -973,10 +888,7 @@ export interface MatrixLinks {
   links: MatrixLink[];
 }
 
-/**
- * 网页矩阵的一次性总览（/api/matrix/stat）：设置页状态卡与工作台头部拿它显示
- * 「什么版本、矩阵多大规模、外观开着没」。只读汇总，细节去 pages/links 取。
- */
+/** 矩阵只读总览（/api/matrix/stat）：版本、规模、外观开关；细节去 pages/links 取 */
 export interface MatrixStat {
   /** 版本号（与主包同取自 package.json） */
   version: string;
@@ -1002,10 +914,7 @@ export interface MatrixStat {
   updatedAt: number;
 }
 
-/**
- * 装备一个矩阵包（/api/matrix/pack）之后回执的账：装进去多少、丢了多少。
- * 装备是**整体替换** —— 账目报的是包里的数，不是「新增了多少」。
- */
+/** 装备矩阵包的回执。装备是整体替换：数字报的是包里的量，不是新增量 */
 export interface MatrixPackResult {
   pages: number;
   links: number;
@@ -1020,14 +929,9 @@ export interface MatrixPackResult {
   snapshot: boolean;
 }
 
-// ── 信箱（发件流水 / 收件箱）────────────────────────────────
-//
-// 字段名与后端 src/mail/mailboxTypes.ts 一一对应。web 从不 import src（那会把
-// Workers 全局类型带进浏览器侧），所以这里照抄一份 —— 本仓库既有惯例：
-// 改一边必须同轮改另一边，否则合流那天两边字段名对不上还都绿灯。
-//
-// 上面 MailConfigView 的 `to` 那一格现在存的是「地址表文本」（一行一个地址）；
-// 拆分/拼回/校验的纯规则在 lib/mailForm.ts，界面读法在 lib/mailBoxView.ts。
+// ── 信箱（发件流水 / 收件箱）──
+// 字段与后端 src/mail/mailboxTypes.ts 一一对应；web 不 import src（避免 Workers 类型），
+// 改一边必须同轮改另一边。MailConfigView.to 存地址表文本，规则见 mailForm/mailBoxView。
 
 /** 这一封是谁要寄的：面板「试一封」/ ericher 的工具 / 提醒・盯梢的离线副本 */
 export type MailSource = "panel" | "tool" | "say";
@@ -1045,12 +949,8 @@ export interface MailOutRow {
   source: MailSource;
 }
 
-/**
- * 收件箱里的一行：头部在 DO 表里，正文与原件在 R2。
- *
- * `emlKey` 为空 = 原件没落盘（太大或这台机器没配桶），只留摘要与字节数 ——
- * 界面要能看出「这封只有摘要」，不能假装点得开全文。
- */
+/** 收件箱一行：头部在 DO 表，正文与原件在 R2。emlKey 空 = 原件没落盘，
+ *  只有摘要与字节数，界面不能假装点得开全文 */
 export interface MailInRow {
   id: string;
   at: string;
@@ -1062,10 +962,7 @@ export interface MailInRow {
   bytes: number;
   read: boolean;
   hasAttachment: boolean;
-  /**
-   * 附件清单（只有名字与大小）。可选是有意为之：这一列后加，
-   * 老库里那几封与别的调用方给的假行都可能没有它，读的人得按"没有清单"处理。
-   */
+  /** 附件清单（仅名字与大小）。可选是有意为之：老数据可能没有，按「无清单」处理 */
   attachments?: { name: string; bytes: number }[];
   /** 纯文本正文的开头一段；随列表一起回 */
   preview: string;
@@ -1097,10 +994,7 @@ export interface MailInOpenReceipt {
   read: boolean;
 }
 
-/**
- * 邮件配置新增的三格。全部可选是刻意的：后端还没合流时 GET 回不来，
- * 界面按「两个开关都关着、地址表从 `to` 文本里拆」兜住，不能整页报错。
- */
+/** 邮件配置新增三格。全可选是刻意的：老后端不回时按开关关、地址表从 to 拆兜底 */
 export interface MailConfigExtras {
   /** 提醒 / 盯梢另寄一份邮件副本的总开关；默认关 */
   sayMail?: boolean;

@@ -1,18 +1,7 @@
-// theme_config：全局美术主题（皮肤）配置。
-//
-// 前端美术表现的总开关：背景（可以是动图）、ericher 的名字与头像、功能块背景、
-// 按钮花纹、图标覆盖、动画效果、消息栏风格、触发式弹页 —— 全部落在这张表里。
-// 语义与 draw_configs 同一套思路，但主题是一整份文档（弹页是嵌套列表，拆列存
-// 没有意义），所以表只有一行，data 列存 JSON，出入都过 normalizeTheme 收口。
-//
-// 可见性语义（和别的配置不同）：主题**全局可见**，来客那间、未登录门口都读得到
-// —— 所以读路径走 fetchTheme（跨 DO / 免鉴权路由），写路径只有管理员
-// （路由层总闸 + isOwnerRoom 守卫）。locked=true 时整体风格锁定，普通用户
-// 连纸色/黎明/暗色都换不了，全按主题走。
-//
-// 素材不进 JSON：图片/动图上传进 R2 公开区（f/public/theme/），主题里只存
-// `asset:<文件名>` 引用；外链图存完整 https URL 也行。前端把 asset: 解析成
-// 免鉴权的 /api/theme-asset/<文件名>。
+// theme_config：全局美术主题（皮肤）。表只有一行，data 列存 JSON，出入都过 normalizeTheme。
+// 可见性：主题全局可见，来客与未登录门口都读得到（fetchTheme 跨 DO/免鉴权）；写只有管理员。
+// locked=true 时来客连纸色/黎明/暗色都换不了。素材不进 JSON：放 R2 公开区 f/public/theme/，
+// 主题只存 `asset:<文件名>` 或 https URL，前端解析成免鉴权的 /api/theme-asset/<文件名>。
 
 import type { SqlTag } from "./state";
 
@@ -20,8 +9,7 @@ import type { SqlTag } from "./state";
 export type ThemeMode = "paper" | "dawn" | "dark";
 
 /**
- * 基调色（三级调色器）：基调说到底就是一个颜色 —— 色相 0~360、
- * 浓度 0~100、深浅 0~100。null = 不自定义，走 paper/dawn/dark 三档预设。
+ * 基调色（三级调色器）：色相 0~360、浓度/深浅 0~100；null = 用 paper/dawn/dark 三档预设。
  */
 export interface ThemeTint {
   h: number;
@@ -79,9 +67,7 @@ export type PopupTrigger = "load" | "first" | "daily" | "delay";
 const POPUP_TRIGGERS: PopupTrigger[] = ["load", "first", "daily", "delay"];
 
 /**
- * 弹页上的动作按钮：一条口信配一个去处。
- * to 只认站内路径（以 `/` 开头）或 http(s) 外链，别的（javascript:、相对路径、
- * 协议相对 `//host`）一律当脏值丢掉 —— 这个地址会被拼进跳转，不能由着人乱填。
+ * 弹页动作按钮：to 只认站内路径（/ 开头）或 http(s) 外链，其余脏值丢掉——会被拼进跳转。
  */
 export interface ThemePopupAction {
   /** 按钮文字，最多 20 字 */
@@ -109,8 +95,7 @@ export interface ThemePopup {
 /** 一整份主题。所有字段都有出厂值，normalizeTheme 保证读出来的永远是全形状 */
 export interface ThemeConfig {
   /**
-   * 来客能不能改自己的纸色：true = 关门（来客纸色被 base 接管），
-   * false = 放开来客本地换纸色（只影响他自己）。字段名沿用 locked。
+   * 来客能不能改自己的纸色：true = 关门（纸色被 base 接管）；false = 可本地换（只影响自己）。
    */
   locked: boolean;
   /** 关门时接管来客纸色的基调；不锁时只是默认基调 */
@@ -188,9 +173,8 @@ function str(v: unknown, max: number): string {
 }
 
 /**
- * 写路径的长度校验：超限当场抛人话错误，不走 str() 的静默截断。
- * 截一半的链接/样式是坏数据 —— 预览好好的东西保存完就变样，比拒绝保存更糊涂。
- * 读路径（normalizeTheme）管的是库里的存量脏数据，不能抛，继续回落截断。
+ * 写路径长度校验：超限当场抛人话错误，不走 str() 静默截断——截一半的链接是坏数据。
+ * 读路径（normalizeTheme）对存量脏数据只能回落截断，不能抛。
  */
 function assertLen(v: unknown, max: number, label: string): void {
   if (String(v ?? "").trim().length > max)
@@ -226,8 +210,7 @@ function normalizeTint(raw: unknown): ThemeTint | null {
 }
 
 /**
- * 素材引用收口：只认 `asset:<文件名>` 或 http(s) 外链（大小写不敏感），别的统统当空。
- * 文件名不许带路径分隔符和 `..` —— 引用是要拼进 R2 key 和 URL 的。
+ * 素材引用：只认 `asset:<文件名>` 或 http(s) 外链（大小写不敏感），文件名不许带分隔符/`..`。
  */
 function assetRef(v: unknown): string {
   const s = str(v, MAX_URL);
@@ -487,8 +470,7 @@ export function patchTheme(sql: SqlTag, patch: ThemeConfigPatch): ThemeConfig {
 /** 主题里所有被引用的素材文件名（去重、只认 asset: 引用） */
 export function referencedAssets(theme: ThemeConfig): string[] {
   const names = new Set<string>();
-  // 和 assetRef 同一把尺：脏文件名（带路径分隔符/..）不收 —— 这名字是要拼进
-  // R2 key 和包内路径的
+  // 和 assetRef 同一把尺：脏文件名（带分隔符/..）不收——要拼进 R2 key 和包内路径
   const add = (name: string) => {
     if (!name || name.includes("/") || name.includes("\\") || name.includes(".."))
       return;
@@ -497,8 +479,7 @@ export function referencedAssets(theme: ThemeConfig): string[] {
   const take = (ref: string) => {
     if (ref.startsWith("asset:")) add(ref.slice("asset:".length));
   };
-  // panelBg 是整段原样注入的 CSS（上传后是 `url("/api/theme-asset/x.png")`），
-  // buttonPattern 和 customCss 也可能被人写成 CSS —— 把嵌在里面的素材名捞出来。
+  // panelBg / buttonPattern / customCss 都是原样注入的 CSS，把嵌在里面的素材名也捞出来；
   // 漏了这步，导出的包不带这几处的图（装上就是空底），导入也不校验悬空。
   const takeCss = (css: string) => {
     for (const m of css.matchAll(/asset:([^\s"'()]+)/g)) add(m[1]);
@@ -522,14 +503,9 @@ export function referencedAssets(theme: ThemeConfig): string[] {
   return [...names];
 }
 
-// ── 自定义主题存档（theme_sets）：把当前整份配置存成一份带名字的档 ────────
-//
-// 存的不是 JSON，而是**一份完整主题包 zip**（清单 + assets/）在云盘的 key ——
-// 这样一份档是自包含的：素材跟着包走，哪怕后来主题素材被换掉、被删掉，翻出
-// 旧档照样装得上（assets/ 里的本体就是当时的原件）。换装走 unpackThemePack
-// 那条老路，和「装备主题包」共用同一把刀。
-//
-// 表存在主人房库里，跟着主题一起是全屋一份的东西；写路径同样只有管理员。
+// ── 自定义主题存档（theme_sets）────────────────────────────
+// 存的是完整主题包 zip 在云盘的 key（清单 + assets/），自包含：素材被换被删也能装回旧档。
+// 换装走 unpackThemePack 老路；表在主人房库，写路径同样只有管理员。
 
 export interface ThemeSet {
   id: string;

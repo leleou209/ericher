@@ -1,16 +1,7 @@
-// 联网搜索、正文抓取与轻量微浏览器。
-//
-// 三层能力，按「想知道什么」分工：
-//   search    —— 我还不知道在哪个网页上，先搜出候选
-//   read_url  —— 我已经知道是哪一页，只要那一页的正文
-//   browse    —— 我要在一个站里走一走：看它有什么、页面上能点去哪
-//
-// 搜索走哪家由 search_config 表说了算（Tavily / Brave，设置页可配）：
-// 配了 key 就走配置的通道，没配（或通道挂了）退化为 DuckDuckGo 免 key 通道——
-// 否则「不确定的我就先搜一下」在没配 key 的环境里就是一句空头承诺。
-// 正文抓取的付费档只认 Tavily extract（Brave 没有抓取接口）；
-// 抓取本身退化为受控直连 + 正文抽取，抽取结果太少再试 Jina Reader
-// （它能执行 JS，覆盖前端渲染的站）。
+// 联网搜索、正文抓取与轻量微浏览器：
+//   search 先搜候选，read_url 只要某一页正文，browse 在一个站里顺着链接走。
+// 搜索通道由 search_config 决定（Tavily / Brave，设置页可配）；没配 key 或通道挂了退 DuckDuckGo 免 key 通道。
+// 正文付费档只认 Tavily extract（Brave 无抓取接口）；抓取退化为受控直连 + 抽取，抽取太少再试 Jina Reader（能跑 JS）。
 
 import { tool } from "ai";
 import { assertReadableWebText, decodeWebResponse } from "../shared/webText";
@@ -33,9 +24,8 @@ const PRIVATE_HOST =
   /^(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|169\.254\.|::1$|\[::1\]$|.*\.internal$|.*\.local$|.*\.localhost$|metadata\.google\.internal$)/i;
 
 /**
- * 浏览器认得的其它 IPv4 写法：十进制整数（`2130706433`）、十六进制（`0x7f000001`）、
- * 八进制（`017700000001`）、省略末段（`127.1`）。URL 解析器把它们当普通字符串，
- * 按点分四位写的私网正则一条都拦不住 —— 先还原成点分四位再判。
+ * 浏览器认得的其它 IPv4 写法：十进制整数、十六进制、八进制、省略末段（127.1）。
+ * 点分私网正则一条都拦不住，先还原成点分四位再判。
  */
 function numericHostOctets(host: string): number[] | null {
   const parts = host.split(".");
@@ -73,9 +63,8 @@ function isPrivateOctets(oct: number[]): boolean {
 }
 
 /**
- * 方括号 IPv6 里的回环 / 未指定 / 链路本地 / 唯一本地 / 组播，以及内嵌私网 IPv4 的
- * 映射写法。只认最短的 `[::1]` 会被 `[0:0:0:0:0:0:0:1]`、`[fd00::1]`、`[::ffff:127.0.0.1]`
- * 从边上溜过去 —— 这几类都指向本机或内网，逐个按前缀/内嵌地址判。
+ * 方括号 IPv6 里的回环 / 未指定 / 链路本地 / 唯一本地 / 组播，以及内嵌私网 IPv4 的映射写法。
+ * 只认 `[::1]` 会被 `[0:0:0:0:0:0:0:1]`、`[fd00::1]`、`[::ffff:127.0.0.1]` 从边上溜过去。
  */
 function isPrivateV6Literal(host: string): boolean {
   if (!host.startsWith("[") || !host.endsWith("]")) return false;
@@ -174,10 +163,8 @@ function textOf(html: string): string {
 }
 
 /**
- * 把 HTML 收成可读正文。
- * 思路是 readability 的简化版：先扔脚本 / 导航 / 页脚，再优先取 <article>/<main>，
- * 没有的话退一步只用 <p> 段落——这两步能覆盖绝大多数内容站，
- * 剩下的交给「标签转换行」把结构保住。
+ * 把 HTML 收成可读正文：先扔脚本/导航/页脚，优先取 <article>/<main>，没有就只用 <p> 段落；
+ * 最后把标签转成换行保住结构。readability 的简化版。
  */
 function extractMain(html: string): string {
   let body = html
@@ -293,10 +280,8 @@ async function tavily(
 }
 
 // ── Brave 通道 ─────────────────────────────────────────
-//
-// Brave Search API：GET 一次、X-Subscription-Token 头带钥匙，没有摘要生成
-// 但结果快、独立索引。freshness 是它的时间过滤记号（pd/pw/pm/py），
-// 和 Tavily 的 time_range 用词不同，在这层翻译。
+// Brave Search API：GET 一次 + X-Subscription-Token，没有摘要生成，但结果快、独立索引。
+// freshness 是它的时间过滤记号（pd/pw/pm/py），和 Tavily 的 time_range 用词不同，在这层翻译。
 
 interface BraveResponse {
   web?: {
@@ -374,10 +359,9 @@ async function jinaRead(target: string): Promise<string> {
 }
 
 /**
- * 逐跳校验的 fetch：入口地址与每一跳的落点都过 assertPublicUrl 才敢跟，最多 5 跳。
- * 为什么不用 `redirect:"follow"`：那只校验了人给的那一个地址 —— 一个过了白名单的
- * 公共站，302 到内网 / 云元数据端点，fetch 就照跳不误，这是经典 SSRF 走法。
- * 所有出站抓取（正文、图片、页面）都该走这里。
+ * 逐跳校验的 fetch：入口与每一跳落点都过 assertPublicUrl，最多 5 跳。
+ * 不用 `redirect:"follow"`：那只校验人给的那一个地址 —— 公共站 302 到内网 / 云元数据端点，
+ * fetch 照跳不误，这是经典 SSRF 走法。所有出站抓取（正文、图片、页面）都该走这里。
  */
 export async function publicFetch(
   target: string,
@@ -413,9 +397,8 @@ const clipped = (s: string) =>
   s.slice(0, MAX_CHARS) + (s.length > MAX_CHARS ? "\n\n[已截断]" : "");
 
 // ── 免 key 搜索通道 ────────────────────────────────────
-//
-// 只在没配 TAVILY_API_KEY（或 Tavily 挂了）时启用。它是「能用」而不是「好用」：
-// 摘要短、偶尔抽风，所以结果里会标明来源，让模型自己决定要不要 read_url 深挖。
+// 只在没配 TAVILY_API_KEY（或 Tavily 挂了）时启用。它是「能用」不是「好用」：
+// 摘要短、偶尔抽风，结果里标明来源，让模型决定要不要 read_url 深挖。
 
 interface FreeHit {
   title: string;
@@ -453,11 +436,9 @@ function hostMatch(url: string, domain: string): boolean {
 }
 
 /**
- * 解析 DDG 的结果页。两个端点的差异（都实测确认过）：
- *   html —— <a class="result__a">标题</a>，摘要也是 <a class="result__snippet">
- *   lite —— <a class="result-link">标题</a>，摘要是 <td class="result-snippet">
- * 属性顺序两边还不一样，所以先按 <a> 标签整体切、再看里面有没有结果类名，
- * 摘要的闭合标签用反向引用跟着开标签走——写死 </a> 会跨条目把下一条吞进来。
+ * 解析 DDG 结果页。两个端点的差异（都实测确认过）：html 用 <a class="result__a"> + <a class="result__snippet">，
+ * lite 用 <a class="result-link"> + <td class="result-snippet">，属性顺序也不一样。
+ * 所以按 <a> 整体切、看类名；摘要闭合标签用反向引用 —— 写死 </a> 会跨条目把下一条吞进来。
  */
 function parseDdg(html: string, limit: number): FreeHit[] {
   // 只有「结果标题」链接才是条目起点，广告和站内链接在这一步就会被 unddg 丢掉
@@ -572,10 +553,7 @@ async function ddgInstant(query: string): Promise<string> {
   }
 }
 
-/**
- * 维基百科检索。免 key、返回 JSON、不会被反爬拦——是唯一一条我敢保证
- * 「在 Worker 里一定调得通」的通道。代价是只覆盖百科类问题，所以只当第二手。
- */
+/** 维基百科检索：免 key、返 JSON、不会被反爬拦，Worker 里一定调得通；只覆盖百科类，当第二手。 */
 async function wikiSearch(query: string, limit: number): Promise<FreeHit[]> {
   const out: FreeHit[] = [];
   for (const host of ["zh.wikipedia.org", "en.wikipedia.org"]) {
@@ -679,11 +657,8 @@ function filterHits(
 }
 
 /**
- * 跑一次检索，返回给人看的文本。
- * 抽成普通函数是因为「盯梢」也要用同一套——两处各写一份，早晚会走偏。
- *
- * 通道由 cfg 决定（search_config 表）：Tavily / Brave 配了钥匙就走；
- * 通道挂了或没配钥匙，静默退到免费通道，别让一次搜索失败打断整轮对话。
+ * 跑一次检索，返回给人看的文本。抽成普通函数因为「盯梢」也要用同一套，两处各写一份早晚走偏。
+ * 通道由 cfg 决定（search_config 表）：通道挂了或没配钥匙，静默退到免费通道，别让一次搜索失败打断整轮。
  */
 async function runSearch(
   env: Env,
@@ -702,8 +677,7 @@ async function runSearch(
   const vars = env as unknown as Record<string, string | undefined>;
   const key = cfg.keySecret ? vars[cfg.keySecret] : undefined;
   // 兜底要留痕：key 压根没接上 / 通道挂了 / 空手而归，都退到免费通道 ——
-  // 但静默退法让人只能对着结果猜「是不是 key 没调度」。返回文本里带一句为什么，
-  // 她会顺着念给用户听，问题当场现形
+  // 返回文本里带一句为什么，她会顺着念给用户听，问题当场现形
   let fallbackWhy = key
     ? ""
     : `（备注：主通道没接上 —— 配置的 keySecret「${cfg.keySecret || "空"}」在这台机器上没有对应的 secret，本次走免费通道）`;
@@ -738,9 +712,8 @@ async function runSearch(
           return `${i + 1}. ${r.title || "无标题"}${when}\n${(r.content || "").slice(0, 600)}\n🔗 ${r.url || ""}`;
         });
         const head = data.answer ? `💡 摘要：${data.answer}\n\n` : "";
-        // 成功了也要留名字：不然「返回里没有通道标记」这件事本身会被读成
-        // 「主通道没接上」，而它其实只是成功得没吭声。Brave 与免费通道都报了名，
-        // 就这条不报，反推出错的可能恰恰最大
+        // 成功了也要留名字：缺通道标记本身会被读成「主通道没接上」，而它其实只是成功得没吭声。
+        // Brave 与免费通道都报了名，就这条不报，反推出错的可能恰恰最大
         return (
           "（Tavily 检索，只有摘要与网页片段；要细节就 read_url 打开其中一条）\n\n" +
           head +
@@ -749,8 +722,7 @@ async function runSearch(
       }
       fallbackWhy = "（备注：Tavily 通了但一条结果都没给，本次走免费通道）";
     } catch (e) {
-      // 配额用尽 / 网络问题：退到免费通道，别让一次搜索失败打断整轮对话 ——
-      // 但要说清退了，不让人对着结果猜
+      // 配额用尽 / 网络问题：退到免费通道，别让一次搜索失败打断整轮 —— 但要说清退了
       fallbackWhy = (e as Error).message?.includes("编码损坏")
         ? "（备注：Tavily 返回文字编码损坏，本次走免费通道）"
         : "（备注：Tavily 调用失败（多半是配额或鉴权），本次走免费通道）";
@@ -782,9 +754,8 @@ async function runSearch(
 }
 
 /**
- * 拦页内子请求去私网：assertPublicUrl 只挡得住人给的那一个地址，第二条腿在页里的
- * JS 上（它可以让浏览器去请求内网或元数据地址）。每条都锚在 scheme+host 上，
- * 不去匹配路径里的数字串（`/v10.2/` 这种不该被误伤）。
+ * 拦页内子请求去私网：assertPublicUrl 只挡得住人给的那一个地址，第二条腿在页里的 JS 上
+ * （它可以让浏览器去请求内网或元数据地址）。每条都锚在 scheme+host 上，不去匹配路径里的数字串。
  */
 const PRIVATE_REQUEST_PATTERNS = [
   "^[a-z]+://localhost",
@@ -795,11 +766,8 @@ const PRIVATE_REQUEST_PATTERNS = [
 ];
 
 /**
- * 风控页识别：验证码 / 人机验证 / Cloudflare 挑战这类页面的招牌就在标题和开头。
- *
- * 所以只看前 600 字，且全文必须短（真文章哪怕开头提到「验证码」三个字，
- * 也不会全文短成两千字以内）。识别错了的代价很小：退到 Jina 再取一次，
- * 同一页 Jina 大概率照样取得到 —— 宁可错杀，不把验证页当正文交出去。
+ * 风控页识别：验证码 / 人机验证 / Cloudflare 挑战的招牌就在标题和开头。只看前 600 字且全文必须短
+ * （真文章哪怕开头提到「验证码」，也不会全文短成两千字内）。认错代价小（退 Jina 再取），宁可错杀。
  */
 const CHALLENGE_RE =
   /验证码|人机验证|安全验证|访问验证|滑动验证|拖动滑块|异常流量|请完成验证|captcha|are you a (robot|human)|verify you are human|unusual traffic|just a moment|checking your browser|enable javascript and cookies|access denied/i;
@@ -809,8 +777,8 @@ function looksLikeChallenge(text: string): boolean {
 }
 
 /**
- * 一台正常人的 Chrome：无头浏览器 UA 里的 HeadlessChrome 字样，
- * 是最省事的风控一眼就查的破绽。IP 信誉这类强信号伪装不了，但便宜的伪装先做满。
+ * 一台正常人的 Chrome：无头浏览器 UA 里的 HeadlessChrome 是最省事的风控一眼就查的破绽。
+ * IP 信誉这类强信号伪装不了，但便宜的伪装先做满。
  */
 const REAL_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -820,8 +788,8 @@ const STEALTH_SCRIPT =
   "Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => undefined })";
 
 /**
- * 这一档花了多少浏览器时间，打给 wrangler tail 看。
- * 只记站点主机名不记路径和查询串：那里面常有令牌，而日志是留着给人翻的。
+ * 这一档花了多少浏览器时间，打给 wrangler tail 看。只记主机名不记路径和查询串 ——
+ * 那里面常有令牌，而日志是留着给人翻的。
  */
 function logBrowser(
   target: string,
@@ -834,19 +802,11 @@ function logBrowser(
 }
 
 /**
- * Browser Run：CF 边缘起一个无头浏览器把页面跑完，正文自己抽。
- *
- * 这一档替的是 Jina：两档都是为了「前端渲染的站直连抓回来是个空壳」，但走 Jina
- * 等于把「管理员在看哪个 URL」和整页正文一起交给一家第三方；Browser Run 是同一个
- * Worker 上的 binding，URL 和内容都不出 CF。所以顺序是便宜档先跑、这一档补渲染、
- * Jina 只在本机 dev（没接 binding）或这一档挂了/吃了风控时兜底。
- *
- * 用完整 puppeteer 而不是 quickAction：那层简化档不暴露 UA 和页面脚本，
- * 伪装（真 Chrome UA、抹 webdriver）就没地方做。伪装是尽力而为，
- * 任何一件失败都不该拖垮整次取正文。
- *
- * 拿不到就返回 null 而不是抛：浏览器那侧超时、配额到顶、站点挡自动化都是常事，
- * 这一档失败不该让整次 read_url 失败。唯一例外是落地私网 —— 那是安全问题，要抛。
+ * Browser Run：CF 边缘起无头浏览器把页面跑完，正文自己抽。替 Jina 的两点：URL 和内容都不出 CF
+ * （Jina 会把「管理员在看哪个 URL」和整页正文交给第三方）；顺序是直连先跑、这一档补渲染，
+ * Jina 只在本机 dev 或这一档挂了/吃风控时兜底。用完整 puppeteer 而非 quickAction：
+ * 后者不暴露 UA 和页面脚本，伪装就没地方做。失败返回 null 不抛（超时、配额、挡自动化是常事）；
+ * 唯一例外是落地私网 —— 安全问题要抛。
  */
 async function browserRead(
   env: Env,
@@ -872,8 +832,8 @@ async function browserRead(
     } catch {
       // 伪装失败不算失败
     }
-    // quickAction 时代的两条护栏在这层亲手装回来：
-    // 页内子请求不去私网（页面 JS 发起的 SSRF），图片视频字体不花浏览器配额
+    // quickAction 时代的两条护栏在这层亲手装回来：页内子请求不去私网（页面 JS 发起的 SSRF），
+    // 图片/视频/字体不花浏览器配额
     const blocked = (u: string) =>
       PRIVATE_REQUEST_PATTERNS.some((p) => new RegExp(p).test(u));
     try {
@@ -911,7 +871,7 @@ async function browserRead(
       return null;
     }
     // 重定向链是这一档才看得见的：assertPublicUrl 只挡得住人给的那个地址，
-    // 公共站 302 到一个内网名/元数据地址是经典 SSRF 走法
+    // 公共站 302 到内网名 / 元数据地址是经典 SSRF 走法
     const finalUrl = page.url();
     if (finalUrl && finalUrl !== target) {
       try {
@@ -935,10 +895,8 @@ async function browserRead(
 
 /**
  * 抓一个网页的正文：Tavily extract → 直连抽取 → Browser Run 渲染 → Jina 兜底。
- * read_url 和盯梢共用，所以这里不裁剪长度，调用方按自己的需要截。
- * 付费档只认 Tavily extract（Brave 没有抓取接口）；搜索通道换成 Brave 时
- * 抓取自动从直连起步，不多花一份没意义的钥匙。
- * 真的什么都拿不到才抛错，抛出来的话调用方原样告诉用户。
+ * read_url 和盯梢共用，这里不裁剪长度。付费档只认 Tavily extract（Brave 没有抓取接口）；
+ * 搜索通道换成 Brave 时抓取自动从直连起步。真什么都拿不到才抛错，调用方原样告诉用户。
  */
 export async function fetchPageText(
   env: Env,

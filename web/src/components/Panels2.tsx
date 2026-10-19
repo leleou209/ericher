@@ -1,9 +1,5 @@
-// ─────────────────────────────────────────────────────────────
-// hr-desk · 管理面板（后半）：账本 / 文件 / 自我认知 / 工作守则 / 会话 / 嗓音 / 来客 / 模型 / 读音
-//
-// 前半在 Panels.tsx，纯工具在 PanelsShared.ts。
-// 本文件 import 工具只走 ./PanelsShared —— 不许回头 import Panels.tsx（防循环）。
-// ─────────────────────────────────────────────────────────────
+// hr-desk 管理面板（后半）：账本 / 文件 / 自我认知 / 工作守则 / 会话 / 嗓音 / 来客 / 模型 / 读音。
+// 前半在 Panels.tsx，纯工具在 PanelsShared.ts；本文件只 import 后者（防循环）。
 
 import {
   Fragment,
@@ -107,9 +103,8 @@ import "./Panels.css";
 import "./Panels2Panels.css";
 
 /**
- * 行容器：左边正文、右边小动作、最右一个删除叉。
- * 与 Panels.tsx 里的 Row 是同一份 —— 拆文件后两边各持一份：
- * 它是组件进不了纯工具文件，而本文件又不许回头 import Panels（防循环）。
+ * 行容器：左边正文、右边小动作、最右删除叉。与 Panels.tsx 的 Row 是同一份 ——
+ * 组件进不了纯工具文件，两边各持一份（防循环）。
  */
 function Row({
   children,
@@ -141,24 +136,14 @@ function Row({
 // ── 公开账本（来客看的）───────────────────────────────
 
 /**
- * 客人登记时能挑的几层。
- * 不把整个书架摆给他：identity、reflections 那些是 ericher 自己的工作底账，
- * 摆在这儿他只会不知道该挑哪个 —— 少给几个，反而好选。
+ * 客人登记时能挑的几层。不摆整个书架：identity、reflections 是 ericher 自己的工作底账，
+ * 摆出来只会让人不知道该挑哪个。
  */
 const LEDGER_SHELVES: Shelf[] = ["people", "events", "knowledge", "projects"];
 
 /**
- * 公开账本 + 公开墙 —— 来客和持卡者看的那一格。
- *
- * 账本：管理员公开的人物条目，掺着他自己登记的那几笔。
- * 两档要分开标：管理员点头公开的那些对所有客人可见；客人自己写的落库是 private ——
- * 只有他本人和管理员看得到，别的客人一个字都翻不着。账本上的「公开」
- * 是管理员在记忆面板里亲自点的头，谁（包括前端）都不能替他做这个决定。
- *
- * 墙：公开权益（permPublic 档位）的持卡者贴的纸条，进门的人谁都看得到。
- * 能贴就能撤自己的 —— 收回自己说过的话不算改账本；管理员的板子他随时收拾。
- *
- * 账本只能添、不能改也不能删；墙上的条目署名是贴上去那一刻的昵称快照。
+ * 公开账本 + 公开墙。账本：管理员公开条目 + 客人自己登记的（private，仅本人与管理员可见，
+ * 公开只能管理员点头）；只能添不能改删。墙：permPublic 持卡者贴纸条，能贴能撤自己的。
  */
 export function LedgerPanel({
   isAdmin,
@@ -392,8 +377,8 @@ const fmtSize = (n: number) =>
 const FOLDER_KEEP = ".keep";
 
 /**
- * 云盘里的名字对人不友好：上传的是「时间戳-原名」，他画的是「draw-时间戳.png」。
- * 文件名这一层换成能认出来的说法；路径的层次交给树去摆。
+ * 云盘名对人不友好：上传是「时间戳-原名」，画的是「draw-时间戳.png」。
+ * 这里换成能认出的说法；层次交给树。
  */
 function showFile(name: string): string {
   const drawn = /^draw-(\d+)\.png$/.exec(name);
@@ -426,10 +411,8 @@ function joinPath(dir: string, name: string): string {
 }
 
 /**
- * 把平铺的 key 列表拼成一棵树。文件夹就是 key 里的路径段 ——
- * .keep 占位对象只负责把空文件夹撑出来，不当文件列；
- * 自己房间前缀剥掉（那是屋里屋外的划界，不是目录名），
- * 公开空间给个人话名字。写操作用的还是完整 key，剥的只是显示层。
+ * 把平铺 key 拼成树：文件夹就是路径段；.keep 只撑空夹、不当文件；
+ * 自己房间前缀剥掉（那是屋里屋外的划界），公开空间给人话名。写操作仍用完整 key。
  */
 function buildTree(files: R2File[], scope: string): FileNode[] {
   const root: FileNode = {
@@ -935,11 +918,8 @@ export function SelfPanel({
 // ── 提示词（守则 / 工具守则 / 回想守则）──────────────────
 
 /**
- * 提示词编辑器：三份可改提示词共用一套交互（草稿 / 保存 / 恢复默认）。
- *
- * 三份都是「空串 = 用内置默认」，所以初值要用出厂默认值兜底 ——
- * 否则管理员打开面板看到的是空白，会误以为提示词丢了。
- * 只在外部值变化时同步草稿，避免打字打到一半被覆盖。
+ * 提示词编辑器：三份共用。空串 = 内置默认，初值用出厂值兜底（否则会以为丢了）；
+ * 只在外部值变化时同步草稿，避免打字被覆盖。
  */
 function PromptEditor({
   rows,
@@ -1043,11 +1023,8 @@ export function PromptPanel({
 }
 
 /**
- * 一格稿子：草稿 + 失焦落库。
- *
- * 工具守则的格子有几十个，每格再摆一对「保存/恢复默认」按钮会吵得没法看，
- * 所以改成改完移开焦点（或按 Ctrl/Cmd+Enter）即落库，右上角一个小标记说明
- * 这一格是自定义还是出厂默认。内容没变就不打扰后端。
+ * 一格稿子：草稿 + 失焦落库。工具守则格子有几十个，每格再摆保存按钮会吵得没法看，
+ * 所以失焦（或 Ctrl/Cmd+Enter）即落库，右上角标自定义/默认；内容没变不打扰后端。
  */
 function GuideField({
   label,
@@ -1129,15 +1106,8 @@ function GuideField({
 type ToolGuideSide = "owner" | "guest";
 
 /**
- * 工具守则：「8、我能用的工具」那一块，拆成 语义组 → 逐工具 两级。
- *
- * 一件工具一格提示词，改 read_url 不影响 draw；每组末尾一格写「这一组里
- * 什么话用哪件」；跨组的话（调用纪律、call_tool 用法、主动开口）收在末尾
- * 的「工具组使用风格」里。名册从 /api/tool-groups 取 —— 前后端各写一份
- * 必定对不上号（未来接 MCP 时新工具会自动出现在这里）。
- *
- * 主人/来客两套分开存、分开改：来客屋有自己的状态，管理员改主人那份，
- * 覆盖值不该漏到别人屋里去。
+ * 工具守则：语义组 → 逐工具。改一件不影响别的；名册来自 /api/tool-groups；
+ * 主人/来客两套分开存，覆盖值不漏到别人屋里。
  */
 export function ToolGuidePanel({
   state,
@@ -1331,8 +1301,7 @@ export function ToolGuidePanel({
 
 /**
  * 回想守则：没人说话半小时后，她回头整理这场对话时读的提示词。
- * 默认口径是工作纪要（发生了什么、做了什么、什么情况、要收敛什么、下一步），
- * 不是感想 —— 这里改的是「记什么」，改完只影响之后的回想，不追溯已入库的条目。
+ * 默认口径是工作纪要而非感想；改的是「记什么」，只影响之后的回想，不追溯已入库条目。
  */
 export function RecapGuidePanel({
   state,
@@ -1359,9 +1328,8 @@ export function RecapGuidePanel({
 // ── 会话 ──────────────────────────────────────────────
 
 /**
- * 会话管理面板。消息本体存在后端 DO 里，切换会话是把那一场灌回对话主循环，
- * 所以这里点「切过去」是真的换对话，不是只换标题。
- * 列表数据由 App 统一加载，这里只负责渲染与转发操作，免得侧栏和设置页各拉一份。
+ * 会话管理：消息存在后端 DO，点「切过去」是真的换对话。列表由 App 统一加载，
+ * 这里只渲染与转发，免得侧栏和设置页各拉一份。
  */
 export function SessionSection({
   list,
@@ -1552,10 +1520,8 @@ export function SessionSection({
 // ── 朗读嗓音 ──────────────────────────────────────────
 
 /**
- * 嗓子出自哪一路。读音服务条目化之后 provider 是协议名（mimo-chat / doubao /
- * glm-speech），这里翻成人话；没对上号的直接显示原值，不挡后端加新协议。
- * 为什么要标出来：一家念不出来（key 不对、余额不足）通常是一整排一起念不出来，
- * 用户看到「MiMo 那三副全是灰的」，就知道该去修 MiMo 那条配置，而不用一副一副试。
+ * 嗓子出自哪一路：provider 是协议名，翻成人话；没对上号就显示原值（不挡新协议）。
+ * 标出来是因为一家念不出来通常一整排都灰 —— 一看就知道去修哪条配置。
  */
 const PROVIDER_LABEL: Record<string, string> = {
   "mimo-chat": "MiMo 式",
@@ -1565,12 +1531,8 @@ const PROVIDER_LABEL: Record<string, string> = {
 };
 
 /**
- * 挑一副念给你听的嗓子。
- *
- * 为什么非要「试听」这一下：音色的名字（「温婉珊珊」「锤锤」）谁也看不出好不好听，
- * 得让耳朵说了算。所以每副嗓子旁边就是一个能当场念一句的按钮，听完再定。
- *
- * 记在 state 里而不是 localStorage：换台设备打开，念给你听的还是同一个人。
+ * 挑一副念给你听的嗓子。「试听」必须留着：音色名看不出好不好听，得让耳朵定。
+ * 选择记在 state 而非 localStorage —— 换设备还是同一个人。
  */
 export function VoicePanel({
   voices,
@@ -1751,11 +1713,8 @@ const VISITOR_KIND: Record<string, string> = {
 };
 
 /**
- * 来客名册 + 单个来客的留痕明细。
- *
- * 留痕是介绍页里当面承诺过的：「你随时可以问他记了你什么，他原样摊开」。
- * 这张面板就是承诺的管理员侧 —— 明细留在各间来客屋里（点开才隔着 DO 去取），
- * 这里只摆名册。加载失败就地写一句，不弹全局报错：来客的账晚几秒看到没关系。
+ * 来客名册 + 单个来客的留痕明细。介绍页当面承诺过「你随时可以问他记了你什么」，
+ * 这里是承诺的管理员侧。明细留在各来客屋（点开才隔 DO 取），失败就地写一句。
  */
 export function VisitorsPanel() {
   const [rooms, setRooms] = useState<VisitorRoom[]>([]);
@@ -1936,22 +1895,16 @@ export function VisitorsPanel() {
   );
 }
 
-// ── 来客类型（口令与说明）──────────────────────────────
-//
-// 权益不在这里改 —— 逐工具的权限矩阵搬到了「来客权限管理」页（见 GuestPermsPanel）。
-// 这一页只管「有哪些档、各用什么口令进门、怎么接待」；新建的档默认对外工具全开。
+// ── 来客类型（口令与说明）──
+// 权益不在这里改（逐工具矩阵在「来客权限管理」页）；这一页只管有哪些档、
+// 各用什么口令、怎么接待。新建的档默认对外工具全开。
 
 /** 弹页认的「新增」标记；其余非空值是档位 id（编辑），空串 = 弹页关着 */
 const GUEST_NEW = "__new";
 
 /**
- * 来客类型管理：一个自定义口令就是一类来客。
- *
- * 列表 + 详情弹页：行只读、一行看清这一档现在能干什么，点行（或「新增类型」）才开表单。
- * 口令在后端只存 SHA-256 摘要，列表与弹页都永远不给原值 —— 摘要不可逆，
- * 忘了口令就在编辑里重设一个，没有「点开看」这条路。
- * 停用不是删除：配置留着，随时能再打开；只有真不要了这个口令才删。
- * 改动对之后新登录的来客生效。
+ * 来客类型管理：一个自定义口令一类来客。口令后端只存 SHA-256、永不回显，忘了只能重设；
+ * 停用 ≠ 删除（配置保留）；改动对之后新登录的来客生效。
  */
 export function GuestTypesPanel() {
   const [types, setTypes] = useState<GuestType[]>([]);
@@ -2212,8 +2165,8 @@ export function GuestTypesPanel() {
 // ── 来客权限管理（各档 × 各工具）──────────────────────
 
 /**
- * 长期权益：普通口令进来的临时来客没有持久身份，谈不上「自己的」东西，
- * 所以这组开关只对持身份卡的长期使用者生效（凭卡解锁，见 src/index.ts cardAllows）。
+ * 长期权益：临时来客没有持久身份，谈不上「自己的」东西 ——
+ * 这组开关只对持身份卡的长期使用者生效（见 src/index.ts cardAllows）。
  */
 const CARD_PERMS: Array<{
   key: "permNotes" | "permFiles" | "permPublic" | "permMatrix";
@@ -2235,14 +2188,8 @@ const CARD_PERMS: Array<{
 ];
 
 /**
- * 来客权限管理：一张矩阵 —— 每行一档来客，每列一件对外工具。
- *
- * 对外工具里能被关掉的（guestTogglable）逐件勾选；恒开的（天气/识图/卡片/留痕）
- * 置灰标「恒开」—— 那是介绍页当面说过的，没有关掉的路。长期权益另起一小节。
- *
- * 名册从 /api/tool-groups 取（与工具守则面板同一份），档位从 /api/guest-types 取。
- * 改一格立刻 PATCH 这一档的整份工具清单：逐格提交，不必整页保存。
- * 改动对之后新登录的来客生效。
+ * 来客权限管理：每行一档、每列一件工具。可关的逐件勾，恒开的置灰（介绍页承诺过）；
+ * 名册来自 /api/tool-groups，改一格立刻 PATCH 整份清单；对之后新登录的来客生效。
  */
 export function GuestPermsPanel() {
   const [catalog, setCatalog] = useState<ToolCatalog | null>(null);
@@ -2250,11 +2197,8 @@ export function GuestPermsPanel() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState("");
-  // 一次只发一张 PATCH：`next` 是从渲染闭包里的 t.tools 算出来的，
-  // 第一张还没落库就点第二格，第二次带的还是旧清单，后写会把先写盖掉，
-  // 两次都回成功、刷新后只有一格生效。
-  // 必须和其他 hook 一起声明在早退之前：放到 `if (!catalog) return` 后面，
-  // 首渲（catalog 还没到）少一个 hook，数据回来后再渲染就报「hooks 数量变了」
+  // 一次只发一张 PATCH：next 从渲染闭包的 t.tools 算出，并发时后写会盖掉先写
+  // （两次都成功，刷新后只有一格生效）。hook 必须在早退之前，否则 hooks 数量会变。
   const submitting = useRef(false);
 
   const load = useCallback(async () => {
@@ -2472,9 +2416,7 @@ export function GuestPermsPanel() {
 // ── 模型配置 ──────────────────────────────────────────
 
 /**
- * 供应商表单草稿（新增与编辑共用）。
- * 名称就是供应商名称 —— 旧表单「名称 vs 模型名」的二义性已经拆开：
- * 供应商级管接哪一家，模型名归各家底下的模型条目。
+ * 供应商表单草稿（新增/编辑共用）。供应商级管接哪一家，模型名归各家底下的条目。
  */
 interface ProviderDraft {
   name: string;
@@ -2499,10 +2441,8 @@ const BLANK_PRESET = "__blank";
 const ADD_SCOPE = "__add";
 
 /**
- * 换线格式时把接口地址跟着换对：地址若正是某厂商某格式的已知地址，
- * 就换成同厂商在新格式下的地址（DeepSeek 的 anthropic 与 openai 格式
- * 是两个门，格式换了门没换必然 404）。手改过的地址不匹配任何已知值，
- * 说明人知道自己在干什么，不动。
+ * 换线格式时把接口地址跟着换对：地址正是某厂商某格式的已知地址，就换成新格式的地址
+ * （换格式不换门必然 404）。手改过的地址不匹配任何已知值，不动。
  */
 const urlForFormat = (
   baseUrl: string,
@@ -2550,11 +2490,8 @@ const blankEntryDraft = (): EntryDraft => ({
 });
 
 /**
- * 模型目录：供应商管「接哪家」（地址、格式、Key 变量名），模型条目挂在各家
- * 底下、随便挂几个 —— 一家供应商不再只绑死一个模型。
- * 厂商表帮人起头（选一家带出地址与坑，都写在 note 里），模型名靠「拉取模型列表」
- * 从厂商现拉现挑。这里只管「有哪些可选」；普通和深度各用哪个，去回复风格页指派。
- * Key 存的是 secret 变量名：Key 本身永远不进浏览器。
+ * 模型目录：供应商管「接哪家」，模型条目挂在各自底下。模型名靠「拉取模型列表」现挑；
+ * 普通/深度用哪个去回复风格页指派。Key 存 secret 变量名，Key 本体永不进浏览器。
  */
 export function ModelConfigsPanel() {
   const [providers, setProviders] = useState<ModelProvider[]>([]);
@@ -2622,9 +2559,8 @@ export function ModelConfigsPanel() {
   };
 
   /**
-   * 拉模型列表：scope 是弹页认的供应商 id 或 ADD_SCOPE（新增供应商）。
-   * 地址若是某厂商的已知门，就用该厂商标定过的列表端点与鉴权头 ——
-   * anthropic 家的兼容门下没有 /models，瞎拼只会白吃一个 404。
+   * 拉模型列表：scope 是弹页认的供应商 id 或 ADD_SCOPE。
+   * 已知厂商用其标定的列表端点与鉴权头 —— anthropic 兼容门下没有 /models，瞎拼只会 404。
    */
   const pullModels = useCallback(
     async (
@@ -3267,9 +3203,8 @@ export function ModelConfigsPanel() {
 const TTS_NEW = "__new";
 
 /**
- * 读音配置：一条就是一副可用的嗓子。内置的三家已经移除，
- * 朗读用哪副完全由这里的条目决定，排在最前且 Key 可用的那条是默认。
- * 没有条目时朗读回退浏览器音色 —— 能出声，就是不好听。
+ * 读音配置：一条一副嗓子。朗读用哪副完全由这里决定，
+ * 排最前且 Key 可用的那条是默认；没有条目时退回浏览器音色（能出声，不好听）。
  */
 export function TtsConfigsPanel() {
   const [tts, setTts] = useState<TtsConfig[]>([]);
@@ -3523,14 +3458,8 @@ export function TtsConfigsPanel() {
 }
 
 /**
- * 绘图配置面板：出图三档（fast 主力 / high 高质量 / fallback 兜底）各一行。
- *
- * 每档配「出图协议 / 标注名 / 端点 / 模型降级清单 / key 变量名」，
- * 存 draw_configs（见后端 agent/drawConfigs.ts）。tier 就是主键：三档恒在，
- * 后端没有新增与删除这条路，所以行上只有「编辑」。
- * workers-ai 档走平台 AI 绑定（neurons 计费），端点与 key 栏用不上。
- * 红线同模型/读音两套目录：key 栏填的是 secret 变量名，Key 本体永不进浏览器。
- * 三档的名目、草稿联动、清单切分与行摘要在 ../lib/drawConfigForm.ts。
+ * 绘图配置：三档（fast / high / fallback）各一行，tier 是主键、恒在，只能编辑。
+ * workers-ai 走平台 AI 绑定（neurons 计费），端点与 key 用不上；key 栏填 secret 变量名。
  */
 export function DrawConfigsPanel() {
   const [configs, setConfigs] = useState<DrawConfig[]>([]);
@@ -3753,10 +3682,8 @@ const SEARCH_FORMAT_LABEL: Record<SearchFormat, string> = {
 };
 
 /**
- * 搜索配置面板：联网搜索只有一条主通道，配「走哪家 / 用哪把钥匙」，
- * 存 search_config（见后端 agent/searchConfigs.ts）。没配 key 时自动退化
- * 为 DuckDuckGo 免费通道，搜索工具照常能用。
- * 红线同模型/绘图/读音三套目录：key 栏填的是 secret 变量名，Key 本体永不进浏览器。
+ * 搜索配置：一条主通道，配走哪家 / 用哪把钥匙。没配 key 时自动退化为
+ * DuckDuckGo 免费通道，搜索照常能用。key 栏填 secret 变量名，Key 本体永不进浏览器。
  */
 export function SearchConfigsPanel() {
   const [config, setConfig] = useState<SearchConfig | null>(null);

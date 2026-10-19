@@ -1,17 +1,7 @@
 /**
- * 信箱的两本账：发件流水（mail_out）与收件（mail_in）。
- *
- * 为什么不塞进 store.ts：那张表是「这台机器的发信通道长什么样」，一格一格有闸；
- * 这两张是**流水**，只追加、只裁剪，读法也完全不同（面板上是列表+详情，
- * 工具里是「最近几封」）。混在一张文件里，两边规矩都会糊。
- *
- * 三条一起立的规矩：
- *   1. 发出去的每一封都要落一行，**失败也落** —— 只记成功的那本账等于没账，
- *      管理员看不见「她试过了但被服务器拒了」这件事；
- *   2. 裁剪时要能把挂在 R2 上的原件一起删掉（见 onEvict）：只裁行不删件，
- *      字节就会永远长在那儿，而没人看得见 —— 那是静默的存储泄漏；
- *   3. 收进来的每一封按内容去重：Cloudflare 会重投，面板上的「喂一封」也是
- *      同一封报文可能按两次，重复行会让他以为真来了两封信。
+ * 信箱两本账：发件流水（mail_out）与收件（mail_in）。只追加、只裁剪，与 store.ts 的配置表读法不同。
+ * 三条规矩：1) 发出去的每封都落一行，失败也落；2) 裁剪要把 R2 原件一起删（只删行=静默存储泄漏）；
+ * 3) 收件按内容去重——Cloudflare 会重投，面板「喂一封」也可能喂两次。
  */
 
 import type { SqlTag } from "../agent/state";
@@ -26,8 +16,8 @@ export const MAIL_PREVIEW_MAX = 300;
 /** 原件超过这个字节数就不往 R2 落了，只在行里留大小 —— 收件箱不是网盘 */
 export const EML_MAX_BYTES = 2 * 1024 * 1024;
 /**
- * 肯收下来的整封上限。Cloudflare 那边给到 25 MiB，那是它的管道上限，不是我们的义务：
- * 解析一封 20 MiB 的信要把它的 CPU 时间花光，而这一入口是公网任何人都能敲的。
+ * 肯收下来的整封上限。Cloudflare 给到 25 MiB 是管道上限，不是义务：
+ * 解析 20 MiB 的信会吃光 CPU，而这入口公网任何人都能敲。
  */
 export const INGEST_MAX_BYTES = 4 * 1024 * 1024;
 /** /api/mail/inbox/feed 的「喂一封」体积闸，按字符数算（DO 那边还有一道按字节的） */
@@ -63,9 +53,7 @@ export const MAX_ATTACH_ITEMS = 12;
 const ATTACH_NAME_MAX = 200;
 
 /**
- * 附件清单存成一格 JSON 文本（只存名字与大小，内容一概不落这里 —— 原件在 R2，
- * 而这一格是给人一眼看清"这封带了什么"用的）。
- * 认不出的条目丢掉，不让一个坏条目把整封信的清单作废。
+ * 附件清单存 JSON（只有名字与大小，内容在 R2）。认不出的条目丢掉，不让坏条目作废整封清单。
  */
 export function serializeAttachments(
   list: { name: string; bytes: number }[],
@@ -160,10 +148,8 @@ function splitAddrs(s: string): string[] {
 }
 
 /**
- * 记一笔发件流水（成功失败都记），顺手把超出保留数的旧行剪掉。
- *
- * 剪的时候把被剪那几行的 eml 交出去？不 —— mail_out 不挂原件，
- * 只有 mail_in 才在 R2 上有东西，所以 onEvict 只长在收件那侧。
+ * 记一笔发件流水（成败都记），顺手剪掉超出保留数的旧行。
+ * mail_out 不挂原件（只有 mail_in 在 R2 有东西），所以 onEvict 只长在收件侧。
  */
 export function recordMailOut(
   sql: SqlTag,
@@ -233,10 +219,8 @@ function rowToIn(r: MailInDbRow): MailInRow {
 }
 
 /**
- * 收一封进来。`onEvict` 拿到的是**被挤出保留数的那些行**的 R2 键（已裁掉的原件），
- * 调用方负责真去删 —— 只有它手上有桶。
- *
- * 返回 null = 这一封库里已经有了（同一份报文重投/重喂），不新增行。
+ * 收一封。onEvict 拿到被挤出保留数那几行的 R2 键，调用方负责真删（只有它手上有桶）。
+ * 返回 null = 库里已有同一份报文（重投/重喂），不新增行。
  */
 export function insertMailIn(
   sql: SqlTag,
@@ -322,9 +306,8 @@ export interface EmlStore {
 }
 
 /**
- * 原件落 R2。返回真正该写进行里的那个键：
- * 太大（>EML_MAX_BYTES）或这台机器没配桶时返回空串 —— 行照记，只留摘要，
- * 界面上会显示「只有摘要」，不能假装点得开全文。
+ * 原件落 R2，返回行进里的键；太大（>EML_MAX_BYTES）或没配桶时返回空串——
+ * 行照记只留摘要，界面要显示「只有摘要」，不能假装点得开全文。
  */
 export async function putEml(
   bucket: EmlStore | null | undefined,

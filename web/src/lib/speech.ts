@@ -1,22 +1,12 @@
-// 语音：说给 ericher 听（识别）+ 让 ericher 读出来（朗读）。
-//
-// 两件事走的是两条路：
-//   · 听懂你说什么 —— 全在浏览器本地（Web Speech API），不经过服务器。
-//     语音是私事，能不出本机就不出本机。
-//   · 念给你听 —— 优先云端合成（见下），云端不通才退回浏览器自带的音色。
-//
-// 兼容性上有个取舍：Chrome / Edge 能识别，Firefox 不能。
-// 不能识别时我干脆不显示麦克风按钮 —— 摆一个按了没反应的按钮，比没有按钮更让人恼火。
+// 语音：识别走浏览器本地 Web Speech API（不过服务器）；朗读优先云端 TTS，失败退回浏览器音色。
+// Chrome / Edge 能识别，Firefox 不能 —— 不能识别时不显示麦克风按钮，免得按了没反应。
 
 import { isTextUIPart, type UIMessage } from "ai";
 import { api } from "./api";
 
 type RecCtor = new () => unknown;
 
-/**
- * 附件块在消息里的标记（和 src/agent/attach.ts 一致）。
- * 念之前要摘掉：把几千字转录稿念出来不像人说话，念「附件 PDF 抽到 1234 字」更不像。
- */
+/** 附件块标记（与 src/agent/attach.ts 一致）；念之前摘掉，不念转录稿 */
 const ATTACH_RE = /【附件：[\s\S]*?】(?:\n?<<<附件正文[\s\S]*?附件正文>>>)?/g;
 
 /** 一条消息里的正文（跳过工具调用那些部件，也跳过附件正文）—— 念的是话，不是工具名 */
@@ -64,10 +54,8 @@ export function canSpeak(): boolean {
 }
 
 /**
- * 开始听。返回一个能停的把手；浏览器不支持就返回 null。
- *
- * 为什么开 interimResults：一句话中间会停顿，不带它就得等整段结束才出字，
- * 人会以为没听清；带了就能边听边显示，像有个东西在跟着你写。
+ * 开始听。返回能停的把手；浏览器不支持返回 null。
+ * 开 interimResults 是为了边说边出字 —— 否则要等整句结束，人会以为没听清。
  */
 export function startDictation(opts: {
   onText: (text: string) => void;
@@ -112,16 +100,8 @@ export function startDictation(opts: {
 }
 
 /**
- * 念不出来的字符 —— 只切这些，别的一律不动。
- *
- * 为什么是「最小切除」，而不是「只放行确定念得出来的」：我上一版用的白名单，
- * 会把没列进去的字符统统删掉。为了消掉一个电子杂音，代价是整句话都可能被吃掉几个字——
- * 那笔账不划算。少念一个符号，代价远小于改动了整句话。
- * 这里只摘三类：
- *   1. 根本不可见的（零宽连字符/空格、BOM、控制符、私用区）——
- *      合成器碰上它们常常发出一声"滴"，这就是那串电子音的来源
- *   2. emoji 与变体选择符 —— 念不出内容，只会被逐字报符号名
- *   3. 箭头、方块、圆点这类纯装饰符号 —— 多数合成器拿它们没辙
+ * 念不出来的字符，只切三类：不可见字符（合成器会发出「滴」声）、emoji 与变体选择符、
+ * 箭头/方块/圆点等装饰符号。用最小切除而非白名单：白名单会连正文一起吃掉。
  */
 const UNSPEAKABLE =
   /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200F\u2028\u2029\uFEFF\u{FE00}-\u{FE0F}\u{E000}-\u{F8FF}\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}\u{25A0}-\u{25FF}]/gu;
@@ -165,11 +145,7 @@ const CHUNK_SOFT_MAX = 60;
 /** 重的标点断句最自然：人换气也在这儿 */
 const SENTENCE_END = /(?<=[。！？!?；;…])/;
 
-/**
- * 把要念的话切成几段。
- * 一次只发一小段，是为了让声音早点出来 ——
- * 等整篇合成完再开口，长回答要静默好几秒，那几秒人会以为卡住了。
- */
+/** 把要念的话按句切段：短段先发让声音早点出来，长句硬切免得整段等合成 */
 function splitForSpeech(text: string): string[] {
   const say = stripForSpeech(text);
   if (!say) return [];
@@ -232,10 +208,8 @@ async function speakCloud(
   };
 
   /**
-   * 收尾。end 为 false 表示「这次没念成，马上就要换浏览器音色接手」——
-   * 那种情况绝不能调 onEnd。一调，调用方就会把「正在念」熄掉，
-   * 可声音其实紧接着就响，于是按钮看起来没在念、再点一下也不是停下来而是重念。
-   * 这个 bug 让「随时能打断朗读」整个失效过，别再犯。
+   * 收尾。end=false（马上换浏览器音色接手）时绝不能调 onEnd：
+   * 会熄掉「正在念」，让按钮看着没在念、再点也不是停 —— 这 bug 让打断朗读失效过。
    */
   const cleanup = (end: boolean) => {
     stopCloud = null;
@@ -305,16 +279,8 @@ let speakTimer: ReturnType<typeof setTimeout> | null = null;
 let liveUtter: SpeechSynthesisUtterance | null = null;
 
 /**
- * 给一副嗓子打分，分高的先选。
- *
- * 为什么不是「挑第一个 zh-CN」：系统里通常同时装着两代音色 ——
- * 十几年前那批离线音色（微软慧慧之类，念中文像地铁报站），
- * 和后来的神经网络音色（Edge 的「晓晓 Online (Natural)」、Chrome 的「Google 普通话」）。
- * 两代都是 zh-CN，随手挑一个，很可能正好挑中最难听的那一代 ——
- * 云端不通的时候听起来特别糟，一半是这么来的。
- *
- * 代价说清楚：网络音色更好听，但要把文字发给微软/谷歌。
- * 这里的取舍是「只在云端念不成的时候才用它」，且优先选最好听的那一副。
+ * 给嗓子打分，分高的先选：系统里两代 zh-CN 音色混装，随手挑容易挑中最难听的离线版。
+ * 网络音色更好听，但要把文字发给微软/谷歌 —— 只在云端念不成时才用。
  */
 function scoreVoice(v: SpeechSynthesisVoice): number {
   const name = v.name.toLowerCase();
@@ -353,10 +319,8 @@ if (canSpeak()) {
 }
 
 /**
- * 用系统音色念。返回 false 表示这台机器念不了。
- *
- * 为什么延迟 60ms 才 speak：Chrome 里 cancel() 紧跟着 speak() 有几率整个不出声，
- * 让出一帧就稳了 —— 60ms 人感觉不到。
+ * 用系统音色念。返回 false = 这台机器念不了。
+ * 延迟 60ms 才 speak：Chrome 里 cancel() 紧跟 speak() 有几率不出声，让出一帧就稳。
  */
 function speakBrowser(text: string, onEnd?: () => void): boolean {
   if (!canSpeak()) return false;
@@ -386,10 +350,7 @@ function speakBrowser(text: string, onEnd?: () => void): boolean {
   return true;
 }
 
-/**
- * 云端这一次的结果。`why` 为空表示念成了；
- * 有 `why` 时它是一句人话（「智谱账户余额不足，得先充值」），可以直接摆给用户看。
- */
+/** 云端结果：why 为空 = 念成了；有 why 是一句可直接展示的人话 */
 type CloudTry = { why?: string };
 
 /** 这一次到底是谁念的。不是云端时，why 说明云端为什么没接上 */

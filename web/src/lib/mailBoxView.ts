@@ -1,13 +1,6 @@
-// 发件流水与收件箱在界面上的读法：全部是不碰 React、不碰接口、不碰 DOM 的纯规则。
-//
-// 为什么要外提：测试环境是 node，没有 jsdom —— 组件渲染一行都测不住。
-// 「三个收件人该怎么折成一句」「字节数说到哪一档换成 MB」「后端给的未读总数和
-// 清单里数出来的不一致时信谁」「原件没落盘 / 正文被裁 / 只有 HTML 这三个标记怎么合成
-// 人话」这类判断只要写进 JSX 就等于没测过，改一句措辞就能悄悄把边界挪坏。
-//
-// 一条贯穿全文件的口径：**凡是后端给的原话（失败原因、note、正文），一律原样端出来，
-// 不截、不改写、不重新措辞**。界面负责的是「说明这是什么」，不是替服务器说话 ——
-// 把 535 认证失败念成「发送失败」，人就再也没法拿那串原话去查服务商的文档了。
+// 发件流水与收件箱的纯读法（不碰 React、接口、DOM），外提是为了 node 测试。
+// 硬口径：后端给的原话（失败原因、note、正文）一律原样端出，不截不改写 ——
+// 把 535 认证失败念成「发送失败」，人就再也查不了服务商文档了。
 
 import { addressListSummary } from "./mailForm";
 import type { MailInRow, MailOutRow, MailSource } from "./types";
@@ -22,8 +15,8 @@ export const MAIL_SOURCE_LABEL: Record<MailSource, string> = {
 };
 
 /**
- * 来路的整句说明（弹页上用）：这一封为什么会被寄出去。
- * `say` 特意写成「离线副本」—— 它就是怕人不在界面前听不到才寄的。
+ * 来路整句说明（弹页用）：这一封为什么会被寄出去。
+ * say 特意写成「离线副本」—— 它就是怕人不在界面前听不到才寄的。
  */
 export const MAIL_SOURCE_SENTENCE: Record<MailSource, string> = {
   panel: "这一封是在接待台上按「发一封测试邮件」寄出去的。",
@@ -35,8 +28,8 @@ const isKnownSource = (source: string): source is MailSource =>
   Object.prototype.hasOwnProperty.call(MAIL_SOURCE_SENTENCE, source);
 
 /**
- * 来源 → 中文标签。后端哪天新增一档来路（比如定时整理），界面不能崩、
- * 也不能把它说成上面三档里的任何一档：原样念出来，前面标「没听过的来路」。
+ * 来源 → 中文标签。后端新增来路时界面不能崩，也不能硬归入现有三档：
+ * 原样念出来，标「没听过的来路」。
  */
 export const mailSourceLabel = (source: MailSource | string): string =>
   isKnownSource(source) ? MAIL_SOURCE_LABEL[source] : `来路「${source || "没记上"}」`;
@@ -55,10 +48,8 @@ const atMs = (iso: string): number => {
 };
 
 /**
- * 按时刻倒序（最新在前）。时刻念不出来的行排在最后，而不是把整面卡住。
- * 后端回来的顺序已经是新的在前 —— 这里再排一遍是幂等的，
- * 为的是万一那侧改成升序，界面不至于把「三年前那封」顶在第一行。
- * 时刻相同的保持原序（拿原下标兜住），不靠 sort 的稳定性碰运气。
+ * 按时刻倒序，念不出的时刻排最后（不卡住整面）。后端已排好，这里重排是幂等的；
+ * 时刻相同按原下标保持原序，不靠 sort 稳定性碰运气。
  */
 export const rowsNewestFirst = <T extends { at: string }>(rows: readonly T[]): T[] =>
   rows
@@ -73,9 +64,8 @@ export const mailSubjectLabel = (subject: string): string =>
   subject.trim() ? subject.trim() : "（没有主题）";
 
 /**
- * 收件人数组 → 摘要：一个就念那一个，多个折成「第一个 等 N 个」，
- * 一个也没有就说「收件人没记上」—— 后端有失败发生在写收件人之前，
- * 那种行确实一个地址都没有，留空行会让人以为是界面坏了。
+ * 收件人数组 → 摘要（多个折成「第一个 等 N 个」）；一个都没有就说「没记上」——
+ * 失败可能发生在写收件人之前，留空行会让人以为界面坏了。
  */
 export const outToSummary = (to: readonly string[]): string =>
   addressListSummary(to) || "收件人没记上";
@@ -105,12 +95,9 @@ export const outFlagSentence = (row: MailOutRow): string =>
     : "这一封没寄出去：原因原文在下面。";
 
 /**
- * 失败原因：原样返回后端给的那串，一个字符都不动。
- *
- * 为什么不做任何加工：那是 SMTP 服务器说的原话（`535 authentication failed`、
- * `451 temporary error, try later`、TLS 握手断在哪一步），人和排查笔记认的都是这串。
- * 折行、截短、翻译成「发送失败」都会把唯一线索弄丢 —— 尤其长报文，
- * 后面那半截往往才是真正的原因。空 error 才补一句「后端没给出原因」。
+ * 失败原因：原样返回后端那串，一个字符都不动 —— 那是 SMTP 原话
+ * （535 / 451 / TLS 断点），折行截短翻译都会把唯一线索弄丢。
+ * 空 error 才补一句「后端没给出原因」。
  */
 export const outErrorText = (row: MailOutRow): string => {
   if (row.ok) return "";
@@ -133,11 +120,8 @@ const MB = KB * 1024;
 const round1 = (x: number): number => Math.round(x * 10) / 10;
 
 /**
- * 整封报文的字节数说成人话：< 1024 用 B，到 1 MB 用 KB，再往上用 MB。
- *
- * 阈值按 1024 折（不是 1000）：后端记的是原始报文长度，跟桶里看到的量级要对得上。
- * 一封信带 base64 附件很容易就上 MB，所以 MB 这一档必须有，不然满屏「15360 KB」。
- * 负数、NaN、Infinity 这些拿不到账的情况明说「字节不明」，不折成一个像样的数糊过去。
+ * 整封报文字节数说成人话：B / KB / MB（阈值 1024，与桶里的量级对得上）。
+ * 带 base64 附件很容易上 MB，所以 MB 档必须有；拿不到账时说「字节不明」。
  */
 export const fmtBytes = (n: number): string => {
   if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return "字节不明";
@@ -149,8 +133,8 @@ export const fmtBytes = (n: number): string => {
 // ── 收件箱：行 ──────────────────────────────────────
 
 /**
- * 行上的发件人：有显示名就用显示名，没有落回地址，两个都没有才说「不知道谁寄的」。
- * 显示名是人家的自称（From 头里的一段），不能当地址用 —— 所以地址单独走 inRowFromAddr。
+ * 行上的发件人：显示名 > 地址 > 「不知道谁寄的」。
+ * 显示名是自称，不能当地址用 —— 地址单独走 inRowFromAddr。
  */
 export const inRowFromLabel = (row: MailInRow): string =>
   row.fromName.trim() || row.from.trim() || "不知道谁寄的";
@@ -193,12 +177,8 @@ export interface UnreadReading {
 }
 
 /**
- * 未读计数怎么读：后端那格 `unread` 是权威。
- *
- * 理由：它数的是全量账，而清单可能只回了最近若干行 —— 拿清单里的数当总数，
- * 一翻页就把「还有 40 封没看」念成「3 封」。清单里数出来的只用来兜底
- * （老后端没回这一格、或回的不是个数），并且两个数对不上时把差异摊开说出来，
- * 不悄悄挑一个。
+ * 未读计数：后端 unread 是权威（它数全量账，清单可能只回了最近若干行）。
+ * 清单数只作兜底；两数对不上时把差异摊开说，不悄悄挑一个。
  */
 export const unreadReadOf = (
   rows: readonly MailInRow[],
@@ -220,11 +200,8 @@ export const unreadReadOf = (
 };
 
 /**
- * 收件面开头上那句话。
- *
- * 「开关没开」和「收件箱是空的」是两件事，必须分开说：前者是这台机器还没接收件通道
- * （外面寄来的信根本到不了这儿），后者是通道通了但还没人来。混成一句
- * 「收件箱是空的」会让人以为自己配错了地址，其实那档开关还关着。
+ * 收件面开头那句话。「开关没开」与「收件箱是空的」必须分开说：
+ * 前者是通道没接（信根本到不了），后者是通道通了还没人来。
  */
 export const inboxFaceNote = (
   enabled: boolean,
@@ -270,11 +247,8 @@ export interface MailReadMarkers {
 }
 
 /**
- * 三个标记的合成规则（顺序也是详情里说的顺序）：
- * 1. `emlKey` 为空 = 原件没落到这台机器上，只能看摘要 —— 这条只看行上的字段，
- *    它是契约里明写的事实，不受 note 措辞影响；
- * 2. truncated / htmlOnly 先看行上有没有布尔字段（后端哪天直接挂出来就照单收），
- *    没有才读 note 的原话。
+ * 三个标记的合成规则：emlKey 空 = 原件没落盘，只能看摘要（契约事实，不看 note）；
+ * truncated / htmlOnly 先取行上的布尔，没有才读 note 原话；都没有不下结论。
  */
 export const readMarkersOf = (row: MailInRow, note = ""): MailReadMarkers => {
   const n = note ?? "";
@@ -288,8 +262,7 @@ export const readMarkersOf = (row: MailInRow, note = ""): MailReadMarkers => {
 };
 
 /**
- * 标记 → 说给人的话。三条各一句，按「先说能拿到什么、再说为什么拿不到」排。
- * 返回空数组 = 这封是完整的纯文本，界面就不必再多嘴。
+ * 标记 → 人话：先说能拿到什么，再说为什么拿不到。空数组 = 完整纯文本，不必多嘴。
  */
 export const markerSentences = (m: MailReadMarkers): string[] => {
   const out: string[] = [];
@@ -314,8 +287,8 @@ export interface ReadBody {
 }
 
 /**
- * 详情里贴哪一段：后端给的正文优先；正文空着才退回清单里带回来的 preview，
- * 并说明那只是开头一段。两个都空就明说没有，不摆一个空白框当「读完了」。
+ * 详情贴哪段：后端正文优先；空着才退回 preview 并说明只是开头一段；
+ * 都空就明说没有，不摆空白框当「读完了」。
  */
 export const readBodyOf = (text: string, row: MailInRow): ReadBody => {
   const t = text ?? "";
@@ -342,10 +315,9 @@ export const inDetailSummary = (row: MailInRow, when: string): string => {
     .join(" · ");
 };
 
-// ── 附件清单 ────────────────────────────────────────
-//
-// 库里那一格只有名字与大小（内容在 R2 的原件里），所以这里**永远不说"可下载"**，
-// 也不把"带附件"和"有清单"混成一件事：老行只有前者。
+// ── 附件清单 ──
+// 库里只有名字与大小（内容在 R2 原件里），所以永远不说「可下载」，
+// 也不把「带附件」与「有清单」混为一谈：老行只有前者。
 
 export const attachCount = (row: MailInRow): number => row.attachments?.length ?? 0;
 
@@ -363,11 +335,9 @@ export const attachLines = (row: MailInRow): string[] =>
     return `${name || "（没报名字）"} · ${fmtBytes(Number(a?.bytes ?? -1))}`;
   });
 
-// ── 左列搜索 ────────────────────────────────────────
-//
-// 口径先说死：筛的是**清单里已经有的字段**（收件这侧是发件人名/地址/主题/摘要/附件名，
-// 寄件这侧是主题/收件人/失败原因/来路）。正文在云盘的原件里，不在清单上，
-// 所以占位符不许写"搜正文" —— 写了就是让人对着一个不做的事搜。
+// ── 左列搜索 ──
+// 只筛清单已有字段（收件侧：发件人/地址/主题/摘要/附件名；寄件侧：主题/收件人/失败原因/来路）。
+// 正文在云盘原件里，所以占位符不许写「搜正文」。
 
 export const normalizeQuery = (q: string): string => q.trim().toLowerCase();
 
@@ -408,8 +378,8 @@ export const searchPlaceholder = (kind: "in" | "out"): string =>
   kind === "in" ? "搜发件人、主题、摘要或附件名" : "搜主题、收件人、失败原因或来路";
 
 /**
- * 空列表那句话：筛空了与本来就没有，是两件完全不同的事。
- * 混成一句"还没有信进来"，人就会去查通道，而真相是他刚打了个错字。
+ * 空列表那句话：筛空了与本来就没有完全不同 ——
+ * 混成「还没有信进来」，人会去查通道，其实只是打了个错字。
  */
 export const emptyListNote = (
   kind: "in" | "out",

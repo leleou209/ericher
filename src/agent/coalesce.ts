@@ -1,20 +1,7 @@
-// 把流「压粗」：相邻的流式增量合并成更少的事件，再交给平台。
-//
-// 为什么非做不可：DO 免费层每天只有 10 万行写入，而平台的「断线续传」是
-// **一个流式事件 = 一行 SQLite**（@cloudflare/ai-chat 读我们返回的响应体，
-// 逐条 `data:` 事件 parse 后落库，见 node_modules/@cloudflare/ai-chat/dist/index.js
-// 里 _storeStreamChunk 的调用点），24 小时后清理时再删一遍 —— 而 DELETE 同样计入
-// 「rows written」。一次带思考过程的长回答几千个 token 增量就是几千行，
-// 几十条回答够把一天烧光，然后连读都失败（超限后整个 DO 都不干活）。
-//
-// 这里**不是**「不落库」：分片是截断恢复（基类 _getPartialStreamText）的数据源，
-// 关掉它「长思考说到一半没了」的老毛病就回来了。所以只压条数 ——
-// 合并出来的仍是合法事件（text-delta 本来就是「追加」语义），
-// 落库、重放、前端累加三件事都不受影响，只是条数少了一个量级。
-//
-// 口径：text-delta / reasoning-delta 按 id 合并（tool-input-delta 默认不动，
-// 它是 JSON 片段，合并没有收益上的必要，风险却更大）。带 providerMetadata 的
-// 一律原样发 —— 那是引用/来源之类带位置的标注，攒进别的分片里会错位。
+// 把流「压粗」：相邻流式增量合并后再交给平台。
+// 平台断线续传是「一个流式事件 = 一行 SQLite」（@cloudflare/ai-chat 读响应体逐条落库），
+// DO 免费层每天 10 万行写入，24h 后清理的 DELETE 也算；长回答几千 token 增量就能烧光配额，
+// 超限后整个 DO 连读都失败。分片仍是截断恢复的数据源，所以只压条数、不关闭落库。
 
 /** 攒多久就发一次（毫秒）。越小越顺滑、写入越多 */
 const DEFAULT_WINDOW_MS = 120;
@@ -57,10 +44,8 @@ function identityOf(ev: Chunk, field: string): string {
 }
 
 /**
- * 把响应体里相邻的同一条增量事件攒成一条再发出去。
- *
- * 输入输出都是标准 SSE（`data: {json}\n\n`，结尾 `data: [DONE]`），
- * 所以平台与前端都照常解析；非增量的事件一律先 flush 再原样透传，顺序不乱。
+ * 把相邻同一条增量事件攒成一条再发。输入输出都是标准 SSE（data: {json}\n\n，结尾 [DONE]）；
+ * 非增量事件先 flush 再原样透传，顺序不乱。
  */
 export function coalesceStream(
   res: Response,
@@ -120,9 +105,8 @@ export function coalesceStream(
   };
 
   /**
-   * 到点兜底发一次。
-   * 为什么不能只靠「下一条事件来了再判断」：工具在跑的时候可能几十秒没有新分片，
-   * 那半句话就会卡在缓冲里既不落库也不上屏。
+   * 到点兜底发一次：工具跑几十秒没有新分片时，不能只靠「下一条事件来了再判断」，
+   * 否则半句话卡在缓冲里既不落库也不上屏。
    */
   const arm = (): void => {
     if (timer || !pending) return;

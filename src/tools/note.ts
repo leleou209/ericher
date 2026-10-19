@@ -1,13 +1,7 @@
-// 笔记本工具：我和管理员一起写的本子。
-//
-// 它和 memory 的分工必须说清（description 里也说），否则两件事会互相吞掉：
-//   memory —— 我记住的东西。措辞是我定的，他读到的是我的转述。
-//   note   —— 他要留下的东西。原话、成篇、Markdown 保结构，一篇一篇。
-// 为什么非得有 note 这一格：他以前想让一件事「留着」，只能塞进记忆里 ——
-// 而记忆是我消化过的产物。他要的是原稿，不是我的读书笔记。
-//
-// 分工的另一半：写下来归我（哪一篇该留、该怎么措辞，那是语义判断），
-// 落库、压旧版、裁版本、查 id 归代码（见 noteStore.ts）。和承诺账本那套一致。
+// 笔记本工具：我和管理员一起写的本子。与 memory 的分工必须在 description 里说清，否则会互相吞掉：
+//   memory —— 我记住的（措辞我定，他读到的是转述）；note —— 他要留的（原话、成篇、Markdown 保结构）。
+// 他以前说「留着」只能塞进记忆，而记忆是我消化过的产物；他要的是原稿，不是读书笔记。
+// 写不写、怎么写归我（语义判断），落库、压旧版、裁版本、查 id 归代码（noteStore.ts）。
 
 import { tool } from "ai";
 import { z } from "zod";
@@ -204,7 +198,7 @@ export function noteTools(ctx: ToolCtx) {
             const merged = old.body ? `${old.body}\n\n${text}` : text;
             const n = ctx.saveNote({ id, body: merged });
             // 触顶后写入层会静默截断（noteStore 按 NOTE_BODY_MAX 切）——
-            // 不比对的话，回话会说「加好了」而实际掉了半段，模型据此告诉用户已补进去
+            // 不比对的话，回话会说「加好了」而实际掉了半段
             if (n.body.length < merged.length)
               return (
                 `《${n.title}》已经到单篇上限（${NOTE_BODY_MAX} 字）了，这一回只写进去 ` +

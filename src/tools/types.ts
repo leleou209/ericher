@@ -16,16 +16,15 @@ export interface ToolCtx {
   /** 本间屋子的 DO 名（default / guest-<hash>）。留痕工具靠它认自己的账本 */
   room: string;
   /**
-   * 这一轮对话在哪一场里。画图、演示图、卡片的产物按它归档进
-   * 会话/<id>/ 文件夹；场外跑的活（回想等）不填，产物退回根目录。
+   * 这一轮对话在哪一场。画图、演示图、卡片的产物按它归档进 会话/<id>/ 文件夹；
+   * 场外跑的活（回想等）不填，产物退回根目录。
    */
   sessionId?: string;
   /** 来客那一间：只给「对外」的工具，主人自己的记忆/邮件/文件不给他碰 */
   guest: boolean;
   /**
-   * 来客登记的那一档（多档来客类型，形状同 agent/guestTypes.ts 的 GuestTypeInfo），
-   * 不含密码。缺省（普通来客票 / 老 state）按全开处理；perm 开着就注册对应工具组，
-   * 关了就不注册 —— 工具没到手，比「到手了再拦」可靠。
+   * 来客登记的那一档（形状同 GuestTypeInfo），不含密码。缺省（普通来客票 / 老 state）按全开；
+   * perm 开着才注册对应工具组 —— 工具没到手，比「到手了再拦」可靠。
    */
   guestType?: GuestTypeInfo;
   /** 当前 state 快照（每次对话开始时读取一次） */
@@ -33,8 +32,8 @@ export interface ToolCtx {
   /** 合并写入 state（内部会 setState 完整对象） */
   patchState(patch: Partial<ChatState>): void;
   /**
-   * 内核与自我要求的统一读口径。这两块由主屋收着：主屋本尊读自己的 state，
-   * 场屋读主屋那份的缓存 —— 场屋本地那份不算数（换一场就看不到）。
+   * 内核与自我要求的统一读口径：主屋本尊读自己的 state，场屋读主屋那份的缓存 ——
+   * 场屋本地那份不算数（换一场就看不到）。
    */
   readSelf(): {
     core: string;
@@ -118,14 +117,12 @@ export interface ToolCtx {
    *  场屋里连主屋一起翻（老场 + 各场寄回的原话索引），所以是异步的 */
   recall(query: string): Promise<RecallHit[]>;
   /**
-   * 阻塞式 ask 的挂起点：注册一个「等他作答」的回调。
-   * 回答、先不答、超时都会以一段文字回调 —— 它就是那次 ask 工具调用的结果，
-   * 模型在同一轮工作流里接着跑。只有主人的屋子有 ask，也只有那里配了它。
+   * 阻塞式 ask 的挂起点：注册「等他作答」的回调。回答、先不答、超时都会以文字回调 ——
+   * 它就是那次 ask 的结果，模型在同一轮接着跑。只有主人的屋子有 ask。
    */
   waitForAsk?: (id: string, onAnswer: (answer: string) => void) => void;
   /**
-   * 记忆变动并账：把动过的条目（按 id 取快照）寄回主屋，删除的寄 id。
-   * 只有场屋填 —— 主屋本尊改的就是自己表里的，来客那间另有 receiveGuestMemory 一路。
+   * 记忆变动并账：把动过的条目（按 id 取快照）寄回主屋，删除的寄 id。只有场屋填。
    * 经 durable queue 重试，报不上不拦对话。
    */
   syncMemories?: (ids: string[], deletedIds?: string[]) => void;

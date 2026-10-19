@@ -1,18 +1,6 @@
-// 模型目录：供应商（model_providers）与模型条目（model_entries）两级。
-//
-// 以前主线模型只认 Worker secrets 那一套（API_ENDPOINT + API_KEY + API_MODEL），
-// 换一家厂商得改配置重新部署。这张目录把「用哪家、什么协议、去哪个门」变成数据：
-// 管理员在面板上添供应商（名称、格式、地址、Key 变量名），一家底下挂几个模型条目，
-// 点名哪个条目生效（active）—— 同一家供应商的多模型自由切换，不用重复填地址和 Key。
-//
-// 表只建在主人那间 —— 和 guest_types 一样，这是这张台子的配置，
-// 不是哪位来客的私物；来客那间隔着 DO 读得到生效那组（里面本来就没有 key 本体）。
-//
-// 红线：keySecret 存的是 Worker secret 的**变量名**（如 "DEEPSEEK_KEY"），
-// key 本体只活在 secrets 里，绝不落库 —— 所以这两张表可以整表回显给面板。
-//
-// 「名称」就是供应商名称：一家供应商一条，不再有「配置名 vs 模型名」的二义性。
-// 维护用 Key 与维护用模型都挂在供应商级 —— 后台小活走哪家的小模型，是这家的事。
+// 模型目录：供应商（model_providers）与模型条目（model_entries）两级，表只建在主人那间。
+// 面板添供应商（名称、格式、地址、Key 变量名），底下挂模型条目，点名 active 生效。
+// 红线：keySecret 只存 Worker secret 变量名，key 本体只在 secrets 绝不落库——两张表可整表回显。
 
 import type { SqlTag } from "./state";
 
@@ -48,8 +36,7 @@ export interface ModelEntry {
   model: string;
   maxOutput: number;
   /**
-   * 最大上下文（token 数）。0 = 没设，界面与工具回落到默认档。
-   * 这是「这扇门有多宽」：界面拿它显示当前上下文占用，超过就该靠压缩接住。
+   * 最大上下文（token）；0 = 没设，回落到默认档。界面拿它显示上下文占用，超过靠压缩接住。
    */
   contextWindow: number;
   active: boolean;
@@ -150,30 +137,23 @@ function assertFormat(format: string): void {
 }
 
 /**
- * max_output 只认正整数，其余一律回到 131072（128K）。
- * 主流可用的模型（DeepSeek V4 384K、GPT/Claude 128K 档）输出上限都在 128K 一带，
- * 默认给够 —— 思考链和大图源码合计吃输出预算，32K 会被「深度思考 + 大图」顶爆。
- * 厂商真有更低的硬上限时按它配到条目里（claude 8K-64K 档记得单独设）。
+ * max_output 只认正整数，其余回落 131072（128K）：深度思考 + 大图会顶爆 32K。
+ * 厂商有更低硬上限时按条目单独配（claude 8K-64K 档）。
  */
 export function toMaxOutput(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isInteger(n) && n > 0 ? n : 131072;
 }
 
-/**
- * context_window 只认正整数，其余一律回到 0（= 未设，用默认档）。
- * 「没设」是合法状态 —— 不是每家都报得上准数，报不上就别瞎填。
- */
+/** context_window 只认正整数，其余回落 0（= 未设）。报不上准数就别瞎填。 */
 export function toContextWindow(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isInteger(n) && n > 0 ? n : 0;
 }
 
 // ── 老单表（model_configs）→ 两级的惰性迁移 ─────────────────
-// 老结构一条配置 = 一家供应商 + 一个模型，拆不开多模型。启动时瞄一眼：
-// 老表还在就逐行搬成「一家供应商 + 一条模型条目」，条目 id 沿用老配置 id
-// —— 深度思考槽位（state.deepConfigId）指着这些 id，换了形状不能断了指向。
-// 搬完老表改名留底，下一次启动就当它不存在。
+// 启动瞄一眼：老表在就逐行搬成「供应商 + 条目」，条目 id 沿用老 id（state.deepConfigId 指着它）。
+// 搬完改名 model_configs_migrated 留底，下次启动就不存在了。
 
 interface LegacyRow {
   id: string;
@@ -352,9 +332,7 @@ export function updateModelProvider(
 }
 
 /**
- * 删一家供应商，连同它名下的模型条目。
- * 名下有生效条目时，把剩下最新的另一家的条目顶上来 —— 目录永远要有一个可用项，
- * 否则「删一家旧供应商」这个无害动作会让整台机器退回 secrets 链，没人知道为什么。
+ * 删供应商及其条目。若有生效条目，把剩下最新的顶上——目录不能空转，否则整机悄悄退回 secrets 链。
  */
 export function removeModelProvider(sql: SqlTag, id: string): boolean {
   ensureModelCatalogSchema(sql);
@@ -405,8 +383,7 @@ function promoteLatestEntry(sql: SqlTag): void {
 }
 
 /**
- * 新建一个模型条目。全库还没有生效条目时自动生效 ——
- * 空目录建出第一条却还得手动点「启用」，是段没人需要的「请先配置配置」死循环。
+ * 新建条目。全库没有生效条目时自动生效——否则空目录还得手动「启用」，成了死循环。
  */
 export function createModelEntry(
   sql: SqlTag,
@@ -489,8 +466,7 @@ export function removeModelEntry(sql: SqlTag, id: string): boolean {
 }
 
 /**
- * 点名生效，先全清再置一。两条 UPDATE 顺序执行即可 ——
- * DO 单线程处理请求，这两句之间不会插进别的写入，等价于事务。
+ * 点名生效，先全清再置一。DO 单线程，两句之间不会插别的写入，等价事务。
  */
 export function activateModelEntry(sql: SqlTag, id: string): ModelEntry | null {
   ensureModelCatalogSchema(sql);

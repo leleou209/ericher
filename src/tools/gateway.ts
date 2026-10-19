@@ -1,17 +1,9 @@
-// 渐进式工具网关（Meta-Tool 模式）。
-//
-// 为什么要有这一层：24 个工具的完整定义全量挂进请求，光 schema 就 8K tokens。
-// 业界的做法（Anthropic Tool Search、MCP 三层发现、OpenAI manifest 前缀）是同一个思路
-// —— 首层只给「有什么」（一行式索引），要用的那个再把「怎么用」（完整定义）递过去。
-//
-// 这里没有原生 defer 支持（AI SDK 的 tools 参数整场固定），所以网关承担两件事：
-//   dispatch —— args 按索引速记直接调真工具，zod 校验失败把「哪里没对上 + 完整定义」
-//               一起回喂，模型在同一场多步循环里自纠（不炸轮、不加用户可见延迟）；
-//   probe    —— 只传 tool 不传 args 时，把该工具的说明和完整参数定义递回去
-//               （MCP 的第二层：list → get schema → call 的「get schema」）。
-//
-// 边界：靠 toModelOutput 回传媒体的工具（draw、view_image）不能走这里 ——
-// 网关的返回值是字符串，图会在这一跳丢掉。它们必须常驻（见 tools/index.ts）。
+// 渐进式工具网关（Meta-Tool 模式）。全量 schema 太贵（24 个工具约 8K tokens），
+// 首层只给一行式索引，要用时再递完整定义（同 Anthropic Tool Search / MCP 三层发现 / OpenAI manifest 前缀）。
+// AI SDK 没有原生 defer（tools 参数整场固定），所以网关承担两件事：
+//   dispatch —— 按速记调真工具，zod 校验失败把「哪里没对上 + 完整定义」一起回喂，模型同一场自纠；
+//   probe    —— 只传 tool 不传 args 时，把说明和完整参数定义递回去。
+// 边界：靠 toModelOutput 回传媒体的工具（draw、view_image）不能走这里 —— 网关只回字符串，图会丢，必须常驻。
 
 import { tool } from "ai";
 import { z } from "zod";
@@ -65,8 +57,8 @@ export function gatewayTools(
       execute: async ({ tool: name, args }) => {
         const t = deferred[name];
         if (!t) {
-          // 转正过的工具已经直接挂在工具栈里：网关这一跳对它已关闭，
-          // 得把「该走哪条路」说死，不然模型会拿「索引里没有」当成工具消失了
+          // 转正过的工具已直接挂在工具栈里，网关这一跳对它关闭。得把「该走哪条路」说死，
+          // 不然模型会拿「索引里没有」当成工具消失了
           if (promoted.includes(name))
             return (
               `「${name}」已经转成常驻工具了，直接调用它即可（不用再经过 call_tool，` +

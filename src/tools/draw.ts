@@ -1,36 +1,12 @@
-// 画图：她看得懂图，也该能画一张出来。
-//
-// 为什么这条值得单开工具，而不是让模型描述一句「你可以想象成……」：
-// 能看图只能算「读」，能画图才算「一起做点东西」。
-//
-// 这里是三条并列的路子，各管一件事：
-//   draw       —— 插画、封面、配图。文生图模型出的，有质感、有情绪，但不可控。
-//                 带上 reference 就是图生图（见 supportsReference）：保留参考图里
-//                 人物/主体的特征再按描述出新图 —— 「还是这个人换个场景」「照这张图改」
-//                 都走它；不带就是纯文生图。
-//   diagram    —— 示意图、流程图、架构图、时序图、图表。她写 mermaid 源码，渲染器摆线。
-//                 为什么不再让她手写 SVG：坐标是 token 黑洞（一张图几千个字，还容易被
-//                 输出上限拦腰截断），摆出来的对齐和间距也不如渲染器。mermaid 源码几十行、
-//                 只描述「谁连谁」，布局交给前端 —— Cursor / GitHub 的画图全走这条路线。
-//                 文生图模型画这类东西必然走形：框会歪、字会糊、箭头指向随机 ——
-//                 而这些恰恰是示意图的命根子，所以两种得分开。
-//   send_image —— 把云盘里已有的图发到对话里（画过的、存进记忆的）。
-//                 她说「把上次那张给他看」时用；没有它，她只能凭空再画一张，
-//                 而重画的从来不是同一张。
-//
-// 为什么不是一条工具加个 mode 参数：选错 mode 的代价是「出来的东西完全不对」。
-// 拆成三条，看名字就知道该用哪条。
-//
-// 还有一步：画好的那张会随结果递回给她自己看一眼（见 draw 的 toModelOutput）——
-// 明显不对就改一版提示词重画一次。为什么不交给「看图」工具去做：
-// 图就在她手上，多一跳就多一次她忘记看的可能。
-//
-// draw 这条里面还分两档（见 quality 参数）：
-//   默认 fast —— Workers AI 的 FLUX.2 klein。不要钱（免费额度内）、不带平台水印，日常配图够用。
-//   high      —— 硅基流动的 Z-Image-Turbo（兜底 Kolors）。画日系动漫、人物立绘明显更对，
-//                代价是按张付费，所以只在她判断「这回要好看」时才升档。
-// 为什么这事用一个参数而不是拆成两条工具：这里选错的代价只是「多花几分钱」或「没画够美」，
-// 不是「出来的东西完全不对」—— 而后者才是 draw / diagram 必须拆开的理由。
+// 画图：draw（文生图/图生图，带 reference 保留主体特征）、diagram（她写 mermaid，渲染器摆线）、
+// send_image（把云盘已有的图发回对话）三条并列。选错路线的代价是「出来的东西完全不对」，
+// 所以拆成三条而不是一个 mode 参数。
+// diagram 不手写 SVG：坐标吃 token、易被输出上限截断、对齐差；文生图画结构必走形
+// （框歪、字糊、箭头乱指），而结构正是示意图的命根子。send_image 少了就只能重画一张，
+// 而重画的从来不是同一张。
+// draw 的 quality：fast = Workers AI FLUX.2 klein（免费额度内、无水印），
+// high = 硅基流动 Z-Image-Turbo（兜底 Kolors，按张付费）—— 升档只关乎美不美与花费，故用一个参数。
+// 画好随结果递回自检（draw.toModelOutput）：图在手上，少一跳少一次忘记看；历史只留文字，不重发图。
 
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
@@ -44,10 +20,8 @@ import { loadImage, mayViewKey } from "./vision";
 import { publicFetch } from "./search";
 
 /**
- * 高质量档与兜底档原来是写死的常量（硅基流动 / 智谱的端点、模型名、降级链），
- * 现在全部搬进 draw_configs 表变成数据 —— 这里的 SIZES / SF_SIZES 只剩
- * 「画幅」这一件事：两家的尺寸口径不同，硅基流动横图是 1280x720，
- * 别把通用那组直接搬过去。
+ * 高质量档与兜底档的端点/模型/降级链已搬进 draw_configs 表；这里只剩画幅。
+ * 两家尺寸口径不同：硅基流动横图是 1280x720，别把通用那组直接搬过去。
  */
 const SIZES = {
   square: { w: 1024, h: 1024 },
@@ -69,7 +43,7 @@ const MM_RATIOS = {
   tall: "9:16",
 } as const;
 
-/** mermaid 源码上限。源码本该是「几十行」的量级；到 100KB 已经不是图，是往里塞东西了 */
+/** mermaid 源码上限。源码本该是「几十行」的量级；到 100KB 已经是往里塞东西了 */
 const MMD_CAP = 100_000;
 
 /** 只声明用到的部分，免得依赖生成的 Ai 类型细节（和 memory.ts 里那处同一套写法） */
@@ -78,8 +52,8 @@ interface AiRunner {
 }
 
 export function drawTools(ctx: ToolCtx): ToolSet {
-  // 这一轮里画了几张。用来把「不对就重画一次」卡死在一次：
-  // 她对自己的图容易越看越不顺眼，不设闸的话一张配图能来回画到把整轮耗光。
+  // 这一轮里画了几张。把「不对就重画一次」卡死在一次：不设闸的话，
+  // 她对自己的图容易越看越不顺眼，一张配图能来回画到把整轮耗光。
   let attempts = 0;
 
   const draw = tool({
@@ -154,9 +128,8 @@ export function drawTools(ctx: ToolCtx): ToolSet {
       const tier: DrawTier = ctx.guest ? "fast" : quality;
       const tiers = await ctx.drawTiers();
 
-      // 降级链是配置驱动的（每档用哪家、哪个模型、哪把钥匙都是 draw_configs
-      // 里的数据）：high 先走贵的，没成掉 fast，最后兜底 —— 没成的那档会把
-      // 原因留在 errors 里，全都栽了才把清单交出去
+      // 降级链由 draw_configs 驱动：high 先走贵的，没成掉 fast，最后兜底；
+      // 每档失败原因留在 errors 里，全栽了才把清单交出去
       const order: DrawTier[] =
         tier === "high" ? ["high", "fast", "fallback"] : ["fast", "fallback"];
       for (const t of order) {
@@ -178,9 +151,8 @@ export function drawTools(ctx: ToolCtx): ToolSet {
       }
       if (!bytes) return "这次没画成：\n" + errors.join("\n");
 
-      // 存进云盘再给他看：供应商给的地址有有效期，过几天他自己翻回来就是一片空白。
-      // key 带房间前缀 + 会话文件夹 + 随机段：来客读图靠它划界，产物按场归档，
-      // 也免得光靠时间戳就能撞名
+      // 存进云盘再给他看：供应商给的地址有有效期，过几天翻回来就是空白。
+      // key 带房间前缀 + 会话文件夹 + 随机段：读图靠它划界，产物按场归档，也不容易撞名
       const key = sessionKey(ctx.room, ctx.sessionId, "draw", "png");
       await ctx.env.MEMORY_BUCKET.put(key, bytes, {
         httpMetadata: { contentType: "image/png" },
@@ -199,9 +171,8 @@ export function drawTools(ctx: ToolCtx): ToolSet {
         selfCheck(attempts)
       );
     },
-    // 图递回去让她自己看一眼 —— 自检就靠这一句（下面那段注释解释为什么走这里）。
-    // key 是从她自己的输出里抠的，但她写什么字不由我们定：万一被诱导写出别家的 key，
-    // 递图前也得过一遍房间划界 —— 和 view_image 是同一扇门
+    // 图递回去让她自己看一眼 —— 自检就靠这一句。key 是从她自己的输出里抠的，
+    // 但万一被诱导写出别家的 key，递图前也得过一遍房间划界（和 view_image 同一扇门）
     toModelOutput: async ({ output }) => {
       const key = imageKeyIn(output);
       const img =
@@ -333,11 +304,9 @@ export function drawTools(ctx: ToolCtx): ToolSet {
 }
 
 /**
- * 交图给模型时统一说同一套话。
- *
- * 为什么要反复叮嘱「把那行 markdown 放进回复」：图是这条工具唯一的产出，
- * 而模型很容易只回一句「画好了」，人就什么都看不见。工具卡里另有兜底渲染
- * （前端的 Drawn），但正文里那张图才是他要的位置。
+ * 交图给模型时统一说同一套话。图是这条工具唯一的产出，模型很容易只回一句「画好了」，
+ * 人就什么都看不见 —— 所以反复叮嘱把那行 markdown 放进回复。工具卡另有兜底渲染（前端的 Drawn），
+ * 但正文里那张图才是他要的位置。
  */
 export function handOff(
   lead: string,
@@ -357,14 +326,9 @@ export function handOff(
 }
 
 /**
- * 画完让她自己看一眼。
- *
- * 这一句是自检的全部机关 —— 图已经随这条结果递回去了（见 draw 的 toModelOutput），
- * 所以这里只说「看什么、不对怎么办」。
- *
- * 为什么走 toModelOutput 而不是让她再调一次看图工具：图就在手上，多一跳就多一次
- * 她忘记看的可能；而且它只在「这一轮的下一步」生效，历史里留下的还是这行文字，
- * 图不会每一轮都重发一遍（那是白烧 token）。
+ * 画完让她自己看一眼：这里只说「看什么、不对怎么办」，图已随结果递回（见 toModelOutput）。
+ * 不走看图工具：图在手上，多一跳就多一次她忘记看的可能；且只在下一步生效，
+ * 历史里只留这行文字，图不会每轮重发（白烧 token）。
  */
 export function selfCheck(n: number): string {
   if (n <= 1)
@@ -379,12 +343,12 @@ export function imageKeyIn(text: string): string | null {
 }
 
 /**
- * 「存着」的那张才进记忆：说明写的是画面本身（检索靠它命中），原件的指针是 key。
+ * 「存着」的那张才进记忆：说明写画面本身（检索靠它命中），原件的指针是 key。
  * keep 是 opt-in —— 不设闸的话，画得越多记忆库越像图床，检索会被废图淹掉。
  */
 function keepMemory(ctx: ToolCtx, content: string, fileKey: string): string {
-  // 来客那档关了记忆：图仍留在云盘（点开就能看），但不能从这条侧路绕过
-  // 档位把行写进记忆库 —— 档位承诺的是「不落库」，不是「少落一条」
+  // 来客那档关了记忆：图仍留在云盘（点开能看），但不能从这条侧路绕过档位把行写进记忆库 ——
+  // 档位承诺的是「不落库」，不是「少落一条」
   if (ctx.guest && ctx.guestType && !guestHasTool(ctx.guestType, "memory"))
     return "\n（他这一档没开记忆，图只放在云盘，没有进记忆库。）";
   try {
@@ -445,9 +409,8 @@ async function findImage(
 }
 
 /**
- * 模型常常把源码包在 ``` 围栏里，或者前后带一句「这是源码」——
- * 有围栏取围栏内；没围栏就从第一行图型声明开始取到结尾。
- * 没有图型声明的不算 mermaid 图，收进来前端也渲不出东西，宁可让她重发。
+ * 模型常把源码包在 ``` 围栏里或前后带解释：有围栏取围栏内，没围栏从第一行图型声明取到结尾。
+ * 没有图型声明的不算 mermaid 图，前端也渲不出东西，宁可让她重发。
  */
 const MMD_HEADS =
   /^(flowchart|graph|sequenceDiagram|stateDiagram(?:-v2)?|classDiagram|erDiagram|mindmap|journey|gantt|pie|gitGraph|timeline|zenuml|sankey-beta|architecture-beta|quadrantChart|xychart-beta|block-beta|requirementDiagram|C4Context|C4Container|C4Component|C4Dynamic|C4Deployment)\b/;
@@ -506,20 +469,17 @@ async function drawWith(
 
 /**
  * 哪些格式吃得下参考图：只有 MiniMax（subject_reference 人物主体参考）。
- * 其余几家（workers-ai / siliconflow / zhipu）的出图端点只认文字，
- * 智谱的 GLM-Image 模型虽有图生图能力，开放 API 也还没开这个入参。
+ * 其余几家（workers-ai / siliconflow / zhipu）的出图端点只认文字；智谱 GLM-Image 有图生图能力，
+ * 开放 API 还没开这个入参。
  */
 export function supportsReference(format: DrawFormat): boolean {
   return format === "minimax";
 }
 
 /**
- * workers-ai 档：走 Workers AI 绑定。
- *
- * 这家模型的入参是 multipart 表单，不是 JSON —— prompt 和尺寸都得当字段塞进去，
- * 所以不能直接 fetch，得把 FormData 包成 Response 再取 body 交给 run。
- * 回的是 base64（不是地址），省了一次下载。models 取第一个 —— 绑定内没有
- * 「换一家再试」这回事，换模型就是改配置。
+ * workers-ai 档：走 Workers AI 绑定。模型入参是 multipart 表单（不是 JSON），
+ * 所以把 FormData 包成 Response 再取 body 交给 run。回的是 base64，省一次下载；
+ * models 取第一个 —— 绑定内没有「换一家再试」，换模型就是改配置。
  */
 async function workersAiDraw(
   env: Env,
@@ -568,20 +528,16 @@ const DRAW_DEFAULT_ENDPOINTS: Record<DrawFormat, string> = {
 };
 
 /**
- * 外部三家（siliconflow / zhipu / minimax）共用的调用路径：端点、模型清单、
- * key 变量名全部来自配置。三家的差异只剩入参/回包形状，都在下面按 format 分岔：
- *   siliconflow —— image_size 入参、回 images[].url（临时桶，一小时过期，
- *                  拿到就得当场下进自己的云盘，见 fetchImage）；
- *   zhipu       —— size 入参、回 data[].url 或 b64_json；
- *   minimax     —— aspect_ratio 入参、回 data.image_base64（或 image_urls，
- *                  24 小时过期），见 pickImage。图生图也只此一家：带参考图时
- *                  多塞一个 subject_reference，见 requestBody。
+ * 外部三家（siliconflow / zhipu / minimax）共用：端点、模型、key 变量名全来自配置；
+ * 差异只剩入参/回包形状（按 format 分岔）：
+ *   siliconflow —— image_size，回 images[].url（临时桶一小时过期，须当场下进云盘）；
+ *   zhipu       —— size，回 data[].url 或 b64_json；
+ *   minimax     —— aspect_ratio，回 data.image_base64（或 image_urls，24 小时过期），唯一支持图生图。
  */
 
 /**
- * 三家的请求体（纯函数，好测）。参考图只在 minimax 那档有落点：
- * subject_reference 带一张图（data URI 或公网 URL），保留参考图里人物/主体的
- * 特征再按 prompt 出新图 —— 官方限单图参考（数组长度 1），类型目前只有 character。
+ * 三家的请求体（纯函数，好测）。参考图只在 minimax 有落点：subject_reference 带一张图
+ * （data URI 或公网 URL），保留人物/主体特征再按 prompt 出新图 —— 官方限单图，类型目前只有 character。
  */
 export function requestBody(
   format: DrawFormat,
@@ -676,9 +632,9 @@ async function externalDraw(
 }
 
 /**
- * 三家的回包形状不一样，这里统一挑出第一张图（临时地址或 base64 二选一）：
+ * 三家的回包形状不同，这里统一挑出第一张（临时地址或 base64 二选一）：
  * siliconflow 回 images[].url；zhipu 回 data[].url / b64_json；
- * minimax 回 data.image_base64（base64 优先，url 形式 24 小时就过期）。
+ * minimax 回 data.image_base64（base64 优先，url 形式 24 小时过期）。
  */
 function pickImage(
   format: DrawFormat,

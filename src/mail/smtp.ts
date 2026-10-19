@@ -1,19 +1,7 @@
 /**
- * 一次性 SMTP 客户端（融合进 ericher 的裁剪加固版）。
- *
- * 与上游 worker-mailer 的差别，都是按本项目的用法删的：
- *   - 不做常驻连接与后台队列 —— 我们的用法是"到点了寄一封"，连上发完就断，
- *     省掉一整套会话状态机；DO 随时可能被回收，长连接在这里本来就不成立。
- *   - 删掉 DSN（NOTIFY/RET）与附件分支：提醒邮件不需要。
- *   - 删掉 CRAM-MD5：只留 PLAIN 与 LOGIN，少一条需要 MD5 HMAC 的路径。
- *   - 正文一律 base64：不再有 dot-stuffing、行首点、8BITMIME 协商这些坑。
- *
- * 两处安全是硬要求，不是可选项（上游没有）：
- *   1. 通道必须加密。隐式 TLS 之外，走 STARTTLS 时**升级失败就断连**，
- *      绝不在明文上发 AUTH —— 上游是"服务器没 advertise 就跳过 TLS 继续认证"，
- *      那等于把口令交给能改 EHLO 应答的中间人。
- *   2. 地址必须校验。CR/LF 或尖括号进地址就能往协议里插命令，
- *      而收件地址将来可能来自来客自填的邮箱。
+ * 一次性 SMTP 客户端（裁剪加固版）：连上发完就断（DO 随时可能被回收），只留 PLAIN/LOGIN，正文 base64。
+ * 两处硬要求（上游没有）：1) 通道必须加密——STARTTLS 升级失败就断连，绝不在明文上发 AUTH；
+ * 2) 地址必须校验——CR/LF 或尖括号进地址就能插协议命令，收件地址可能来自来客自填。
  */
 
 export type MailAddress = { email: string; name?: string };
@@ -42,12 +30,9 @@ export interface MailRequest {
 }
 
 /**
- * 我们只用到 cloudflare:sockets 的这点形状，抽出来才能离线测协议。
- * secureTransport 是**运行时实测值**，不是我们传进去的意图 ——
- * 加密判断只信它和 STARTTLS 之后的重新握手，不信自己的配置。
- *
- * 没有 `upgraded` 这类字段可读：workerd 不在套接字上报告「升级过了」，
- * 升级是否真生效只能从协议上验（见 sendMail 里那条 RFC 3207 检查）。
+ * 只取 cloudflare:sockets 的这点形状，便于离线测协议。
+ * secureTransport 是运行时实测值，加密判断只信它和 STARTTLS 后的重新握手，不信自己的配置；
+ * workerd 不报告「升级过了」，升级是否生效只能按协议验（见 sendMail 的 RFC 3207 检查）。
  */
 export interface SmtpSocket {
   opened: Promise<unknown>;
@@ -58,9 +43,7 @@ export interface SmtpSocket {
   close(): void | Promise<void>;
 }
 /**
- * 明文起步的那条路必须传 "starttls" 而不是 "off"：workerd 对 startTls() 的
- * 要求就是套接字当初以 "starttls" 打开，传 "off" 会当场抛
- * 「The `secureTransport` socket option must be set to 'starttls'」。
+ * 明文起步必须传 "starttls" 而非 "off"：workerd 要求套接字当初以 "starttls" 打开，否则抛错。
  */
 export type SocketTransport = (
   hostname: string,
@@ -191,8 +174,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 }
 
 /**
- * 寄一封。任何一步不对都抛错，错误里只带阶段与服务器回文，绝不带凭据。
- * transport 参数只为测试注入，生产走 cloudflare:sockets。
+ * 寄一封：任何一步不对都抛错，错误只带阶段与服务器回文，绝不带凭据。transport 仅供测试注入。
  */
 export async function sendMail(
   opts: SmtpOptions,
@@ -217,8 +199,7 @@ export async function sendMail(
   let socket = await transport(opts.hostname, opts.port, {
     secureTransport: opts.secure ? "on" : "starttls",
   });
-  // 升级是否真生效，只能到 STARTTLS 之后按协议验出来（见下面那条 RFC 3207 检查）；
-  // 在那之前这条一律是 false，凭据一步都不许走
+  // 升级是否真生效只能到 STARTTLS 之后按协议验；在那之前 tlsConfirmed 一律 false，凭据不许走
   let tlsConfirmed = false;
   // 加密与否只看套接字自己的报告 + 协议上的确认：opts.secure 是我们想要什么，不是得到了什么
   const encryptedNow = () =>

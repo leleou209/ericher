@@ -1,12 +1,6 @@
-// 邮件设置表单里的纯规则：草稿与提交口径、必填校验、端口与加密方式的组合提示、
-// secret 变量名的合法性、默认收件地址表（拆/拼/逐条形状校验/上限）、
-// 两个新开关的说人话措辞、列表行摘要与发信回执文案。
-//
-// 为什么要外提：这一面只有一行、一个弹页，规则全写进 JSX 就没人测得住 ——
-// 「465 配 STARTTLS 该不该提醒」「变量名填成口令本体怎么认」「两行地址只差大小写
-// 该不该算重复」这类判断，改一句措辞就可能顺手把边界挪坏。抽成不依赖 React 的函数
-// 才拿得住回归（测试环境是 node，没有 jsdom，组件渲染根本测不了）。
-// 这里只有规则，不碰接口、不碰 DOM —— 提交口径仍由面板走 lib/api。
+// 邮件设置表单的纯规则：草稿/提交口径、必填校验、端口与加密组合、secret 变量名、
+// 默认收件地址表、开关措辞、行摘要。外提是因为测试环境没有 jsdom，写进 JSX 就测不住；
+// 这里不碰接口与 DOM，提交仍由面板走 lib/api。
 
 import { looksLikeRawKey } from "./modelCatalogForm";
 import type {
@@ -19,8 +13,8 @@ import type {
 export const MAX_DAILY_CAP = 1000;
 
 /**
- * 默认收件地址表的上限：这一张表进的是「没点名寄给谁时就去这里」那条路，
- * 二十个已经够一家人加一个群，再多基本是把抄送清单粘进来了（后端也收这么多）。
+ * 默认收件地址表上限：这张表是「没点名寄给谁时」的去处，
+ * 二十个够用（后端也收这么多）。
  */
 export const MAX_TO_ADDRESSES = 20;
 
@@ -32,7 +26,7 @@ export const STARTTLS_PORT = 587;
 
 /**
  * 平台禁止出站的端口：后端直接 400，这里当场拦住 ——
- * 让人按完保存才知道白填一场，不如现在就指着那一格说。
+ * 别让人按完保存才知道白填一场。
  */
 export const BLOCKED_PORTS = [25];
 
@@ -44,11 +38,9 @@ export const secureLabel = (secure: boolean): string =>
   secure ? "隐式TLS" : "STARTTLS";
 
 /**
- * 弹页草稿：端口与每日上限是字符串 —— 还没敲完的「58」也是合法的编辑状态，
- * 塞成数字会把人正在打的字吞掉（和模型目录那两个额度格同一个做法）。
- * `to` 存的也是字符串：那是「地址表文本」，一行一个，界面按表来增删（见下面那组
- * splitAddressTable / joinAddressTable），提交前才拼回这一串。
- * 这一份草稿里永远没有口令：凭据只住 keySecret 所指的 Worker secret。
+ * 弹页草稿：端口与每日上限是字符串 —— 没敲完的「58」也是合法编辑状态，
+ * 塞成数字会吞掉正在打的字。`to` 是地址表文本（一行一个），提交前才拼回。
+ * 草稿里永远没有口令：凭据只住 keySecret 所指的 Worker secret。
  */
 export interface MailDraft {
   enabled: boolean;
@@ -104,8 +96,8 @@ export const parsePort = (raw: string): number | undefined => {
 };
 
 /**
- * 每日上限：只认 0 到 MAX_DAILY_CAP；小数四舍五入（后端只收整数，1.5 放过去是 400）。
- * 超界不当「收在上限上」处理 —— 后端本来就 400 回绝，悄悄改写成人没填的数比报错更糟。
+ * 每日上限：只认 0 到 MAX_DAILY_CAP；小数四舍五入（后端只收整数）。
+ * 超界不悄悄收在上限上 —— 后端本来就 400，改写成人没填的数比报错更糟。
  */
 export const parseDailyCap = (raw: string): number | undefined => {
   const t = raw.trim();
@@ -117,10 +109,8 @@ export const parseDailyCap = (raw: string): number | undefined => {
 };
 
 /**
- * 地址表文本 → 数组：按换行（含 \r\n）与逗号拆开，逐条 trim、丢空、
- * 大小写不敏感去重（保留第一次出现的那种写法）。
- * 「a@x.co, b@x.co\n\n A@X.CO」→ ["a@x.co","b@x.co"] —— 从邮件客户端或聊天窗口
- * 粘一串进来是这个结果，人不必自己先整理。
+ * 地址表文本 → 数组：按换行与逗号拆，trim、丢空、大小写不敏感去重（留第一次写法）。
+ * 「a@x.co, b@x.co\n\n A@X.CO」→ ["a@x.co","b@x.co"]，粘一串进来不必先整理。
  */
 export const splitAddressTable = (text: string): string[] => {
   const seen = new Set<string>();
@@ -173,10 +163,8 @@ export const addressTableRemove = (text: string, idx: number): string => {
 
 /**
  * 这一格该不该进表：坏形状、重复、超上限各说一句；合法就空串。
- * 比重复不分大小写（邮件地址本来就这样折）—— 表里留两份同一个地址，
- * 后端会给同一个人寄两封，而这种错最难查。
- * 越界（idx=null 且已满上限）也在这里拦住：EntityAddButton 在满表时先置灰，
- * 但弹页可能是在表还没满时打开的，这一轮加满之后仍要拦得住。
+ * 重复不分大小写 —— 表里留两份同一地址，后端会给同一个人寄两封。
+ * 越界也在这里拦：EntityAddButton 会置灰，但弹页可能是满表前打开的。
  */
 export const addressCellProblem = (
   value: string,
@@ -197,9 +185,8 @@ export const addressCellProblem = (
 };
 
 /**
- * 地址表的一行摘要：一个就念那一个，多个就「第一个 等 N 个」——
- * 发件箱里的收件人也用这一条（lib/mailBoxView 直接复用，措辞不许两处各写一遍）。
- * 空表回空串，由调用方决定那句「没填」怎么说。
+ * 地址表一行摘要：一个就念那一个，多个就「第一个 等 N 个」。
+ * 发件箱的收件人也复用它（措辞不许两处各写一遍）；空表回空串。
  */
 export const addressListSummary = (list: readonly string[]): string => {
   const l = splitAddressTable((list ?? []).join("\n"));
@@ -240,10 +227,8 @@ export const inboxEnabledHint = (on: boolean): string =>
     : "打开之前先确认域名的 MX 已经指到这台机器，否则信根本到不了这里，收件箱永远是那种「空」。";
 
 /**
- * 草稿 → 请求体：可写的那十一格（原九格 + 两个开关），每格 trim。
- * `to` 送的是规整过的地址表文本（一行一个）。
- * keyAvailable 与 lastSend 是后端算出来的事实，不回传。
- * 坏值由 mailMissingFields 先挡住，这里兜 0 只为让函数在任何输入下都有返回值。
+ * 草稿 → 请求体：可写的十一格，每格 trim；`to` 送规整过的地址表文本。
+ * keyAvailable / lastSend 是后端事实，不回传；坏值由 mailMissingFields 先挡。
  */
 export const mailPayloadOf = (d: MailDraft): MailConfigPatchFull => ({
   enabled: d.enabled,
@@ -275,9 +260,9 @@ export interface MailFieldError {
 }
 
 /**
- * 邮箱形状：除了「有 @ 、域名有点」，尖括号与逗号空格一律不收 ——
- * 后端 assertSafeAddress 拦的就是这些（协议行是 `RCPT TO: <x>`，尖括号进去能插命令）。
- * 这里先挡住，人在弹页里看到的是一句人话，不是服务器抛回来的 500。
+ * 邮箱形状：除「有 @、域名带点」外，尖括号与逗号空格一律不收 ——
+ * 后端 assertSafeAddress 拦的就是这些（协议行是 `RCPT TO: <x>`，尖括号能插命令）。
+ * 这里先挡，弹页里看到的是一句人话，不是 500。
  */
 export const isMailAddress = (raw: string): boolean => {
   const v = raw.trim();
@@ -297,10 +282,8 @@ export const isHostname = (raw: string): boolean =>
   /^[A-Za-z0-9.-]+$/.test(raw.trim());
 
 /**
- * 变量名那一格的提示，空串 = 没要说。
- * 「像口令本体」只提示、不拦保存（和模型目录里 sk- 那条款一致）：那串确实可能是
- * 某人给变量起的名字，前端替它判死会误伤。名字合不合法 wrangler 说了算，
- * 后端对不合法的名字是直接 400 的，所以那条由 mailMissingFields 拦下来。
+ * 变量名提示，空串 = 没要说。「像口令本体」只提示、不拦保存（同模型目录的 sk-
+ * 条款）：那串也可能真是变量名。是否合法由 wrangler 与后端 400 定。
  */
 export const keySecretHint = (raw: string): string => {
   const v = raw.trim();
@@ -323,9 +306,8 @@ export const keyMissingHint = (name: string): string =>
     : "";
 
 /**
- * 弹页里「这一格填的变量名在这台机器上有没有」：
- * 没改过就照后端那份只读事实 keyAvailable；改过了只能拿候选清单比一比 ——
- * 清单是空的（老后端没回）就不下结论，免得把明明配好的名字说成没配。
+ * 这一格填的变量名在这台机器上有没有：没改过就照后端的 keyAvailable；
+ * 改过就不下结论（候选清单未必含邮件变量名，误报比不报更糟，等保存后回读）。
  */
 export const draftKeyMissing = (
   secret: string,
@@ -341,8 +323,7 @@ export const draftKeyMissing = (
 
 /**
  * 换加密方式时端口跟着走：还停在另一种加密的标准门上就一起换对
- * （465 上门走 STARTTLS、587 上做隐式 TLS 都连不上），
- * 手填过的端口留住不动 —— 人知道自己在干什么。和模型目录换格式时换地址同一做法。
+ * （465 上走 STARTTLS、587 上做隐式 TLS 都连不上）；手填的端口不动。
  */
 export const mailWithSecure = (d: MailDraft, next: boolean): MailDraft => {
   const p = d.port.trim();
@@ -355,9 +336,8 @@ export const mailWithSecure = (d: MailDraft, next: boolean): MailDraft => {
 };
 
 /**
- * 端口与加密方式搭不搭：空串 = 没要说。
- * 先说平台出不去的那几扇（后端直接 400），再说门与握手方式对不上；
- * 两种加密都是契约里的合法组合，所以后面那两条只提示不拦 —— 但基本连不通，值得说一句。
+ * 端口与加密方式搭不搭，空串 = 没要说。先说平台封的端口，再说门与握手对不上；
+ * 后两条只提示不拦（契约允许），但基本连不通。
  */
 export const securePortHint = (port: string, secure: boolean): string => {
   const n = parsePort(port);
@@ -372,11 +352,8 @@ export const securePortHint = (port: string, secure: boolean): string => {
 };
 
 /**
- * 必填校验：返回缺/坏的哪几格（都好了就空数组），顺序就是弹页里出现的顺序。
- * 关着的配置允许半空 —— 「还没配好」是正常状态，别拦着人先填一半存下来；
- * 但填了的东西形状不对照样报：后端对形状是直接 400 的，
- * 让人按完保存才知道白填一场，不如现在就指着那一格说。
- * trim 后才判空：「   」是手滑留下的空格，不是填过了。
+ * 必填校验：返回缺/坏的格子（顺序同弹页）。关着的配置允许半空 ——
+ * 「还没配好」是正常状态；但填了的形状不对照样报，后端对形状是直接 400 的。
  */
 export const mailMissingFields = (d: MailDraft): MailFieldError[] => {
   const out: MailFieldError[] = [];
@@ -429,11 +406,8 @@ export const mailMissingFields = (d: MailDraft): MailFieldError[] => {
 };
 
 /**
- * 行摘要：一行看清开没开、走的哪扇门、寄给谁、每天几封、用哪把钥匙。
- * 关着就只说「未启用」—— 半配的状态不值得铺一排细节；
- * 但钥匙不在机器上这件事必须跟着说出来，不然人只看到「未启用」，
- * 不知道就算打开了也发不出去。
- * 收件人那张表折成「第一个 等 N 个」—— 行上不该被十个地址挤满。
+ * 行摘要：开没开、走的哪扇门、寄给谁、每天几封、用哪把钥匙。
+ * 关着只说「未启用」，但钥匙不在机器上必须一起说 —— 否则打开了也发不出去。
  */
 export const mailSummary = (v: MailConfigViewFull): string => {
   const missing = !!v.keySecret.trim() && !v.keyAvailable;
@@ -452,8 +426,7 @@ export const mailSummary = (v: MailConfigViewFull): string => {
 };
 
 /**
- * 最后一次发信的一行状态（只读，不做输入）。时间由调用方格式化好传进来 ——
- * 怎么把 ISO 串念成人话是界面口径，不该被这条规则绑住。
+ * 最后一次发信的一行状态（只读）。时刻由调用方格式化 —— 怎么念 ISO 串是界面口径。
  */
 export const lastSendNote = (last: MailLastSend | null, when = ""): string => {
   if (!last) return "";
@@ -465,10 +438,8 @@ export const lastSendNote = (last: MailLastSend | null, when = ""): string => {
 };
 
 /**
- * 测试发送的回执。收件人是一张表，而这一封只寄给表里头一个（/api/mail/test
- * 那一格仍收单个地址），所以表里另有几个也要说清楚 ——
- * 不然人以为三个都收到了，实际只寄了一个。
- * 地址空着 = 用配置里已保存的那张表（后端口径）。
+ * 测试发送回执。测试接口仍收单个地址（表里头一个），表里另有几个也要说清，
+ * 免得人以为全收到了。地址空着 = 用配置里已保存的那张表（后端口径）。
  */
 export const testSentNote = (to: string, extra = 0): string => {
   const v = to.trim();

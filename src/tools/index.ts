@@ -1,11 +1,7 @@
-// 工具集合入口。所有工具都是原生 AI SDK tool（有 inputSchema + execute），
-// 不再有 [TOOL:xxx] 正则解析。
-//
-// 渐进式披露：主人那间的工具分两层——
-//   常驻（RESIDENT_TOOLS）：schema 全量挂进请求，模型直接调；
-//   渐进式（DEFERRED_TOOLS）：schema 不进请求，系统提示里一行式索引给名字和参数速记，
-//     模型经 call_tool 网关调用（见 gateway.ts），用熟了自动转正常驻（热度粘性）。
-// 不拆来客那间：门面求稳，10 个工具本来就不大。
+// 工具集合入口：全部是原生 AI SDK tool（有 inputSchema + execute），不再有 [TOOL:xxx] 正则。
+// 渐进式披露（仅主人那间）：常驻（RESIDENT_TOOLS）的 schema 全量挂进请求；渐进式（DEFERRED_TOOLS）
+// 不进请求，提示里只给一行式索引，经 call_tool 网关调用（gateway.ts），用熟自动转正常驻。
+// 来客那间不拆层：门面求稳，10 个工具本来就不大。
 
 import type { ToolSet } from "ai";
 import { adminTools } from "./admin";
@@ -36,22 +32,21 @@ import {
   guestEnabledTools,
 } from "../agent/toolGroups";
 
-// 常驻/渐进的名单归 toolGroups.ts 统一持有，但别的模块一直从 "../tools" 拿 ——
+// 常驻/渐进名单归 toolGroups.ts 持有，但别的模块一直从 "../tools" 拿 ——
 // 在这里转出去，名册不分家，调用方也不用改。
 export { DEFERRED_TOOLS, RESIDENT_TOOLS };
 
 /**
- * 常驻 / 渐进的分层、以及来客能用哪些工具，名册都在 src/agent/toolGroups.ts。
- * 这里只留「怎么组装」—— 名册分家就会和提示词里写的对不上号。
+ * 分层与来客工具名册都在 src/agent/toolGroups.ts；这里只留「怎么组装」——
+ * 名册分家就会和提示词里写的对不上号。
  */
 
 /** 转正常驻的上限：转满 8 个就不再转，索引照样兜底 */
 export const PROMOTE_CAP = 8;
 
 /**
- * 组装给模型的那一栈工具：常驻 + 已转正的 + call_tool 网关。
- * 渐进式的不在返回值里——模型看不见它们的 schema，只能走网关。
- * 来客那间不拆层，全量返回（门面求稳）。
+ * 组装给模型的那一栈工具：常驻 + 已转正的 + call_tool 网关。渐进式的不在返回值里 ——
+ * 模型看不见它们的 schema，只能走网关。来客那间不拆层，全量返回。
  */
 export function buildToolStack(
   ctx: ToolCtx,
@@ -85,10 +80,8 @@ export function buildToolStack(
 export type { ToolCtx } from "./types";
 
 export function buildTools(ctx: ToolCtx): ToolSet {
-  // 多档来客类型：档位给的启用清单决定来客那间注册哪些对外工具。
-  // 只对来客生效，主人那间不受影响；没带 guestType / 没带清单（普通来客票、
-  // 老 state）一律视为全开 —— 开关是「明确关掉才生效」的语义，缺省不能
-  // 反着解释成全关（见 toolGroups.ts 的 guestEnabledTools）。
+  // 多档来客类型：档位的启用清单决定来客那间注册哪些对外工具。没带 guestType / 清单
+  //（普通来客票、老 state）一律视为全开 —— 开关是「明确关掉才生效」，缺省不能反着解释成全关。
   const enabled = ctx.guest
     ? new Set(guestEnabledTools(ctx.guestType?.tools))
     : null;
@@ -104,13 +97,10 @@ export function buildTools(ctx: ToolCtx): ToolSet {
       ...artifactTools(ctx),
     }).filter(([n]) => allow(n)),
   ) as ToolSet;
-  // 来客到此为止：管理员自己的记忆、任务、提醒、文件都不给他碰 ——
-  // 给了他既等于泄露，也等于让他替管理员做决定。
-  // 唯一的例外是记忆，而且是「受限读」的那一半：
-  // 他说的关于他自己的事值得被记下（管理员那边也留一份）；
-  // 翻得到的是管理员公开过的 + 他自己名下的（按称呼过滤，在 SQL 里完成），
-  // private 的主体一个字都不出管理员那间屋。
-  // visitor_log 也只在这间有，且不设开关：留痕是明说的，客人随时能翻自己的账。
+  // 来客到此为止：管理员自己的记忆、任务、提醒、文件都不给他碰（既泄密，也等于替他做决定）。
+  // 唯一例外是记忆，而且是受限读的那一半：他说自己的事要记下（管理员那边也留一份），
+  // 翻得到的是管理员公开的 + 他名下的（SQL 里过滤），private 的主体一个字不出主屋。
+  // visitor_log 只在来客这间有且不设开关：留痕是明说的，他随时能翻自己的账。
   if (ctx.guest)
     return {
       ...outward,

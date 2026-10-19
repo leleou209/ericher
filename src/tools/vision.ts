@@ -1,15 +1,7 @@
-// 看图这件事分两层，别再混在一起：
-//
-//   view_image —— 把云盘里的一张图「递」给主模型自己看。
-//                 她本来就能看图，中间再插一个视觉模型转述一道，是白等一跳、还掉细节：
-//                 「图上有字」和「字是『欠款 ¥3,200』」差着一次生意。
-//                 从前那条 analyze_image 就是这层中间商，现在拆了。
-//
-//   describeImage —— 只服务一处兜底：前端没能把原图内联进消息的时候
-//                    （体积过大、格式冷门，见 src/agent/attach.ts）。
-//                    那种图她真的看不见，这时才请 GLM-4V 讲成一段话。
-//
-// 为什么「分析」不再是一条工具：分析是她的活，工具只负责把材料摆到她眼前。
+// 看图分两层：view_image 把云盘里的图原样递给主模型自己看（她本来就能看图，
+// 插一个视觉模型转述是白等一跳还掉细节，旧的 analyze_image 已拆）；
+// describeImage 只兜底「原图没能内联进消息」（体积过大/冷门格式，见 attach.ts），那种图她真看不见时才请 GLM-4V 讲。
+// 「分析」不再是工具：分析是她的活，工具只负责把材料摆到她眼前。
 
 import { tool } from "ai";
 import { z } from "zod";
@@ -20,10 +12,8 @@ const ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 const MODELS = ["glm-4.6v", "glm-4v-flash", "glm-4v-plus", "glm-4v"];
 
 /**
- * 单张图能塞进消息的上限。
- *
- * base64 之后还要再涨三分之一，而端点那边单图到 5MB 就直接回错 ——
- * 3.5MB 原图刚好落在安全区里（attach.ts 内联那处用的是同一条线）。
+ * 单张图能塞进消息的上限。base64 之后还要再涨三分之一，而端点单图到 5MB 就回错，
+ * 3.5MB 原图刚好落在安全区（attach.ts 内联那处用的是同一条线）。
  */
 const MAX_INLINE_IMAGE = 3_500_000;
 
@@ -67,12 +57,9 @@ type LoadedImage =
   { ok: true; data: string; mediaType: string } | { ok: false; why: string };
 
 /**
- * 这间屋子能不能看这个 key。
- *
- * loadImage 本身不设防 —— 它不知道调用的是哪间屋子；划界只能由带着房间身份的
- * 调用方来做。所有「按模型给的 key 碰桶」的入口（view_image、draw 的自检递图）
- * 都必须先过这里：主人全库可见，来客只读自己那间前缀下的和公开空间。
- * 没有这一道，一句「帮我看看 f/default/xxx.png」就能把别人房里的图调到眼前。
+ * 这间屋子能不能看这个 key。loadImage 本身不设防（它不知道调用的是哪间屋），划界只能由带房间身份的
+ * 调用方做：所有「按模型给的 key 碰桶」的入口都必须先过这里 —— 主人全库可见，来客只读自己前缀与公开区。
+ * 没有它，一句「帮我看看 f/default/xxx.png」就能把别人房里的图调到眼前。
  */
 export function mayViewKey(ctx: ToolCtx, key: string): boolean {
   return canReadFile(key, ctx.guest ? "user" : "admin", ctx.room);
@@ -80,9 +67,7 @@ export function mayViewKey(ctx: ToolCtx, key: string): boolean {
 
 /**
  * 从云盘取一张图，做成能直接塞进 tool result 的图片块。
- *
- * 失败时给的是「为什么看不到」的人话而不是 null —— 那句话要原样落到她眼里，
- * 她照实说出来，比她自己猜一个理由强。
+ * 失败时给人话「为什么看不到」而不是 null —— 那句话原样落到她眼里，比她自己猜一个理由强。
  */
 export async function loadImage(env: Env, key: string): Promise<LoadedImage> {
   const obj = await env.MEMORY_BUCKET.get(key);
@@ -109,10 +94,8 @@ type VisionResult =
   { ok: true; text: string; model: string } | { ok: false; error: string };
 
 /**
- * 请 GLM-4V 把一张图讲成一段话。
- *
- * 只在「原图没能进消息」时用（attach.ts 兜底那一处）——
- * 能让她亲眼看的时候不要走这里：转述一定丢细节，还会白等一跳。
+ * 请 GLM-4V 把一张图讲成一段话。只在「原图没能进消息」时用（attach.ts 兜底那一处）——
+ * 能让她亲眼看时不要走这里：转述一定丢细节，还会白等一跳。
  */
 export async function describeImage(
   env: Env,
@@ -210,10 +193,8 @@ export function visionTools(ctx: ToolCtx) {
         if (!img.ok) return img.why;
         return `这就是 ${key} 的原图，自己看。`;
       },
-      // 图在这里才真的递过去 —— 工具结果里的文字只是陪衬，
-      // 主模型看见的是下面那个 image-data 块。
-      // execute 拒过的 key 在这里也不能放行：这是另一次独立的取图，
-      // 不设门的话拒绝就成了走个形式，图还是塞进去了
+      // 图在这里才真的递过去 —— 工具结果里的文字只是陪衬。execute 拒过的 key 在这里也不能放行：
+      // 这是另一次独立取图，不设门的话拒绝就成了走形式，图还是塞进去了
       toModelOutput: async ({ input, output }) => {
         if (!mayViewKey(ctx, input.key)) return { type: "text", value: output };
         const img = await loadImage(ctx.env, input.key);

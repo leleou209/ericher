@@ -135,12 +135,8 @@ function ToolCall({
 }
 
 /**
- * 一轮异常中断的死因卡。
- *
- * 工具链断环、输出顶到上限被截、上游直接拒单 —— 这些以前只躺在 console 里：
- * 界面上要么一片安静（以为他还在酝酿），要么只留一个「结果没回来」。
- * 这张卡把死因明文摆出来，和思考过程一样直白 —— 是话太长被截、是被人按下停，
- * 还是上游把这一轮拒了。管理员还能展开看原始报文（状态码 / URL / 返回体）。
+ * 一轮异常中断的死因卡：输出超限、被停、上游拒单。以前只躺在 console 里，
+ * 界面一片安静或只剩「结果没回来」；管理员可展开原始报文。
  */
 const REASON_ICON: Record<TurnError["reason"], IconName> = {
   "output-limit": "scissors",
@@ -183,10 +179,9 @@ function TurnErrorCard({
   );
 }
 
-// ── mermaid：她写的源码，渲染器摆线 ──────────────────────
-// 动态 import 让首屏不背 mermaid 的包体 —— 只有真出现图时才拉渲染器。
-// 几张缓存各管一段：同一份源码只取一遍、同一张图只渲一遍（工具卡和正文各摆一份也只渲一次）、
-// 用户拖过的高度按图记住 —— 历史消息重渲、外观翻面，都不白跑一趟。
+// ── mermaid：她写的源码，渲染器摆线 ──
+// 动态 import 让首屏不背包体。几层缓存：同源码只取一遍、同图只渲一遍、
+// 拖过的高度按图记住 —— 历史重渲、外观翻面都不白跑。
 
 /** 当前真正生效的外观主题。App 已把「跟随系统」落成 paper/dark，这里只兜底一次 */
 function resolvedTheme(): string {
@@ -198,11 +193,8 @@ function resolvedTheme(): string {
 }
 
 /**
- * 把当前主题的灰阶实取出来交给 mermaid。
- *
- * mermaid 自带的几套主题跟我们的纸感无关：白底黑线摆在一张夜墨的纸上，
- * 图自己亮着一块，像贴上去的打印纸。换成 base 主题 + 显式喂色，
- * 图就长在纸面上 —— 线的颜色、节点的填充、聚类的底，全是页面上正在用的那几个变量。
+ * 把当前主题的灰阶交给 mermaid。自带主题与纸感无关（白底黑线摆在夜墨纸上），
+ * 改用 base + 显式 themeVariables，让图长在纸面上。
  */
 function mermaidVars(): Record<string, unknown> {
   const cs = getComputedStyle(document.documentElement);
@@ -265,9 +257,8 @@ let mermaidMod: Promise<(typeof import("mermaid"))["default"]> | null = null;
 let mermaidThemeKey = "";
 
 /**
- * 外观翻了面（含「跟随系统」跟着系统变）：mermaid 的主题是全局配置，
- * 旧渲染按旧配色出的图全作废，喊所有还挂着的图重来一遍。
- * 只盯 data-theme 这一个开关 —— App 已经把系统明暗解析成 paper/dark 写在这上面了。
+ * 外观翻面（含跟随系统）：mermaid 主题是全局配置，旧图作废，喊所有挂着的图重来。
+ * 只盯 data-theme（App 已把系统明暗解析成 paper/dark）。
  */
 let themeVersion = 0;
 let themeWatchOn = false;
@@ -331,9 +322,8 @@ function loadMermaid(): Promise<(typeof import("mermaid"))["default"]> {
 }
 
 /**
- * 一段源码 → 一张图，同一张（同一主题下）只渲一遍。
- * 工具卡和正文里的 markdown 常常各摆一份同样的图，走同一个 cache key，
- * 后到的那个直接等前一个的 promise，不再重拉渲染器、不再重画。
+ * 一段源码 → 一张图，同一主题下只渲一遍。工具卡与正文常各摆一份，
+ * 共用 cache key，后到的直接等前一个 promise。
  */
 function renderMermaid(source: string): Promise<string> {
   const key = resolvedTheme() + "\u0000" + source;
@@ -376,15 +366,9 @@ function renderMermaid(source: string): Promise<string> {
 }
 
 /**
- * mermaid 画图时的落脚处。
- *
- * 不给容器，mermaid 会把它临时搭的那层 div 直接挂到 document.body 末尾 ——
- * 而且不带任何定位样式（mermaid 源码 appendDivSvgG 里，无容器那条支路 divStyle 是空的）。
- * 于是一刷新就出洋相：内存缓存空、每张图都要从头画，页面最底下（输入框之下）会实打实
- * 多出一张还没上色的图，文档高度跟着长一截 —— 看着就像「下面有什么在渲染」。
- * 给一个藏在屏外、visibility:hidden 的容器，图照样画得出来（量文字要用 getBBox，
- * 得保留排版，所以不能用 display:none），画完取源码即弃，页面上不留痕迹。
- * 每张图各给一个容器：mermaid 开画前会先清空容器，共用一个会把并发的另几张擦掉。
+ * mermaid 画图的落脚处。不给容器它会挂到 body 末尾且无定位，页面底部会多出一张
+ * 未上色的图、文档高度跟着长。给一个屏外 visibility:hidden 的容器（不能用
+ * display:none，量文字要 getBBox），每图一个 —— mermaid 开画前会清空容器。
  */
 function newMermaidStage(): HTMLDivElement {
   const stage = document.createElement("div");
@@ -396,12 +380,8 @@ function newMermaidStage(): HTMLDivElement {
 }
 
 /**
- * 一段 mermaid 源码 → 一张图。渲染失败把错误摆出来而不是吞掉 ——
- * 空卡片没人知道为什么，摆出来她改一版重发就是。
- *
- * 高度：建议默认高 = min(图的自然高, 约 70vh)。装得下就原样摊开，
- * 装不下就在框里滚 —— 一张五十节点的大图不该把一整屏聊天顶走。
- * 框底那道边可以往下拖，把框放高；拖过的高度按图记住，重渲也不丢。
+ * 源码 → 图。失败把错误摆出来，不吞。默认高 min(自然高, 约 70vh)，
+ * 装不下就框内滚；底部可拖高，拖过的高度按图记住。
  */
 function MermaidView({ source, alt }: { source: string; alt: string }) {
   const themeV = useThemeVersion();
@@ -609,11 +589,8 @@ function MermaidFile({ src, alt }: { src: string; alt: string }) {
 }
 
 /**
- * 画出来的图：工具结果里带图片地址时，直接把图摆出来。
- *
- * 为什么不指望模型在回复里写 markdown 就够了：
- * 它偶尔会忘了写，或者把那行改一个字符，人就只看到一句「画好了」却没有图 ——
- * 图是这条工具唯一的产出，摆在这儿谁也漏不掉。
+ * 画出来的图：工具结果里有图片地址就直接摆出来。不指望模型写 markdown ——
+ * 它偶尔忘写或改一个字符，人只看到「画好了」却没图；图是这条工具唯一的产出。
  */
 function Drawn({ output }: { output: unknown }) {
   if (typeof output !== "string") return null;
@@ -709,14 +686,9 @@ function CodeBlock({ children }: { children?: ReactNode }) {
 }
 
 /**
- * ericher 的输出按 Markdown 渲染。刻意不引入 rehype-raw —— 不解析原始 HTML，
- * 模型（或被注入的内容）无法往页面里塞标签。
- *
- * 为什么要 memo：流式输出每来一个 chunk，整条消息列表就会重渲一次。
- * react-markdown 是「给一段文字、重新解析成树」的组件，不做记忆化的话，
- * 每吐一个字，这一场里所有历史回答都要被 remarkGfm / remarkBreaks 重解析一遍 ——
- * 对话越长越卡，低端机上直接卡成 PPT。按 text 记忆之后，
- * 只有正在变的那一条会重新解析，历史那些原地不动。
+ * ericher 的输出按 Markdown 渲染。刻意不引 rehype-raw —— 不解析原始 HTML，
+ * 模型或被注入的内容无法往页面塞标签。memo 是必需的：流式每个 chunk 都会重渲整列，
+ * 不记忆的话历史回答全部重解析，低端机会卡死；按 text 记忆后只有正在变的会重解析。
  */
 const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
@@ -758,11 +730,8 @@ const Markdown = memo(function Markdown({ text }: { text: string }) {
 });
 
 /**
- * 思考过程。正在想的时候摊开给你看 —— 那是「他在琢磨」的实感；
- * 一旦开始说正事就自动收起来。
- *
- * 为什么非收不可：一次思考动辄几千字，还是英文的内心独白。摊在对话里，
- * 人往下翻三屏都翻不到回答。收起来之后它还在，想看随时点开，只是不再挡路。
+ * 思考过程：正在想时摊开，开始说话就收起。一次思考动辄几千字，
+ * 摊着会让人翻三屏都翻不到回答；收起后随时可点开。
  */
 function Reasoning({ text, live }: { text: string; live: boolean }) {
   const [open, setOpen] = useState(live);
@@ -784,12 +753,9 @@ function Reasoning({ text, live }: { text: string; live: boolean }) {
 }
 
 /**
- * 「他正在想什么」。
- *
- * 真推理只给主人看；来客那边整段是空白的 —— 空气泡和「ericher 卡了」长得一模一样。
- * 所以服务端每隔几秒把他这一轮的动静翻成一句能见人的话送过来（见 src/agent/think.ts），
- * 最新那句摆在这儿，句尾那三点负责「还在动」的实感。
- * 想看他一路都在琢磨什么，点开下面那行：每一步一句、按先后排着 —— 那就是这一轮的思考。
+ * 「他正在想什么」。真推理只给主人看；来客那边空白气泡和「卡了」分不清，
+ * 所以服务端隔几秒翻一句能见人的话过来（src/agent/think.ts）。
+ * 点开下面那行可看这一轮每一步。
  */
 function Thoughts({
   lines,
@@ -829,12 +795,9 @@ function Thoughts({
   );
 }
 
-// ── 附件在消息里长什么样 ──────────────────────────────
-//
-// 管理员发来的消息里，附件正文是原样拼进去的（见 src/agent/attach.ts 的 attachBlock）。
-// 直接铺开的话，一次转录就能把整屏对话顶走 —— 所以这里把它拆出来，
-// 上面留一个文件条，正文折进「看看我读到了什么」。
-// 折起来不是藏起来：他随时能点开核对，我读了什么他看得见。
+// ── 附件在消息里长什么样 ──
+// 附件正文由后端原样拼进消息（attachBlock），铺开会顶走整屏 ——
+// 这里拆出文件条，正文折进「看看我读到了什么」，随时可点开核对。
 
 type Segment =
   | { kind: "text"; text: string }
@@ -866,21 +829,16 @@ export function splitAttach(text: string): Segment[] {
   return segs.length ? segs : [{ kind: "text", text }];
 }
 
-// ── 交互卡片（artifact）────────────────────────────────
-//
-// ericher 用 artifact 工具生成的自包含 HTML，回复里以一行
-// [artifact <key> <标题>] 引用。这里把那行拆出来渲染成内联卡片：
-// 沙箱 iframe —— 脚本能跑（卡片要能交互），但没有同源权限，
-// 碰不到登录者的任何东西；后端响应头还垫了一层 CSP sandbox。
+// ── 交互卡片（artifact）──
+// artifact 工具生成的自包含 HTML，回复里以 [artifact <key> <标题>] 引用。
+// 渲染成沙箱 iframe：脚本能跑（卡片要交互），但没有同源权限；后端另垫一层 CSP sandbox。
 
 type ArtSeg =
   | { kind: "text"; text: string }
   | { kind: "artifact"; key: string; title: string };
 
-// key 那一段不能只收 ASCII 的 [\w./-]：会话产物存在
-// `f/<屋>/会话/<会话id>/…` 下，中间那段目录名就是中文（SESSION_FOLDER = "会话"），
-// 收窄的字符集会让整行认不出来、原样漏成文本 —— key 里本来就不会有空白，
-// 按「一段非空白」收就够，顺带把来客名字之类的中文屋名也一起兜住。
+// key 不能只收 ASCII：会话产物在 `f/<屋>/会话/<会话id>/…`，
+// 中间目录名是中文 —— 收窄会让整行认不出、漏成文本。按「一段非空白」收即可。
 const ARTIFACT_RE = /\[artifact\s+(\S+)\s+([^\]\n]+?)\s*\]/g;
 
 function splitArtifacts(text: string): ArtSeg[] {
@@ -899,12 +857,9 @@ function splitArtifacts(text: string): ArtSeg[] {
 }
 
 /**
- * 从卡片 HTML 里把它那张 SVG 抠出来。
- *
- * 卡片是 sandboxed iframe（sandbox 里没有 allow-same-origin），父页面摸不到里面的
- * DOM —— 所以不能直接读 iframe 里的 svg，只能把文件再取一遍自己解析。DOMParser
- * 不执行脚本，取 outerHTML 会把 svg 自带的 <style> 一并带走，样式不丢。
- * 挑节点最多的那张：手写卡片常顺手塞个 16×16 的小图标，抓错了就只能放大一个点。
+ * 从卡片 HTML 里抠出主 SVG。卡片是 sandbox iframe（无 allow-same-origin），父页摸不到
+ * 里面的 DOM，只能再取一遍文件自己解析；DOMParser 不执行脚本，outerHTML 带着 <style>。
+ * 取节点最多的那张 —— 手写卡片常塞 16×16 小图标。
  */
 function pickSvg(html: string): string {
   const svgs = Array.from(
@@ -925,9 +880,8 @@ function ArtifactCard({ keyName, title }: { keyName: string; title: string }) {
   const [busy, setBusy] = useState(false);
 
   /**
-   * 放大。图困在 iframe 里，点它不冒泡到外面（mermaid 那张是内联 SVG，所以点得开）
-   * —— 只能走「取文件 → 抠出 svg → 交给看图浮层」这条迂回路。真交互卡片
-   * （表格、仪表盘）没有能放大的矢量图，退回「新窗口打开」那条老路。
+   * 放大：iframe 里的图点不冒泡，只能「取文件 → 抠 svg → 交给看图浮层」。
+   * 真交互卡片没有可放大的矢量图，退回「新窗口打开」。
    */
   const zoom = async () => {
     let source = svg;
@@ -1099,10 +1053,8 @@ function Part({
 }
 
 /**
- * 消息底部的反馈按钮。
- * ericher 的发言：赞 / 踩 / 评论 —— 评价它答得好不好。
- * 我自己的发言：标重 / 评论 —— 自己夸自己没意义，但可以标重（要它重视）和评论。
- * 评论只显示条数，正文要点开才看得到。
+ * 反馈按钮。ericher 的发言：赞/踩/评论；我自己的：标重/评论。
+ * 评论只显示条数，正文点开才看。
  */
 function Foot({
   id,
@@ -1136,8 +1088,8 @@ function Foot({
   const up = vote?.up || 0;
   const down = vote?.down || 0;
   /**
-   * 工具条上带内容的不藏：赞踩数、评论数、标重、正在念 —— 这些是消息的一部分。
-   * 悬停才浮出只该发生在「什么都没有」的条上，不然数字会凭空消失又凭空回来。
+   * 带内容的按钮不藏（赞踩数、评论数、标重、正在念）—— 它们属于消息；
+   * 只有空条才悬停浮出，否则数字会忽隐忽现。
    */
   const pinned =
     flagged ||
@@ -1309,9 +1261,8 @@ function Comments({
 }
 
 /**
- * 单条消息。memo 的理由和上面 Markdown 那条一样：流式期间每个 chunk 都会把整条列表
- * 重渲一次，不记住的话，十几条历史消息连同它们的赞踩栏、附件卡、思考折叠
- * 每帧都要重新走一遍 render。真正该重画的只有正在变的那一条。
+ * 单条消息。memo 理由同上：流式每个 chunk 都会重渲整列，不记忆的话历史消息
+ * 连同赞踩栏、附件卡、思考折叠每帧都要重走 render。
  */
 const Message = memo(function Message({
   m,
@@ -1459,22 +1410,18 @@ export function Messages({
   /** 异常收件箱开不开 —— 落不到具体消息上的死因都汇总在这里 */
   const [errOpen, setErrOpen] = useState(false);
   /**
-   * 认到的死因去向，按「哪一场 + 何时断 + 怎么断」记。
-   * 流被掐断时，界面上那条助手消息还挂着客户端的临时 id，和落库的 id 对不上，
-   * 死因当场认不到人 —— 所以要退一步认给当时队尾那条助手消息；认过就钉住，
-   * 别让后面新来的消息把它带跑（认一次 = 那一刻断在哪条上）。换了屋整段作废。
+   * 死因认领：按「哪一场 + 何时断 + 怎么断」记。断流时界面上那条助手消息还是临时
+   * id，与落库 id 对不上 —— 退一步认给当时队尾的助手消息，认过就钉住；换屋作废。
    */
   const claimed = useRef(new Map<string, string>());
   /**
-   * 降级的死因：认过的目标消息后来消失了（重取后那条残段压根没落库），
-   * 就进收件箱 —— 钉死，绝不改口认给别的消息。以前这里会「松手重认」，
-   * 每次重取都认给新的队尾，报错卡就一路往下漂，新消息全跑它上面去了。
+   * 降级的死因：认过的目标后来消失（残段没落库）就进收件箱，钉死不再改认 ——
+   * 以前会松手重认，报错卡一路往下漂，新消息全跑它上面。
    */
   const demoted = useRef(new Set<string>());
   /**
-   * 反馈拉取的请求定序：换屋那一下先发的那一趟还在飞，慢响应回来不许盖掉新屋的账。
-   * 换屋时当场把账清空（连同还在飞的那趟一起作废），等新屋的那趟回来再画 ——
-   * 否则上一屋的赞/踩/标重会先套到新屋的消息上，看着像消息被标错了。
+   * 反馈请求定序：换屋时先发的那趟慢响应不许盖新屋的账。换屋当场清空并作废在飞的，
+   * 否则上一屋的赞/踩会先套到新屋消息上。
    */
   const fbSeq = useRef(0);
   useEffect(() => {
@@ -1496,13 +1443,8 @@ export function Messages({
   }, [room]);
 
   /**
-   * 消息数变化（新消息落库）与流式结束都要重拉：徽标跟着消息走。
-   *
-   * 但换场那一下这几件事是挤在一起来的 —— 换屋、消息到、state 到 —— 一板一眼地
-   * 各拉一次，就是一串同样的往返；而且第一发正好打在「屋刚被唤醒」那一刻，最慢，
-   * 结果还会被后面那发盖掉，纯属白等。所以两道闸：
-   *   1. 屋子没真连上不拉（roomReady）—— 那会儿拉的还是上一间屋的账；
-   *   2. 短窗口内的多次触发并成一次 —— 消息到与 state 到本来就是一前一后。
+   * 消息数变化与流式结束都要重拉徽标，但换场时几件事挤在一起。两道闸：
+   * 屋子没真连上不拉（roomReady）；200ms 内的多次触发并成一次。
    */
   useEffect(() => {
     if (!roomReady) return;
@@ -1549,10 +1491,8 @@ export function Messages({
   const last = messages.length - 1;
   const onAssistant = messages[last].role === "assistant";
   /**
-   * 「重来」只挂最后一条助手消息。
-   * 因为重来 = 从那条往后全部作废、重新生成：挂在中间某条上，等于顺手删掉后面
-   * 一整段对话，而那个代价用户根本看不见。只留最后一条，代价就永远是他看得见的
-   * 「刚才那句不算」。
+   * 「重来」只挂最后一条助手消息：重来 = 从那句往后全部作废重生成，
+   * 挂在中间会顺手删掉后面一整段，代价用户看不见。
    */
   let lastAssistant = -1;
   messages.forEach((m, i) => {
@@ -1562,8 +1502,8 @@ export function Messages({
   // 思考里可能复述任何上下文，不渲染是最稳的一层 —— 就算哪天读路径松了，屏幕上也先不露。
   const showThinking = role === "admin";
   /**
-   * 死因分两路：挂得上的，钉在对应回答下面；挂不上或认过又丢了的，进收件箱。
-   * 绝不重认 —— 报错卡要么钉死在断的那条下面，要么老实待在收件箱，永不漂移。
+   * 死因两路：挂得上的钉在对应回答下；挂不上或认过又丢的进收件箱。
+   * 绝不重认 —— 卡片要么钉死，要么老实待在收件箱，永不漂移。
    */
   const liveIds = new Set(messages.map((m) => m.id));
   const errByMsg = new Map<string, TurnError>();

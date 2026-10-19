@@ -1,13 +1,7 @@
-// R2 记忆库文件操作。破坏性操作要求显式 confirm，clear 必须给前缀。
-//
-// 房间划界：桶是同一只，屋子是分开的。来客那间调用本工具时，list/read/delete/clear
-// 一律限定在自己房间前缀（f/<room>/…）下 —— 否则一个「列目录」就把全库文件名翻出来，
-// 一个 delete 就能删掉别家的东西。管理员那间不设限（管理员本来就全库可见）。
-//
-// 文件夹是纯约定：key 里的路径段就是目录（会话/<id>/ 是产物自动归档处）。
-// mkdir 塞一个 .keep 占位对象把空夹撑住；move 是「复制到新 key、删掉旧 key」，
-// 精确命中一个对象就搬一个，没命中就当前缀把整个文件夹搬过去 ——
-// 所以「改名」不用单独一条工具：move 到同目录换个文件名就是。
+// R2 记忆库文件操作：破坏性操作要求显式 confirm，clear 必须给前缀。
+// 房间划界：同一只桶、屋子分开。来客那间的 list/read/delete/clear 一律限 f/<room>/… ——
+// 否则一次「列目录」就翻出全库文件名，一个 delete 就能删别家；管理员不设限。
+// 文件夹是纯约定（key 路径即目录，会话/<id>/ 是产物归档处）；mkdir 用 .keep 撑空夹，move 是 copy+delete。
 
 import { tool } from "ai";
 import { z } from "zod";
@@ -24,10 +18,9 @@ function fmtSize(n: number): string {
 const MATRIX_CONFIG_KEY = "matrix/config.json";
 
 /**
- * 网页矩阵页引用着的云盘文件：key → 引用它的页面路径们。
- * 矩阵页的正文可以直接「引用」云盘里的一只文件（实时读它，不拷副本），
- * 那只文件就成了页面的一部分 —— 删它/搬它，页面当场没有正文。
- * 配置读不到或坏了就返回空表（矩阵是可选的，不该因为它的配置问题把云盘锁死）。
+ * 网页矩阵页引用着的云盘文件：key → 引用它的页面路径们。矩阵页正文可以直接引用云盘文件
+ * （实时读，不拷副本），删它/搬它页面当场没正文。配置读不到或坏了就返回空表 ——
+ * 矩阵是可选的，不该因为它的配置问题把云盘锁死。
  */
 async function matrixDriveRefs(
   bucket: R2Bucket,
@@ -227,9 +220,8 @@ export function fileTools(ctx: ToolCtx) {
             await bucket.delete(src);
             return `搬好了：${src} → ${dst}`;
           }
-          // 没精确命中就当前缀：整个「文件夹」逐个 copy + delete。
-          // 先把整夹的 key 攒齐、过一遍矩阵引用检查，再动手 —— 边搬边撞到引用
-          // 中途停手，就剩半个文件夹散在外头
+          // 没精确命中就当前缀：整个文件夹逐个 copy + delete。先把整夹 key 攒齐、过引用检查再动手 ——
+          // 边搬边撞到引用中途停手，就剩半个文件夹散在外头
           const srcPrefix = `${src}/`;
           const keys: string[] = [];
           let cursor: string | undefined;
@@ -264,8 +256,7 @@ export function fileTools(ctx: ToolCtx) {
         if (action === "delete") {
           if (!key) return "delete 需要提供 key。";
           if (!inScope(key)) return "文件不存在：" + key;
-          // R2 删一个不存在的 key 也算成功：不先看一眼，就会回「已删除」一个
-          // 本来就没有的东西 —— 同楼的 move / read 都先验存在，这条照做
+          // R2 删一个不存在的 key 也算成功：不先看一眼，就会回「已删除」一个本来就没有的东西
           if (!(await bucket.head(key))) return "没有这个文件：" + key;
           if (!confirm)
             return `删除是不可逆操作。确认要删除「${key}」的话，请带 confirm=true 再调用一次。`;

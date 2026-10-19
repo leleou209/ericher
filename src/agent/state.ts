@@ -1,16 +1,11 @@
 // Agent 状态类型与初始值。
-//
-// 注意分层：消息由 AIChatAgent 自己存 SQLite，长期记忆存 memories 表，
-// 这里只保留体积小、需要随 DO state 一起原子读写的配置类数据。
+// 分层：消息归 AIChatAgent 的 SQLite，长期记忆归 memories 表，这里只放需随 DO state 原子读写的小配置。
 
 import { DEFAULT_BASE_PROMPT } from "./prompt";
 import type { GuestTypeInfo } from "./guestTypes";
 import type { UsageSnapshot } from "./usage";
 
-/**
- * Agent 的 `this.sql` 模板标签签名（不是 SqlStorage 实例）。
- * 注意：它是依赖 `this.ctx` 的原型方法，当值传递前必须绑定 —— 用 CoworkAgent.db。
- */
+/** Agent 的 this.sql 模板标签签名（非 SqlStorage 实例）；依赖 this.ctx，当值传递前必须绑定（用 CoworkAgent.db）。 */
 export type SqlTag = <T = Record<string, string | number | boolean | null>>(
   strings: TemplateStringsArray,
   ...values: (string | number | boolean | null)[]
@@ -26,81 +21,57 @@ export interface MemEntry {
   /** 归属人物（人脉视图用）；空串表示不属于任何具体的人 */
   person: string;
   /**
-   * 这条能不能给来客看。
-   * private（默认）= 只在我和管理员之间用；public = 管理员特意允许别人知道的那些。
-   * 默认必须是 private：把一件事说给外人听，该是人主动做的决定，
-   * 不该因为「当时没设」就漏出去 —— 记忆这东西漏一次收不回来。
+   * private（默认）= 只在我和管理员之间用；public = 管理员特意允许别人知道的。
+   * 默认必须 private：说给外人听该是人主动的决定，漏一次收不回来。
    */
   visibility: "private" | "public";
   /**
-   * 显式收回：管理员最后一次手动决定是「不公开」（true）还是没收回过 /
-   * 又亲手放开了（false）。它压过 tag 门 —— 收回的承诺是「来客再也读不到」，
-   * tag 门再开也不算数。AI 写入不碰这一格，它只听「公开 / 收回」按钮的。
+   * 显式收回：true = 管理员最后一次手动决定「不公开」，压过 tag 门。
+   * 只听「公开/收回」按钮；收回后再点「公开」才落 false。
    */
   hold: boolean;
   content: string;
   accessed: number;
   /**
-   * 学到这条记忆的时刻（ISO）。和 date 不是一回事：
-   * date 是事情发生的日子，learned 是我听说的时刻 —— 该拿来做衰减和「多久前」的是后者。
+   * 学到这条记忆的时刻（ISO）；date 是事情发生的日子，衰减和「多久前」用的是 learned。
    */
   learned: string;
   /** 非空表示这条已被作废（值是替代它的记忆 id，或 retired 哨兵）；空串表示还算数 */
   supersededBy: string;
   /**
-   * 这条说的是「他是谁 / 什么一直成立」（stable），还是「他现在怎么样」（volatile）。
-   * 只有会变的那些才需要隔一阵复核一次 —— 该不该标由我判断，到点提不提醒由代码算。
+   * 这条说「他是谁 / 什么一直成立」（stable）还是「他现在怎么样」（volatile）。
+   * 只有会变的才需复核：该不该标由模型判断，到点提不提醒由代码算。
    */
   volatility: "stable" | "volatile";
   /** 上次被确认「现在还是这样」的时刻（ISO）；空串 = 从没确认过 */
   verified: string;
   /**
-   * 这句话说的那件事，从什么时候开始成立（ISO）。默认等于 learned ——
-   * 「我听说的那一刻」通常就是「它成立的那一刻」。但当事人明说了「我从去年就…」时，
-   * 该记的是去年，不是今天：两句话说的是同一件事，差别就在这个时刻上。
+   * 这句话说的事从何时成立（ISO）。默认等于 learned；当事人说「我从去年就…」时记去年。
    */
   validAt: string;
   /**
-   * 这件事到什么时候不再成立（ISO）；空串 = 到现在还算数。
-   * 作废时由代码写进来（取替代它的那条是什么时候学到的）——
-   * 有了它，「我原来以为…后来才知道…」才说得出具体时间，而不是只有一句「已作废」。
+   * 到何时不再成立（ISO）；空串 = 至今还算数。作废时由代码取替代者学到的时刻写入，
+   * 让「原来以为…后来才知道…」说得出时间。
    */
   invalidAt: string;
   /**
-   * 还没对上的那几条（记忆 id）：我写下这条时，发现它和这几条像在说同一件事，
-   * 但还没弄清楚哪条算数。空数组 = 没有疑问。
-   * 由代码记账 —— 模型只负责判断「像不像同一件事」，记账和翻旧账不该指望它记得。
+   * 还没对上的那几条记忆 id（写下时觉得像、还没弄清谁算数）。空数组 = 没有疑问。
+   * 由代码记账，模型只判「像不像同一件事」。
    */
   conflictsWith: string[];
-  /**
-   * 标题。书册（成体系的一篇文章 / 教程 / 整理过的知识）靠它立户头，
-   * 没有它，长文躺在条目里连「这是什么」都说不清。条目和图像留空串。
-   */
+  /** 标题：书册靠它立户头，条目和图像留空串。 */
   title: string;
-  /**
-   * 图像记忆指向的云盘文件 key（R2）。原件躺在云盘里，
-   * 记忆里只留一句话说明 + 这个指针 —— 搜到说明，就能把原图找回来。
-   */
+  /** 图像记忆指向的云盘（R2）文件 key；记忆只存说明 + 指针，原件在云盘。 */
   fileKey: string;
-  /**
-   * 这条是哪一场会话聊出来的；空串 = 和会话无关的普通记忆。
-   * 会话记忆（shelf='sessions'）靠它绑在自己那一场上。
-   */
+  /** 哪一场会话聊出来的；空串 = 普通记忆。会话记忆（shelf='sessions'）靠它绑定。 */
   sessionId: string;
-  /**
-   * 那一段说话的语气。它是标签不是判断，所以只许从 SENTIMENTS 里挑一个；
-   * 空串 = 没标（宁可没有标签，不该编一个）。
-   */
+  /** 语气标签，只许从 SENTIMENTS 里取；空串 = 没标（宁缺勿编）。 */
   sentiment: string;
-  /**
-   * 量级：这条事知道的人该有多少。AI 写入时按评分公式标注，管理员可改。
-   * 存量数据落 normal —— 它们写下的时候还没有量级这回事。
-   */
+  /** 量级：知道的人该有多少。AI 写入时按评分公式标注，管理员可改；存量数据落 normal。 */
   sensitivity: Sensitivity;
   /**
-   * 量级的评分依据（0-9）：事理重要度 + 调动频率 + 是否强调，三项各 1-3 求和。
-   * 面板上「重要 · 6分」的 6 分就是它；10 不在评分范围里 —— 那是管理员亲手设
-   * 绝密时钉上去的记号，不是算出来的。
+   * 评分依据（0-9）：重要度 + 调动频率 + 是否强调，三项各 1-3 求和。
+   * 10 不是分数，是管理员亲手设绝密时钉的记号。
    */
   score: number;
 }
@@ -130,11 +101,8 @@ export interface ToolStat {
 }
 
 /**
- * 她正在等他回答的一个问题（ask 工具写进来）。
- *
- * 为什么只留没答的：答完的那一刻这张卡就该消失 —— 答案本身会作为一条普通消息
- * 进对话历史，她下一轮看得到，翻旧账也搜得到。留在这里只会越堆越多，
- * 让 state 变成第二份聊天记录，而两份记录迟早会对不上。
+ * 她正在等回答的一个问题（ask 工具写进来）。
+ * 只留没答的：答案会成为普通消息进历史；留在这里会让 state 变成第二份聊天记录。
  */
 export interface AskEntry {
   id: string;
@@ -154,15 +122,8 @@ export interface ChatState {
   selfModelVer: number;
   selfLog: string[];
   /**
-   * 她给自己定的要求 —— 和上面的自我认知是两件事，所以分开存。
-   *
-   * selfModel 是「我知道什么」：关于管理员、关于自己、关于世界。
-   * selfDemand 是「我要求自己成为什么样、怎么做」。
-   * 为什么非要单开一格：认知是越攒越厚的，要求是她主动立的标准；
-   * 混在一处写，她就会把「我知道了他最近在忙什么」当成「我该怎么做」，
-   * 成长变成记流水账 —— 那是记录，不是长大。
-   *
-   * 内容她自己写（self 工具 target=demand），人设是别人给的，这一块是她的。
+   * 她给自己定的要求（self 工具 target=demand），与 selfModel（知道什么）分开存。
+   * 混在一起会把「知道他最近在忙什么」当成「我该怎么做」，成长变成记流水账。
    */
   selfDemand: string;
   selfDemandVer: number;
@@ -170,9 +131,8 @@ export interface ChatState {
   /** 管理员自定义的人格提示词；为空表示用内置默认（DEFAULT_BASE_PROMPT） */
   basePrompt: string;
   /**
-   * 逐工具的工具提示词（主人那间）：name → 文本，空/缺 = 用 toolGroups.ts 的出厂稿。
-   * 原来的整块 toolPrompt（一整篇工具守则）已拆除：想改哪个工具就改哪一格，
-   * 改 read_url 不会再牵动 draw —— 整篇一起改的时代过去了。
+   * 逐工具的提示词（主人那间）：name → 文本，空/缺 = 用 toolGroups.ts 的出厂稿。
+   * 原来的整块 toolPrompt 已拆除，改一个工具不会牵动别的。
    */
   toolPrompts: Record<string, string>;
   /** 每个语义组的组尾追加稿：groupId → 文本，空 = 用出厂稿 */
@@ -180,9 +140,8 @@ export interface ChatState {
   /** 末栏「工具使用风格」：全局一份（调用纪律、call_tool 用法、场景分发、主动开口） */
   toolStyle: string;
   /**
-   * 来客那间的逐工具稿（管理员改，来客房整理提示词时隔着 DO RPC 读）。
-   * 来客版与主人版分开存：两间说的话不一样，共用一份会串味。
-   * 空/缺 = 用出厂稿。
+   * 来客那间的逐工具稿（管理员改，来客房整理提示词时经 DO RPC 读）。
+   * 与主人版分开存：两间说的话不一样。空/缺 = 用出厂稿。
    */
   guestToolPrompts: Record<string, string>;
   /** 来客那间的组尾追加稿 */
@@ -190,19 +149,15 @@ export interface ChatState {
   /** 来客那间的末栏风格 */
   guestToolStyle: string;
   /**
-   * 管理员自定义的回想守则（没人说话时那一趟回想的提示词）；为空表示用内置默认。
-   * 回想的口径是工作纪要，不是感想 —— 想改回情绪化表达，也得先在这儿写出来。
+   * 管理员自定义的回想守则（没人说话时那一趟回想的提示词）；空 = 内置默认。
+   * 口径是工作纪要，不是感想。
    */
   recapPrompt: string;
   skills: Record<string, string[]>;
   tasks: Task[];
   /**
-   * 本场计划（目标 + 步骤）改过几次。
-   *
-   * 内容不在这里 —— 目标挂在 sessions.goal 上、步骤在 session_tasks 表里，
-   * 都按 session_id 存。为什么不直接放进 state：一间屋能装好几场
-   * （老场都住在人屋），屋子级的 state 装不下「这是哪一场的」。
-   * 这里只留一个计数器当信号：它一变，前端就重拉一次本场的计划。
+   * 本场计划（目标 + 步骤）改过几次。内容不在这里：目标在 sessions.goal、步骤在
+   * session_tasks 表，按 session_id 存（一间屋能装好几场）。这里只是让前端重拉的信号。
    */
   planRev: number;
   /** 还摆在他眼前、没被回答的问题（答完即删）。见 AskEntry */
@@ -212,8 +167,7 @@ export interface ChatState {
   deepConfigId: string;
   toolStats: Record<string, ToolStat>;
   /**
-   * 渐进式工具的转正名单：经 call_tool 用熟了（累计 ≥2 次）的工具升级为常驻，
-   * schema 直接挂进请求，不再走网关。只增不减，上限 8（见 tools/index.ts）。
+   * 渐进式工具的转正名单：累计 ≥2 次升级为常驻，schema 直接挂进请求。只增不减，上限 8。
    */
   promotedTools: string[];
   summaries: Summary[];
@@ -224,85 +178,61 @@ export interface ChatState {
   /** 设备标识，由前端 body 传入 */
   userId: string;
   /**
-   * 复盘游标：已经回看到第几条消息。
-   * 不复盘时它是 0；攒够一批就推进一次。用条数而不是时间，是因为
-   * 「聊了多少」才是要不要回头的依据 —— 三天没说话也没什么可总结的。
+   * 复盘游标：已回看到第几条消息。用条数而非时间——「聊了多少」才是要不要回头的依据。
    */
   expUpto: number;
   /** 累计从经历里长出来的经验条数（patterns 书架里 tag=experience 的那些） */
   expCount: number;
   /**
-   * 朗读用哪副嗓子（音色 id，见 src/audio/tts.ts）。
-   * 存在 state 里而不是 localStorage：换台设备该听到的还是同一个人。
-   * 空串表示还没挑过，用供应商默认。
+   * 朗读音色 id（见 src/audio/tts.ts）。存 state 而不是 localStorage：换设备还是同一个人。
+   * 空串 = 没挑过，用供应商默认。
    */
   voice: string;
   /**
-   * 来客自报的称呼（memory 工具的 whoami 写入）。
-   * 有了它，他名下的记录（person = 来客·称呼）才能跟着称呼走：
-   * 换个房间、换台设备，报上这个名字就翻得回来。空串表示还没报过。
-   * 管理员房里这一格是主人自己的称呼 —— POST /api/config 只归管理员，
-   * 能改的只有他自己，设置页「个人信息」里写。
+   * 来客自报的称呼（whoami 写入）。他名下的记录按这个称呼跟随：换房间/设备报上名就能翻回。
+   * 管理员房里这格是主人自己的称呼：POST /api/config 只归管理员；来客称呼只走 guest-intro / whoami。
    */
   guestName: string;
-  /**
-   * 管理员的一句话签名（设置页「个人信息」里自己写的）。
-   * 只进界面：左下角身份卡和弹层拿它显示，不拼进提示词。空串 = 没写过。
-   */
+  /** 管理员的一句话签名（设置页自己写）；只进界面身份卡与弹层，不拼进提示词。空串 = 没写过。 */
   adminBio: string;
   /**
-   * 他此刻正翻着的那一篇笔记（notes 表主键）。空串表示没在看。
-   *
-   * 为什么放 state 而不是另开一张表：前端连上时本来就拿到了整份 state，
-   * 于是「她也在看这一篇」这件事能直接画在抽屉上，不用再单开一条轮询接口。
-   * 我这边每轮拼提示词时读它（noteBlock），他就不用再说一遍「我说的是哪一篇」。
+   * 他此刻正翻着的笔记（notes 表主键）。空串 = 没在看。
+   * 放 state 是因为前端连上时已拿到整份 state，「她也在看这一篇」可直接画出来。
    */
   noteFocus: string;
-  /**
-   * 这间屋子对应的来客类型 id（登录票里带的那个）。空串 = 普通来客票，没有档。
-   * 多档来客见 guestTypes.ts；快照在下面 guestType 里。
-   */
+  /** 这间屋子对应的来客类型 id（登录票里带的）。空串 = 普通来客票，没有档。快照见 guestType。 */
   guestTypeId: string;
   /**
-   * 来客类型的快照（不含密码）：名字、接待说明、能用哪些对外工具，
-   * 形状同 guestTypes.ts 的 GuestTypeInfo。
-   * 连接鉴权时从主人那间取来的，可选 —— 老 state 和普通来客票都没有这一格；
-   * 没有它时工具层按「全开」处理（见 tools/index.ts）。
+   * 来客类型的快照（不含密码），形状同 guestTypes.ts 的 GuestTypeInfo。
+   * 连接鉴权时从主人那间取来；老 state 和普通来客票没有这一格，缺省按「全开」处理。
    */
   guestType?: GuestTypeInfo;
   /**
-   * 资源自计量（AI neurons / Vectorize 维度）的今日快照。见 usage.ts。
-   * 可选：老 state 里没这个字段，缺省按全零处理。
-   * 只在数字真的动了的那一轮写回，免得白占一次 state 落盘。
+   * 资源自计量（AI neurons / Vectorize 维度）今日快照，见 usage.ts；缺省按全零。
+   * 只在数字真的动了的那一轮写回，免得多占一次 state 落盘。
    */
   usage?: UsageSnapshot;
   /**
-   * 上一轮对话的上下文占用账：输入（含缓存命中/新写）、输出、窗口多宽。
-   * 聊天头部拿它画「这一场聊到了窗口的几成」；挂着 sessionId，
-   * 换了场就不显示别场的账。可选：老 state 与没聊过的场都没有这一格。
+   * 上一轮上下文占用账（输入含缓存命中/新写、输出、窗口宽度）。挂在 sessionId 上，
+   * 换场不显示别场的账；老 state 与没聊过的场没有这一格。
    */
   lastUsage?: LastUsage;
   /**
-   * 异常中断的死因账（onChatResponse 轮尾回写，见 cowork.ts 的 describeTurn）。
-   * 界面上按 messageId 挂在那一轮的回答下面，红色明说为什么断、怎么排 ——
-   * 以前这些真相只躺在 console 里，人只看到「结果没回来」。
-   * 可选：老 state 没有这一格，缺省按空处理；滚动保留最近若干条。
+   * 异常中断的死因账（轮尾回写，见 cowork.ts 的 describeTurn）。界面按 messageId 挂在
+   * 那一轮下面；只进界面不碰模型。老 state 没有，缺省为空，滚动保留最近若干条。
    */
   turnErrors?: TurnError[];
   /**
-   * 他上一次看的是哪一间屋（人屋名或场屋名）。
-   * 只在人屋有意义：多端登录时人屋先连上，靠它把新开的设备送回「最后那一间」，
-   * 否则每台设备刷新都回到人屋默认场，AB 两端各看各的。空串 = 从没记过。
+   * 他上一次看的是哪一间屋（人屋名或场屋名）。只在人屋有意义：多端登录时把人送回最后那间，
+   * 否则每台设备刷新都回人屋默认场。空串 = 从没记过。
    */
   lastRoom: string;
   /**
-   * 上一次看的是哪一场对话（sessions 表主键）。和人屋的 activeSession 不是一格：
-   * 那一格只认宿在人屋里的场，这一格认「我眼前正开着的场，无论它在哪间屋」。
+   * 上一次开的场（sessions 主键）。与 activeSession 不同：那格只认宿在人屋里的场，这格认眼前任一场。
    */
   lastSession: string;
   /**
-   * 上面那一笔是什么时候记下的（毫秒时间戳）。多端各自都会写回，
-   * 人屋只留最晚的那笔 —— 旧设备内存里的时刻、乱序迟到的请求都顶不掉新记录。
+   * 上一笔记录的时刻（毫秒）。多端都会写回，人屋只留最晚的一笔，乱序迟到顶不掉新记录。
    * 0 = 从没记过。
    */
   lastViewAt: number;
@@ -310,10 +240,7 @@ export interface ChatState {
 
 /**
  * 一次异常中断的死因。
- *
- * 为什么单开一格而不是塞进消息 parts：parts 会进下一轮的 convertToModelMessages，
- * 加一个非标准 part 等于往模型入参里塞杂物。挂在 state 上则只进界面、不碰模型，
- * 又能借 setState 的落库 + 同步通道同时做到「持久」与「实时」。
+ * 不塞进消息 parts：非标准 part 会进模型入参。挂 state 则只进界面，还能借 setState 落库+同步。
  */
 export interface TurnError {
   /** 绑定的助手消息 id；断在还没吐出任何内容、消息没落库时为空串 */
@@ -366,9 +293,7 @@ export const SHELVES = [
   "events",
   "reflections",
   "archive",
-  // 会话记忆：一场对话停下来之后，我自己回头写下的那几条。
-  // 它和 reflections 不是一回事 —— 那边是「我长出来的经验」，
-  // 这边是「我们刚才怎么聊的」。混在一个书架里，两边都不好翻。
+  // 会话记忆：一场对话停下后回头写下的那几条，与 reflections（长出来的经验）分开。
   "sessions",
 ] as const;
 
@@ -391,10 +316,8 @@ export function normalizeSentiment(v: string): Sentiment | "" {
 }
 
 /**
- * 记忆的量级：这条事知道的人该有多少。
- * 从轻到重五档，AI 在整理时按必要性标注，管理员可以在面板上改 ——
- * 「公开」（visibility）回答的是「这条能不能出门」，量级回答的是「出门时该穿哪件衣服」：
- * tag 公开门槛按它放行，量级不到的一律扣在门里。
+ * 记忆量级：知道的人该有多少，五档由轻到重，AI 标注、管理员可改。
+ * visibility 管「能不能出门」，量级管「出门时按 tag 门槛放到哪一档」。
  */
 export const SENSITIVITIES = [
   "trivial",
@@ -416,8 +339,7 @@ export const SENSITIVITY_LABEL: Record<Sensitivity, string> = {
 
 /**
  * tag 公开门槛的档位：到 secret 为止。
- * topsecret 故意不在这个枚举里 —— 绝密是管理员手里的最后一把锁，
- * 模型工具里设不了它，tag 门槛也放不了它。让它没有出门的路，锁才有意义。
+ * topsecret 故意不在枚举里：模型工具设不了它，tag 门也放不了它，绝密没有出门的路。
  */
 export const TAG_GATE_LEVELS = [
   "trivial",
@@ -471,14 +393,9 @@ export const INITIAL_STATE: ChatState = {
 };
 
 /**
- * 面板可以写的字段。
- *
- * 为什么要有这个概念：写入接口是白名单制（见 cowork.ts 的 patchConfig），
- * 只认名单里的键。好处是前端误传 lastActive / userId 之类的运行期字段
- * 也弄不坏闲置清理；代价是**每加一个要能被设置页改的字段，都必须记得回来补一行**——
- * 漏了的表现是「请求 200、界面纹丝不动」，最难查的那一类。
- * 所以这里配了一条测试（test/state.test.ts）：INITIAL_STATE 里每个键，
- * 要么归在这份名单里，要么归在 RUNTIME_ONLY 里，逼着人当场做一次选择。
+ * 面板可写字段：写入接口是白名单制（见 cowork.ts 的 patchConfig），只认名单里的键。
+ * 每加一个设置页字段都必须回来补一行，漏了会「请求 200、界面不动」（test/state.test.ts 有门禁）。
+ * 新增键必须在 PATCHABLE_KEYS 或 RUNTIME_ONLY 二选一。
  */
 export const PATCHABLE_KEYS = [
   "selfModel",
@@ -509,8 +426,7 @@ export const PATCHABLE_KEYS = [
 ] as const;
 
 /**
- * 归这里 = 前端改不了，只由后端自己维护。
- * 逐个写明理由，是为了让「为什么它不给改」有据可查，而不是一句「反正不给改」。
+ * 归这里 = 前端改不了，只由后端维护；逐条写明理由，便于查证。
  */
 export const RUNTIME_ONLY: Record<string, string> = {
   toolStats: "工具调用统计，由后端在调用工具时累加",
@@ -542,9 +458,7 @@ export const RUNTIME_ONLY: Record<string, string> = {
 
 /**
  * 首次唤醒时播种的初始配置。
- *
- * ericher 是工作型助手：不继承任何人格，也不带任何人的私人信息 ——
- * selfModel 里只写「我的活是什么」，记忆起点是空的（见 seedMemories）。
+ * ericher 是工作型助手：不继承人格、不带私人信息，selfModel 只写「我的活是什么」，记忆起点为空。
  */
 export function seedPatch(): Partial<ChatState> {
   const now = new Date().toISOString().slice(0, 10);
@@ -593,14 +507,9 @@ export const SEED_SELF_MODEL =
   "记忆从空白开始，随接待逐步积累。";
 
 // ── 服务向改版的存量迁移 ─────────────────────────────────────
-// 首次唤醒时 seedPatch 把「当时的默认稿」存进了 state：basePrompt / selfModel /
-// skills 都是快照，跟着实例冻住 —— 改了 prompt.ts 的默认稿，老实例读到的还是旧稿。
-//
-// 快照不等于自定义：一字不差等于旧稿的视为「没动过」，就地换成新稿；
-// 对不上（管理员真改过）的一字不动。幂等：新稿实例再跑一遍不产生任何写入。
-//
-// 注意：下面这些 LEGACY_* 常量是**历史快照的原文存档**，供迁移链逐字比对，
-// 里面保留着旧版措辞 —— 那是识别老实例的依据，不是现在的说话方式。
+// seedPatch 把「当时的默认稿」存进 state（basePrompt / selfModel / skills），跟着实例冻住。
+// 迁移只认逐字等于旧稿的（= 没动过），就地换新；管理员改过的一字不动。幂等：新稿实例不产生写入。
+// 下面 LEGACY_* 是历史快照原文，供逐字比对，不是在用措辞。
 
 export const LEGACY_BASE_PROMPT_SNAPSHOT = `我是 ericher。我是这间屋子里的接待助手，替小王接住每一位来访者的事。
 我没有前身，不继承任何人格 —— 我就是 ericher，一个把事情办妥的助手。
@@ -803,8 +712,7 @@ function sameSteps(a: string[] | undefined, b: string[]): boolean {
 /** 见上面的迁移说明。返回需要落进 state 的补丁；没东西可迁就返回空对象。 */
 export function migrateServiceCopy(s: ChatState): Partial<ChatState> {
   const patch: Partial<ChatState> = {};
-  // 四代快照（初版旧稿、二代去身份稿、三代风味统一前的默认稿、四代编号小节版）都视为
-  // 「没自定义过」，就地换新。四代 = 本次改版之前：上一版新播种的实例存的是它。
+  // 四代快照（初版、二代去身份、三代风味统一前、四代编号小节）都视为没自定义过，就地换新。
   const legacyBases = [
     LEGACY_BASE_PROMPT_SNAPSHOT,
     LEGACY_BASE_PROMPT_V2,
@@ -843,10 +751,7 @@ export function migrateServiceCopy(s: ChatState): Partial<ChatState> {
 
 /**
  * 长期记忆种子，仅在 memories 表为空时写入一次。
- *
- * ericher 是独立副本，不继承其他副本的私人记忆库 —— 记忆库物理隔离本来就是
- * 分家的初衷：HR 来客的记忆和本体的记忆不该有任何交集。所以这里没有种子，
- * 起点是空的；记忆从接待的第一天开始自己长。
+ * ericher 是独立副本，不继承其他副本的私人记忆库（物理隔离是分家的初衷），所以没有种子。
  */
 export function seedMemories(): Array<
   Omit<

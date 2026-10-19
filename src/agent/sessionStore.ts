@@ -1,11 +1,6 @@
-// 会话存储：一个会话 = 一条元信息 + 一列属于它的消息。
-//
-// 为什么不直接用 AIChatAgent 自带的 cf_ai_chat_agent_messages：那张表只装「当前正在聊的
-// 这一场」，换会话就得整表换掉，切回去就没了。会话要能列出来、能切回去、能公开给人看，
-// 就必须按 session_id 分片自己存一份。
-//
-// 消息行按 (session_id, seq) 存，不塞进一个 JSON blob —— 单行有大小上限，
-// 一场长对话压成一个字段迟早会撑爆。
+// 会话存储：一条元信息 + 一列消息，按 (session_id, seq) 分行存。
+// 不用 AIChatAgent 自带的 cf_ai_chat_agent_messages：它只装当前一场，换会话就没了；
+// 会话要能列表/切回/公开，且单行有大小上限，长对话压一个 JSON blob 会撑爆。
 
 import type { UIMessage } from "ai";
 import type { SqlTag } from "./state";
@@ -13,11 +8,8 @@ import type { SqlTag } from "./state";
 export type SessionVisibility = "private" | "public";
 
 /**
- * 本场步骤的一条。
- *
- * 和全局待办（state.ts 的 Task）字段一模一样，不是重复造轮子 —— 是它们
- * 本来就说的是同一件事，只是作用域不同：那个跨会话，这个只属于这一场。
- * 分成两个类型是为了让「这场」和「所有场」在类型上就不混。
+ * 本场步骤：字段与全局待办（Task）相同，作用域不同——那个跨会话，这个只属于这一场。
+ * 分成两个类型，让「这场」和「所有场」在类型上不混。
  */
 export interface SessionTask {
   title: string;
@@ -30,9 +22,7 @@ export interface SessionTask {
 export const SESSION_TASK_CAP = 20;
 
 /**
- * 本场目标的长短上限。目标是要进提示词的一段文段，不能由着它长 ——
- * 和摘要（context.ts 的 DIGEST_MAX）是同一个道理。
- * 截断放在写入这一层做：无论谁写进来的（我、他、以后的别的路）都躲不掉。
+ * 本场目标上限（会进提示词）；截断在写入层做，谁写都躲不掉。
  */
 export const SESSION_GOAL_MAX = 600;
 
@@ -44,36 +34,21 @@ export interface SessionMeta {
   created: string;
   lastActive: string;
   /**
-   * 置顶的时刻（ISO）；空串 = 没置顶。
-   *
-   * 为什么记时刻而不是记一个 0/1：置顶区要按「置顶的先后」排 ——
-   * 先顶上的一直在前，后顶上的排它后面。0/1 分不出先后，就只能按别的东西排了。
+   * 置顶时刻（ISO）；空串 = 没置顶。记时刻是为了按置顶先后排：0/1 分不出先后。
    */
   pinned: string;
   msgCount: number;
   /** 这场是否已经有过上下文压缩（前端用来标一句「更早的已压缩」） */
   hasDigest: boolean;
-  /**
-   * 收起来了。归档不是删除：内容一条不少、翻旧账照样搜得到、想聊随时能展开，
-   * 只是不再占着会话列表最上面那一段。列表长了以后，真正在聊的几场会被旧对话淹没。
-   */
+  /** 收起（归档）不是删除：内容照搜、能展开，只是不占列表顶部。 */
   archived: boolean;
   /**
-   * 这个名字是人起的，还是我起过之后就定下来了。
-   *
-   * 为什么要单独记一笔：起标题是模型干的活，得在开场白出来之后找个时机补上。
-   * 光看标题「像不像原先那句截断」判断不出该不该动手 —— 一开始那会儿
-   * 会话标题还是「我们的对话」（那时还没有发言可截），等真有开场白了，
-   * 它会以为「标题没被动过」而永远不动手。所以直接记个记号。
+   * 名字是人起的还是我起过就定下了。起标题要等开场白出来，光看标题像不像截断判断不出；
+   * 记个记号，避免「标题没被动过」导致永远不动手。
    */
   named: boolean;
   /**
-   * 这一场是我自己开的，他还没看过。
-   *
-   * 为什么要有它：我能主动开一场会把一件事说清楚，但那场不会自己跳到他眼前 ——
-   * 会话列表里多一行「新会话」，跟一次普通刷新长得一模一样，他多半不会注意到。
-   * 所以留个记号：侧栏那一行先闪一下把人叫过来，然后退成一个小角标，
-   * 直到他真的点进去（切过去时清掉）。闪是招呼，角标是「这里还有一件没看的事」。
+   * 我主动开的场、他还没看过：侧栏先闪一下，再退成角标，直到他点进去（切过去时清掉）。
    */
   unread: boolean;
   /**
@@ -82,9 +57,8 @@ export interface SessionMeta {
    */
   recapAt: string;
   /**
-   * 这一场住在哪间屋。空串 = 本屋宿主的场（老式：切过去靠屋内 loadSessionMessages）；
-   * 非空 = 场屋名（room--sessionId，一个会话一间完整运行时，切过去 = 前端换连接）。
-   * 只有目录屋（人屋）里的行会带场屋名 —— 那是指路的，不是存储。
+   * 这场住哪间屋。空串 = 本屋宿主的场（屋内 loadSessionMessages）；非空 = 场屋名（切过去 = 换连接）。
+   * 只有目录屋（人屋）的行带场屋名——那是指路，不是存储。
    */
   home: string;
 }
@@ -130,10 +104,8 @@ export function ensureSessionSchema(db: SqlTag): void {
     message text not null,
     primary key (session_id, seq)
   )`;
-  // 本场步骤：这一场要做的那几件事。键是 session_id —— 一间屋能装好几场
-  // （见文件顶上的分片说明），只按屋子存会在多场共用的屋里串台。
-  // 为什么不塞进 sessions 行的 JSON 列：条目要能单独排序、单独改状态，
-  // 一条一行比每次整段读改写省事，也和 session_messages 是同一个形状。
+  // 本场步骤按 session_id 存：一间屋能装好几场，只按屋子存会串台。
+  // 不塞进 sessions 的 JSON 列：条目要单独排序/改状态，一行一条更省事。
   db`create table if not exists session_tasks (
     session_id text not null,
     seq integer not null,
@@ -177,12 +149,8 @@ export function ensureSessionSchema(db: SqlTag): void {
   } catch {
     // 列已存在
   }
-  // 回想的三样家当：
-  //   recap_upto     —— 已回想覆盖到第几条消息（**条数**，不是 seq）。
-  //                     用条数而不是消息 id：回想是一段一段往前推的，
-  //                     条数单调、好比，也不会因为某条消息被清掉就整段错位。
-  //   recap_at       —— 上一次回想是什么时候（界面上「上次回头看是几时」）。
-  //   recap_schedule —— 排程句柄。留着它才能在有人又开口时把这一趟取消掉。
+  // 回想三样家当：recap_upto（已覆盖到第几条消息，用条数不用消息 id，单调好比较）、
+  // recap_at（上次回想时间）、recap_schedule（排程句柄，有人开口时靠它取消这趟）。
   try {
     db`alter table sessions add column recap_at text not null default ''`;
   } catch {
@@ -193,9 +161,8 @@ export function ensureSessionSchema(db: SqlTag): void {
   } catch {
     // 列已存在
   }
-  // 列本身默认 0：从没回想过的场（包括上线前就存在的老场）一律按「还欠着回想」算。
-  // 早年这里回填过一次「老会话直接视为已回想」，那是一次性的历史包袱，
-  // 已由 resetLegacyRecapCursors 统一抹掉 —— 回想对所有场一视同仁，不分新老。
+  // recap_upto 默认 0 = 从没回想过的场（含老场）都欠着；
+  // 早年的「老会话豁免」已由 resetLegacyRecapCursors 抹掉，回想对新老场一视同仁。
   try {
     db`alter table sessions add column recap_upto integer not null default 0`;
   } catch {
@@ -217,11 +184,8 @@ export function ensureSessionSchema(db: SqlTag): void {
 }
 
 /**
- * 抹掉「老会话豁免」：当年上线回想时，存量会话的游标被回填成了消息总条数，
- * 等于把它们一律标成「已经回想过了」，老聊天就永远回想不到。
- * 这里把那些**从没真正回想过的**（recap_at 还是空）游标清零，让它们和新建场走同一条路。
- * 条件本身幂等：清零后 recap_upto = 0，再跑一遍什么都不动。
- * 注意只认 recap_at：真回想过的场哪怕游标被推过，也不该再清 —— 那是它自己的进度。
+ * 抹掉「老会话豁免」：当年把存量游标回填成消息总条数，等于标成已回想，老聊天永远回想不到。
+ * 只清 recap_at 为空（从没真回想）的场；条件幂等，真回想过的场不动。
  */
 export function resetLegacyRecapCursors(db: SqlTag): void {
   db`update sessions set recap_upto = 0 where recap_at = '' and recap_upto > 0`;
@@ -248,12 +212,8 @@ const toMeta = (r: SessionRow): SessionMeta => ({
 });
 
 /**
- * 会话列表：按**创建时间**倒序，新开的在前、旧的往后 —— 顺序一旦定下就不再变。
- *
- * 从前按 last_active 排，谁刚说过话谁往上浮：一场聊到一半去回另一场，
- * 列表就整个换一次位，找那一场得重扫一遍。位置是要能记住的，
- * 所以「最近聊过」不再参与排序，只留在 lastActive 里供显示与回想调度用。
- * 想常常够着的几场，用置顶 —— 置顶区按置顶的先后排，见前端。
+ * 会话列表：按创建时间倒序，顺序一旦定下不再变（从前按 last_active 排，一回话就换位）。
+ * 「最近聊过」只留在 lastActive 供显示与回想调度；常够着的用置顶。
  */
 export function listSessions(db: SqlTag): SessionMeta[] {
   const rows = db<SessionRow>`
@@ -306,13 +266,8 @@ export function setSessionDigest(
 }
 
 /**
- * 这场要干什么 —— 一段话，面向前方。
- *
- * 和 digest 并排放在 sessions 行上，因为它们是同一层的两半：digest 回头看（这场聊过什么），
- * goal 向前看（这场要做什么）。都按 id 定位、都不跨场，存储位置也就该一样。
- *
- * 空串 = 没设目标。「没设就等于是无目的」，不替它编一个 —— 目标一旦是编的，
- * 它就只是又一段背景噪音，起不到把注意力钉住的作用。
+ * 本场目标（向前看），与 digest（回头看）并排存。
+ * 空串 = 没设目标；不替它编——编的目标只是背景噪音。
  */
 export function getSessionGoal(db: SqlTag, id: string): string {
   const rows = db<{ goal: string }>`
@@ -344,11 +299,8 @@ export function listSessionTasks(db: SqlTag, sessionId: string): SessionTask[] {
 }
 
 /**
- * 整表替换这一场的步骤。
- *
- * 为什么不是逐条增删：写入的两条路（我改 / 他手改）最后都落到「一份新的完整清单」上，
- * 拆成 add/update/delete 三套语义反而要在两处各维护一遍顺序与索引。
- * 单行有大小上限，但步骤封顶 20 条，一次重写的量是可控的。
+ * 整表替换本场步骤：写入的两条路都落到「一份新完整清单」，没必要维护 add/update/delete。
+ * 步骤封顶 20 条，单行重写量可控。
  */
 export function saveSessionTasks(
   db: SqlTag,
@@ -400,13 +352,8 @@ export function setSessionRecapSchedule(
 }
 
 /**
- * 该回想的会话：停够久了、而且停之后又添过新话。
- *
- * 「有没有新内容」的判据就是这一条 SQL —— 不靠另记账，
- * 所以「回想完又没新内容」永远不会重复触发。
- *
- * 归档的场也在列：收起来只是不摆在列表最上面，不是「这段过去不算数了」。
- * 回想对新老场、收没收起来一视同仁。
+ * 该回想的场：停够久且之后又添过新话。「有没有新内容」由这条 SQL 现算，不另记账。
+ * 归档的场也在列——收起不等于这段过去不算数。
  */
 export function listRecapCandidates(
   db: SqlTag,
@@ -446,11 +393,7 @@ export function insertSession(
 }
 
 /**
- * 改名：管理员手动改，或者我起标题那一步改。
- *
- * 两种都算「这场已经有名字了」，所以一并把 named 立起来 ——
- * 名字定过一次就不再动：起标题是开场那一下的事，之后话题岔开了也不该被改写，
- * 那是管理员记忆里这场对话的名字，不是最新一条消息的摘要。
+ * 改名（管理员改或我起标题）：一并立 named。名字定过一次就不再动——那是管理员记忆里的名字。
  */
 export function renameSession(db: SqlTag, id: string, title: string): boolean {
   db`update sessions set title = ${title}, named = 1 where id = ${id}`;
@@ -477,9 +420,7 @@ export function setSessionArchived(
 }
 
 /**
- * 置顶 / 取消置顶。置顶区按这个时刻升序排 —— 先顶上的一直在前，
- * 所以「取消再顶」= 排到置顶区末尾，符合「最后动的那一场靠后」的直觉。
- * 置顶不是归档的反面：两者互不干涉，收起来的场照样可以置着顶（只是先收在归档里）。
+ * 置顶/取消。置顶区按时刻升序：取消再顶 = 排到末尾。置顶与归档互不干涉。
  */
 export function setSessionPinned(
   db: SqlTag,
@@ -496,10 +437,7 @@ export function markSessionUnread(db: SqlTag, id: string): void {
 }
 
 /**
- * 他看过了。清的是记号，不是内容 —— 那一场的消息一条不少。
- *
- * 清得「早」一点没关系，晚了才出问题：他明明读过了，角标还赖在那儿，
- * 用两次他就学会无视它了，那这个提醒就等于没有。
+ * 他看过了：清记号不碰内容。清早一点没关系，晚了角标赖着，用两次就被学会无视。
  */
 export function markSessionRead(db: SqlTag, id: string): void {
   db`update sessions set unread = 0 where id = ${id}`;
@@ -515,16 +453,8 @@ export function removeSession(db: SqlTag, id: string): void {
 }
 
 /**
- * 键名排过序的 JSON。
- *
- * 为什么不直接 JSON.stringify：要比的是「这条消息跟库里那条是不是同一份」，
- * 而 JSON.stringify 是认键序的 —— 同一份内容、键序换一下，字符串就不一样，
- * 于是每轮都会以为「全变了」，把两百条全部重写一遍。这个优化就会悄悄失效，
- * 表面上还看不出错。所以干脆按排序后的键写进库，比对就是纯字符串相等。
- * 读回去多一层 JSON.parse，消费方都是按名字取字段，键序无关紧要。
- *
- * 老数据是按原键序存的，所以这一版之后每场会话第一次保存会整体重写一遍，
- * 之后才稳定下来 —— 一次性的，会自愈，不用专门迁移。
+ * 键名排过序的 JSON：JSON.stringify 认键序，同内容换键序就被当成变了、每轮全量重写。
+ * 老数据按原键序存，本版后每场第一次保存会整体重写一遍，自愈，不用迁移。
  */
 function stableJson(value: unknown): string {
   return JSON.stringify(sortKeys(value));
@@ -543,18 +473,9 @@ function sortKeys(value: unknown): unknown {
 }
 
 /**
- * 保存这一场的消息 —— 只写变了的那些。
- *
- * 原来是「先清空再全量写回」：每轮删 N 行、插 N 行，N 最多 200（maxPersistedMessages），
- * 也就是每轮光为了存一份快照就写掉四百来行。可那两百条里，一轮真正动的
- * 通常只有最新的一两条 —— 之前的每一条都跟上一轮一模一样。
- *
- * 读回来逐条比对（读不占写入额度），一样的一个字都不写；会话变短时才删尾巴。
- *
- * 返回「这一趟有没有真动过」。调用方拿它当「这场有新内容」的判据：
- * 光翻列表、点开一场旧的，内容一个字没变，那就不该报成「有新内容」——
- * last_active 只该由真的说过来往记，不能因为点了一下就当成聊过
- * （它现在还管着回想调度：谁停够了、之后又添过新话）。
+ * 保存本场消息，只写变了的那些（先读后比，读不占写入额度）；会话变短才删尾巴。
+ * 旧版先清空再全量写回，每轮最多写四百来行，实际通常只动最新一两条。
+ * 返回「有没有真动过」：只翻列表/点开旧场不该记成新内容，last_active 管着回想调度。
  */
 export function saveSessionMessages(
   db: SqlTag,
@@ -589,9 +510,7 @@ export function saveSessionMessages(
 }
 
 /**
- * 往一场会话尾部追加一条消息（不覆盖）。
- * 用在「提醒到点，那句话属于当初约定它的那一场」——那一场可能不在对话流里，
- * 所以直接写库，等用户切回去就能看到。
+ * 往会话尾部追加一条（不覆盖）：提醒到点时那句属于约定它的场，可能不在对话流里。
  */
 export function appendSessionMessage(
   db: SqlTag,
@@ -636,19 +555,15 @@ function plainText(m: UIMessage): string {
 }
 
 /**
- * LIKE 模式收口：把查询词里的 %、_ 和转义符自己都转成字面量。
- * 不转的话这三个字符在 LIKE 里是通配符 —— 搜「100% 完成」会宽出一大片不相干的
- * 命中，召回比字面意图宽；转完还得在 SQL 里 ESCAPE '\' 声明谁是转义符。
+ * LIKE 转义：%、_、\ 转成字面量，并在 SQL 里 ESCAPE '\'，否则搜「100%」会宽出一大片。
  */
 function likePattern(q: string): string {
   return "%" + q.replace(/[%_\\]/g, (c) => "\\" + c) + "%";
 }
 
 /**
- * 跨会话回忆检索：按关键词在全部会话消息里找，同时也按会话标题过滤。
- * 用 LIKE 全文扫，不走向量 —— 中文关键词（「上次那个方案」里的实词）不会误命中
- * 内嵌的 uuid / id，命中工具参数也算「她当时在做这件事」，结果够用。
- * 命中按会话活跃时间排序，返回纯文本片段给模型引用。
+ * 跨会话回忆：LIKE 全文扫，不走向量（中文实词不会误命中内嵌 uuid，够用）。
+ * 按会话活跃时间排序，返回纯文本片段。
  */
 export function searchMessages(db: SqlTag, q: string, limit = 8): RecallHit[] {
   const pat = likePattern(q);
@@ -686,10 +601,8 @@ export function searchMessages(db: SqlTag, q: string, limit = 8): RecallHit[] {
 }
 
 // ── 场屋原话索引：recall 的跨场账本 ─────────────────────────
-//
-// 场屋的消息存在场屋自己那里，目录屋翻不到。这里给目录屋一张专供搜索的索引表：
-// 场屋轮尾把新落的消息（谁说的、说了什么）寄回一行 —— 消息本体不动，
-// 这边只是「可搜索的目录页」。行很小（正文截 500 字），只喂 recall 用。
+// 场屋消息存在场屋，目录屋翻不到；场屋轮尾把新消息（谁说的、说了什么）寄回一行。
+// 消息本体不动，只是可搜索目录页，正文截 500 字。
 
 export interface RecallIndexRow {
   /** 消息 id（UIMessage.id）：幂等键 */
@@ -712,8 +625,7 @@ function ensureRecallIndex(db: SqlTag): void {
 }
 
 /**
- * 收场屋寄回的原话索引。INSERT OR IGNORE 按消息 id 幂等 ——
- * 场屋重启后全量重寄一遍也不会写重，目录页多翻几遍还是同一本。
+ * 收场屋寄回的原话索引。INSERT OR IGNORE 按消息 id 幂等，重启全量重寄也不会写重。
  */
 export function insertRecallIndexRows(
   db: SqlTag,
@@ -730,8 +642,7 @@ export function insertRecallIndexRows(
 }
 
 /**
- * 搜场屋寄回的原话索引。join sessions 拿标题与活跃时刻 ——
- * 场屋的目录行（落位登记过的）就在这边表里，join 得上；还没登记的行搜不到，可接受。
+ * 搜场屋原话索引。join sessions 拿标题/活跃时刻；未登记的行搜不到，可接受。
  */
 export function searchRecallIndex(
   db: SqlTag,

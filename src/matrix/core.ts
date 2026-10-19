@@ -1,18 +1,8 @@
-// 网页矩阵（原独立副包 webback-ericher，现已并回主包）。
-//
-// 定位：主包 ericher-app 的一个功能模块。它跟主包同进程、同一只 R2 桶
-// （MEMORY_BUCKET）：矩阵的配置（matrix/config.json）与页面正文
-// （matrix/page/<id>.html）都落那里。合并前它是个独立 Worker，主包靠
-// MATRIX_ORIGIN + HMAC 内部头把请求转过去；现在这些跨进程的东西全没了 ——
-// 访客身份由主包直接算好传进来，认领不了就返回 null 交回主包。
-//
-// 职责：
-//   1. 认领主域名下的非保留路径，按层级路径找到页面 → 四档身份校验 → 直吐正文；
-//   2. 页面级沙箱（可选）与「外挂层」注入（回助手 / 层级导航 / 管理员入口）；
-//   3. 根路径 `/` 在入口页落后时 302 到入口页（公开访客），管理员与登录用户照常回接待台；
-//   4. 管理面 CRUD（/api/matrix/*）：主包只做「管理员」这道闸，真正的活在这儿；
-//   5. 矩阵包：整套矩阵与一个 zip 互转（/api/matrix/pack），装备即**整体替换**。
-//      矩阵是本地照包准则做熟、一次装上的东西 —— 云端那套编辑面是补充，不是唯一入口。
+// 网页矩阵（原独立副包 webback-ericher，已并回主包）：与主包同进程、同一只 R2 桶，
+// 配置 matrix/config.json、正文 matrix/page/<id>.html 都落那里；合并前的 MATRIX_ORIGIN+HMAC
+// 跨进程转发已删除，访客身份由主包算好传入，认领不了返回 null 交回主包。
+// 职责：非保留路径的层级页直吐（四档身份）、页面沙箱与外挂层注入、`/` 入口页 302、
+// /api/matrix/* 管理面、矩阵包整体替换（zip ↔ 整套矩阵）。
 
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 
@@ -23,7 +13,7 @@ export type MatrixViewer = {
   card?: string;
   /**
    * 主包核过的「权限矩阵」长期权益：给了就是整面管理权（不拆子权限）。
-   * 只有管理面认这一位；页面访问（allowed）照旧只看 role / type / card。
+   * 只有管理面认这一位；页面访问（allowed）仍只看 role / type / card。
    */
   matrix?: boolean;
 };
@@ -37,9 +27,8 @@ export interface MatrixEnv {
 type Access = "public" | "visitor" | "admin" | "types";
 
 /**
- * 节点类型：矩阵里的一个点是什么东西。
- * 点是网页、是门卫、还是助手本体，决定「站到它会发生什么」——
- * 有了它，那张图才说得清方向：入口 → 展示页 → 门卫 → 内区 → 助手 / 功能块。
+ * 节点类型：网页 / 门卫 / 助手 / 功能块，决定「站到它会发生什么」——
+ * 入口 → 展示页 → 门卫 → 内区 → 助手 / 功能块。
  */
 export type MatrixNodeKind =
   | "page" // 一页网页（默认）：带正文，或引用云盘文件，或是一条外站链接
@@ -65,14 +54,13 @@ export interface MatrixPage {
   /** 外站链接：有值则不出本地正文，只作导航里的外链 */
   external?: string;
   /**
-   * 页面级自由 CSS：只在这一页生效，排在矩阵默认样式之后（能覆盖默认）。
-   * 写它 = 这页的样式自己钉住，不跟全局换肤走。过 parseCss 收口后才存。
+   * 页面级自由 CSS：只在本页生效，排在矩阵默认样式之后（能覆盖默认）。
+   * 写它 = 这页样式自己钉住，不跟全局换肤走；过 parseCss 收口后才存。
    */
   css?: string;
   /**
-   * 正文改为「引用云盘里的一个文件」时记的 key。有它就不出本页正文，
-   * 实时去读那只文件 —— 云盘那边改了，页面跟着变；那只文件因此不能删/搬
-   * （见 src/tools/files.ts 的引用保护）。与正文二选一。
+   * 正文改为「引用云盘里的一个文件」时记的 key。有它就不出本页正文，实时去读那只文件
+   * （云盘改了页面跟着变）；那只文件因此不能删/搬（见 src/tools/files.ts 的引用保护）。与正文二选一。
    */
   driveKey?: string;
   updatedAt: number;
@@ -98,9 +86,8 @@ export interface MatrixLink {
 }
 
 /**
- * 外站认定：只有列在这张表里的域名才允许从内站过去。
- * 门卫页是唯一出口，它拿目标域名来这张表上比对 —— 表外的地址一律拦下，
- * 顺带也就挡住了「伪造 to 参数往外跳」的开放重定向。
+ * 外站认定：只有表里的域名才允许从内站过去。门卫页是唯一出口，拿目标域名来比对 ——
+ * 表外一律拦下，也就挡住了「伪造 to 参数往外跳」的开放重定向。
  */
 export interface ApprovedSite {
   /** 域名（小写，不含协议与路径）。它也放行自己的子域，如 example.com 认 acme.example.com */
@@ -126,8 +113,7 @@ interface MatrixConfig {
 
 /**
  * 全局悬浮菜单：所有页面统一在左上角挂一个半透明浮窗，列出当前身份能去的页面。
- * 全局一个开关，而不是每页各设一道 —— 新增页面自动带上，不必逐页记着配。
- * 位置固定在左上：不让人拖（拖了就得记住它拖到哪，反而多出一件要维护的事）。
+ * 全局一个开关，新增页面自动带上；位置固定在左上，不让人拖（拖了就得记住位置）。
  */
 interface NavConfig {
   on: boolean;
@@ -166,28 +152,18 @@ const SEG = "[a-z0-9_-]+";
 const PATH_RE = new RegExp(`^${SEG}(?:/${SEG}){0,2}$`);
 
 /**
- * 配置缓存按桶隔离，且交出去的都是副本：调用方一路都是就地改 cfg
- * （`cfg.theme = …`、`cfg.pages.splice(…)`），要是把缓存本体交出去，
- * 一次保存失败就会让未落盘的幻影配置在缓存里活满 TTL —— 公开页照它渲染，
- * 5 秒后又自己变回去，现场看起来像「云端随机抽风」。
+ * 配置缓存按桶隔离，且交出去的都是副本：调用方一路都是就地改 cfg，
+ * 要是把缓存本体交出去，一次保存失败就会让未落盘的幻影配置在缓存里活满 TTL ——
+ * 公开页照它渲染，5 秒后又自己变回去，现场看起来像「云端随机抽风」。
  */
 const configCache = new WeakMap<object, { cfg: MatrixConfig; at: number }>();
 
 // ── 矩阵包（成熟体直接部署）──────────────────────────────
 //
-// 一个 zip 装一次就成形。为什么要有它：矩阵是一批自建网页 + 连线 + 外观 + 外站认定，
-// 在工作台里一页一页配只适合零星改动；真正的成熟体是在本地照包准则做好、一次装上来的
-// —— 云端的编辑面是补充，不是唯一入口。
-//
-// 装备语义是**整体替换**，不是合并：装上的就是那个包的样子。这条是包准则的一部分，
-// 也是它跟美化包一致的地方（结果可预期、来回可复现）。删掉矩阵配置，矩阵自然一并消失。
-//
-// 包体（zip）：
-//   matrix.json        清单：{ format, version, exportedAt, config }
-//   pages/<id>.html    页面正文（外站页与引用云盘文件的页不带正文）
-//
-// 边界：包只装成品矩阵，不含工作台本身 —— 工作台是「读配置的程序」，随主包走；
-// 它保证的是「同一套云盘里可复现」，不是「可移植到任意环境」（云盘引用页换个桶就读不到）。
+// 一个 zip 装一次就成形：矩阵是本地照包准则做好、一次装上的，云端编辑面只是补充。
+// 装备语义是**整体替换**，不是合并 —— 结果可预期、来回可复现；删掉矩阵配置，矩阵一并消失。
+// 包体：matrix.json（{ format, version, exportedAt, config }）+ pages/<id>.html（外站页与引用云盘文件的页不带正文）。
+// 边界：只装成品矩阵，不含工作台；保证「同一套云盘里可复现」，不保证「可移植到任意环境」。
 const PACK_FORMAT = "ericher-matrix";
 const PACK_VERSION = 1;
 const PACK_MANIFEST = "matrix.json";
@@ -272,13 +248,12 @@ export async function loadConfig(env: MatrixEnv): Promise<MatrixConfig> {
       const parsed = JSON.parse(await obj.text()) as MatrixConfig;
       if (parsed && Array.isArray(parsed.pages)) {
         cfg = parsed;
-        // 旧配置没有 links：补个空数组，免得后面每次读都判空；顺带挡住
-        // 手工改坏的 config（links 不是数组时按没有处理，不炸整包）
+        // 旧配置没有 links：补空数组；手工改坏的也按没有处理，不炸整包
         if (!Array.isArray(cfg.links)) cfg.links = [];
-        // 旧配置没有 nav：默认开着 —— 悬浮菜单本来就是「配好了就该在」的东西
+        // 旧配置没有 nav：默认开着
         if (!cfg.nav || typeof cfg.nav.on !== "boolean")
           cfg.nav = { ...DEFAULT_NAV };
-        // 旧配置没有 theme：补默认，且过一遍解析（挡住手工改坏的色值）
+        // 旧配置没有 theme：补默认，并过一遍解析（挡住手工改坏的色值）
         cfg.theme = parseTheme(cfg.theme);
         // 旧配置没有 sites：补空数组 —— 空表 = 一个外站都不放行，是安全的那一侧
         if (!Array.isArray(cfg.sites)) cfg.sites = [];
@@ -352,8 +327,8 @@ function staticPage(title: string, msg: string): string {
 
 // ── 全局外观：注入物长什么样 ────────────────────────────
 //
-// 注入进页面的按钮与悬浮菜单不是页面内容，是矩阵的「外挂层」—— 它长什么样由
-// 矩阵统一说了算，不散在各页的手写样式里。一处 token、一段 <style>，改一次全站变。
+// 注入的按钮与悬浮菜单是矩阵的「外挂层」，长相由矩阵统一说了算，不散在各页手写样式里。
+// 一处 token、一段 <style>，改一次全站变。
 
 /** 按钮形态：文字链接 / 描边 / 实底 */
 type ButtonShape = "text" | "outline" | "solid";
@@ -397,12 +372,9 @@ const BUTTON_CSS: Record<ButtonShape, string> = {
 };
 
 /**
- * 页面级自由 CSS 的收口：它会被塞进 <style> 里直吐给访客，是一段可写内容，
- * 所以在这儿把能闯祸的写法挡掉，剩下的原样存：
- *   - `</style`：闭合标签逃逸，能把后面变成正文 HTML；
- *   - `@import`：从别的地址拉样式表，绕过本页作用域；
- *   - `url()` 指到外站：探针式加载 / 泄 IP，只放行 data: 与同源相对路径。
- * 超过体积上限也拒 —— 一页样式不该长到拖垮吐页。
+ * 页面级自由 CSS 的收口：它会被塞进 <style> 直吐给访客，所以先把能闯祸的写法挡掉：
+ * `</style`（闭合标签逃逸）、`@import`（绕过本页作用域）、url() 指外站（探针/泄 IP，
+ * 只放行 data: 与同源相对路径）。超过体积上限也拒。
  */
 const MAX_CSS_BYTES = 64 * 1024;
 const EXTERNAL_URL_RE = /url\(\s*['"]?(?:https?:)?\/\//i;
@@ -419,20 +391,17 @@ function parseCss(v: unknown): string | undefined {
 }
 
 /**
- * 外挂层那一整段样式：token（主色/圆角/字色/字族）加各类注入物的默认长相。
- * 弹进每一页的 <head>，一处改全站变。页面自己的 CSS 排在它后面（见页面级 css），
- * 于是页面能覆盖这里的默认值，却不会外溢到别的页。
+ * 外挂层那一整段样式：token 加各类注入物的默认长相，弹进每一页的 <head>。
+ * 页面自己的 CSS 排在其后，能覆盖默认值，却不会外溢到别的页。
  */
 function buildStyle(t: MatrixTheme): string {
   return (
     `<style id="mx-style">` +
     `:root{--mx-accent:${t.accent};--mx-radius:8px;--mx-ink:#111;` +
     `--mx-line:rgba(0,0,0,.14);--mx-font:14px/1.6 system-ui,-apple-system,'Segoe UI',sans-serif;}` +
-    // 白纸黑字兜个底：页面自己不写背景时，画布会交给浏览器 —— 开着自动深色的
-    // 那边把画布涂黑，而正文颜色还是默认的黑，于是黑底黑字、整页像空白。
-    // 底色与字色成对写死就翻不出这种局面（真被自动深色反相，也是一对一起反）。
-    // color-scheme:light 顺带把表单控件按浅色画。页面自己的 CSS 排在这段之后，
-    // 想换深色主题照样盖得住。
+    // 白纸黑字兜底：页面不写背景时画布归浏览器，自动深色会涂黑画布而正文仍黑，
+    // 于是黑底黑字。底色与字色成对写死就翻不出这种局面；页面 CSS 在后，想换深色盖得住。
+    // color-scheme:light 顺带把表单控件按浅色画。
     `html{background:#fff;color:var(--mx-ink);color-scheme:light;}` +
     `a.mx-link,a.mx-link:visited{color:var(--mx-accent);text-decoration:none;}` +
     `a.mx-link:hover{text-decoration:underline;}` +
@@ -469,16 +438,14 @@ function buildStyle(t: MatrixTheme): string {
     `.mx-point{position:absolute;transform:translate(-50%,-50%);z-index:2147483000;}` +
     // 地址不被允许（伪协议之类）：给一截说明，不是可点的链接
     `.mx-dead{color:#999;cursor:default;text-decoration:line-through;}` +
-    // 手机窄屏：菜单默认只占一行摘要（展开态由下面那两段 @media 分工决定），
-    // 宽度铺满一整条 —— 375px 的屏上 264px 就是七成，那就是块挡板了；字号也收一档。
-    // 只改这一处：所有矩阵页共用这段样式，谁做的包都不用自己再写一遍
+    // 手机窄屏：菜单默认只占一行摘要、宽度铺满（375px 屏上 264px 就是挡板），字号收一档。
+    // 所有矩阵页共用这段样式，做包的人不用自己再写一遍。
     `@media(max-width:640px){` +
     `.mx-nav{left:10px;right:10px;max-width:none;padding:6px 12px;font-size:13px;}` +
     `.mx-nav-list{max-height:40vh;}` +
     `}` +
-    // 宽屏：默认摊开（跟从前一样），想腾地方点摘要那行折起来。
-    // 同一个复选框，两段 @media 里语义正好相反 —— 窄屏是「点开」，宽屏是「收起」，
-    // 这样不写一行脚本也能让菜单在手机上先收着
+    // 宽屏默认摊开，点摘要折叠。同一个复选框在两段 @media 里语义相反 ——
+    // 不写一行脚本也能让菜单在手机上先收着。
     `@media(min-width:641px){` +
     `.mx-nav-body{display:block;}` +
     `.mx-nav-cb:checked~.mx-nav .mx-nav-body{display:none;}` +
@@ -490,15 +457,10 @@ function buildStyle(t: MatrixTheme): string {
 }
 
 /**
- * 悬浮菜单的拖拽：按住摘要那行，整块菜单跟着手走，落点记在本地。
- *
- * 菜单默认还是钉在左上角，只是终于挪得动了 —— 正文里被它压住的那块，从前只能
- * 靠折叠让开，现在直接拖走。落点按浏览器记（localStorage），下次进来还在原处。
- *
- * 一小段自足的内联脚本：不外链、不依赖任何东西（矩阵页要能断网打开）。
- * 摘要那行本来就是开合的开关，所以拖过之后紧跟的那一下 click 得吞掉 ——
- * 不然松手时顺手就把菜单开合了（跟工作台里那些浮窗一个道理）。
- * 沙箱页的源是不透明的，localStorage 会抛：读写都裹了 try，抛了就退成「不记」。
+ * 悬浮菜单的拖拽：按住摘要那行挪动整块菜单，落点按浏览器记（localStorage）。
+ * 自足内联脚本，不外链（矩阵页要能断网打开）。摘要那行本来也是开合开关，
+ * 拖过之后紧跟的 click 得吞掉，否则松手就顺手开合了。
+ * 沙箱页源不透明，localStorage 会抛：读写都裹 try，抛了就退成「不记」。
  */
 function buildNavDrag(): string {
   return (
@@ -547,16 +509,9 @@ function buildNavDrag(): string {
 }
 
 /**
- * 全局悬浮菜单：站在哪一页都能看到「我还能去哪儿」。
- *
- * 列的是当前身份**能访问的全部页面**（外站也列，标一下），当前这页不重复列 ——
- * 它在折起来的那一行摘要里（「菜单 · 大厅」），一眼知道自己站在哪。
- *
- * 开合用一个藏起来的复选框配摘要那行的 <label>，零脚本。默认开还是合按屏宽分工：
- * 宽屏摊开（页面留白得自己让开它），窄屏先收成一行摘要 —— 手机上摊开的菜单
- * 铺满一整条，等于在正文顶上压了块挡板，而访客第一眼要看的是页而不是菜单。
- *
- * 唯一那段脚本在 buildNavDrag：按住摘要那行能把它整块挪开（从前只能折叠让位）。
+ * 全局悬浮菜单：列出当前身份**能访问的全部页面**（外站也列并标注），当前页不重复列 ——
+ * 它在折起那行摘要里（「菜单 · 大厅」）。开合靠藏起来的复选框 + <label>，零脚本；
+ * 宽屏摊开、窄屏先收成一行摘要，免得在手机上压住正文。拖拽脚本见 buildNavDrag。
  */
 function buildNav(
   viewer: MatrixViewer,
@@ -625,12 +580,12 @@ function injectAfterBody(htmlText: string, snippet: string): string {
 
 // ── 门卫：从内站往站外去的那道闸 ──────────────────────────
 //
-// 「往站外去」这件事只开一个口：/_gate。绑定的外站链接、注入的按钮、正文里手写的
-// 绝对外链，全都先落到门卫页；门卫拿目标域名去认定表比对，表才放行 —— 于是
-//   1. 表外的地址一律拦下，包括有人伪造 ?to= 想往外跳（挡开放重定向）；
-//   2. javascript: / data: / blob: 这类协议任何落点都不放行；
-//   3. http: 明文放行但门卫页加倍提示；免提示的认定域则直接跳过门卫页。
-// 沙箱页是硬例外：它的正文由管理员自持、沙箱已隔离，不再二次改写（见 injectLinks）。
+// 「往站外去」只开一个口：/_gate。绑定外链、注入按钮、正文手写的绝对外链都先落这里，
+// 门卫拿目标域名比对认定表：
+//   1. 表外一律拦下，包括伪造 ?to= 往外跳（挡开放重定向）；
+//   2. javascript: / data: / blob: 等协议任何落点都不放行；
+//   3. http: 明文放行但加倍提示；免提示的认定域直接跳过门卫页。
+// 沙箱页是硬例外：正文由管理员自持、沙箱已隔离，不再二次改写（见 injectLinks）。
 
 /** 一律不许作为出行目标的协议：伪协议能借链接执行脚本或塞内联内容 */
 const BLOCKED_SCHEME_RE = /^[\s\u0000-\u001f]*(javascript|data|blob|vbscript|file)\s*:/i;
@@ -744,8 +699,8 @@ function gatePage(opts: {
 
 /**
  * 门卫页本体：解析 ?to= 与 ?from=，依次过协议闸与认定表，再决定放行方式。
- * 这里也是「目标必须落在认定白名单内」的唯一执行点 —— 白名单之外不生产任何
- * 指向该地址的可点链接，于是伪造 to 也无处可去。
+ * 这里也是「目标必须落在认定白名单内」的唯一执行点 —— 白名单外不产出任何指向
+ * 该地址的可点链接，伪造 to 也无处可去。
  */
 async function serveGate(
   req: Request,
@@ -805,12 +760,9 @@ async function serveGate(
 
 // ── 验票：进内区前的那道闸 ──────────────────────────────
 //
-// 矩阵页自己不认身份，只有 access 那四档决定「给不给看」。所以没票的人在门口
-// 只会撞上一句「不对你开放」，而矩阵里原本没有任何能拿到票的地方 —— 票是接待台
-// 那边发的（见 index.ts 的 /api/auth 与 /api/card/login）。
-//
-// 这一页把那两个口子搬进矩阵来：验过之后照着 next 原路回去，票就是进门时那张
-// cookie，跟从接待台进来完全一样。于是「公开展示区 → 验票 → 内区」这条链才走得通。
+// 矩阵页自己不认身份，只有 access 四档决定给不给看；票由接待台发（/api/auth 与 /api/card/login）。
+// 这一页把那两个口子搬进矩阵：验过照 next 原路回去，票就是进门那张 cookie。
+// 于是「公开展示区 → 验票 → 内区」这条链才走得通。
 
 /** 验票页的样式：借门卫页那一套（按钮、说明那几笔现成的），再补表单自己的 */
 const TICKET_STYLE =
@@ -887,10 +839,9 @@ function ticketPage(next: string): string {
 }
 
 /**
- * 不验票时该去哪：矩阵的**能出正文的**入口页，没有就回助手。
- * 入口页也可能是门卫/助手/功能块这几类 —— 它们自己不出正文、站上去还会再把人
- * 送去 /_ticket。要是照旧返回它，验完票落到它头上又被弹回验票页，来回死循环。
- * 所以只认 kind=page 的入口页（老配置缺 kind 一律按 page 算）。
+ * 不验票时该去哪：矩阵**能出正文的**入口页，没有就回助手。
+ * 入口页也可能是门卫/助手/功能块 —— 它们不出正文，站上去又把人送去 /_ticket，
+ * 验完票落回来就被弹回验票页，死循环。所以只认 kind=page 的入口页（缺 kind 按 page）。
  */
 function defaultNextPath(cfg: MatrixConfig): string {
   const entry = cfg.pages.find(
@@ -900,9 +851,8 @@ function defaultNextPath(cfg: MatrixConfig): string {
 }
 
 /**
- * 门卫验完去哪：它的第一条出边指向的那一页（按 order 排）。
- * 只挑「网页」那一类：指向另一个门卫等于让人再验一次，转圈；
- * 指向外站页也不行 —— 那条路径本身不出正文。挑不出来就交给调用方兜底。
+ * 门卫验完去哪：第一条出边指向的那一页（按 order 排）。只挑「网页」类 ——
+ * 指向另一个门卫等于再验一次（转圈），指向外站页又不出正文。挑不出来交给调用方兜底。
  */
 function firstTargetPath(cfg: MatrixConfig, gate: MatrixPage): string | null {
   const outs = cfg.links
@@ -916,8 +866,8 @@ function firstTargetPath(cfg: MatrixConfig, gate: MatrixPage): string | null {
 }
 
 /**
- * 验票页本体。next 只收矩阵自己的路径（validPath 那套文法：站内相对、合法段、
- * 不占保留字）—— 不这样收，这一页就成了一条开放跳转。
+ * 验票页本体。next 只收矩阵自己的路径（validPath 文法：站内相对、合法段、不占保留字）——
+ * 不这样收，这一页就成了一条开放跳转。
  */
 async function serveTicket(
   req: Request,
@@ -973,9 +923,8 @@ function escapeRe(s: string): string {
 }
 
 /**
- * 把一个命名锚点（正文里形如 <div id="north"></div> 的空元素）替换成
- * 带内容的同名元素。找不到返回 null，交给调用方降级到兜底栏。
- * 只认空元素：已有内容的 id 元素不碰，免得把正文占位符覆盖掉。
+ * 把一个命名锚点（正文里形如 <div id="north"></div> 的空元素）替换成带内容的同名元素。
+ * 找不到返回 null，交给调用方降级到兜底栏。只认空元素：已有内容的 id 元素不碰。
  */
 function fillAnchor(htmlText: string, name: string, content: string): string | null {
   // \s 锚定 id 前必有空白，避开 data-id 这类同后缀属性的误命中；
@@ -1018,11 +967,9 @@ function injectFallbackNav(htmlText: string, items: string[]): string {
 }
 
 /**
- * 把这一页的出边渲染成按钮注入正文。
- * 按钮是「矩阵的功能」不是页面内容，所以连线存在矩阵配置里，渲染时才拼进去。
- * 落点三选一：命名锚点填进正文、兜底栏贴在末尾、拖拽点绝对定位到整页坐标。
- * 每个按钮都带 data-mx-from / data-mx-to —— 设计器的预览器据此在页面里找到它、
- * 量出它此刻落在哪，才好在同一张图上拖着改。没出边原样返回，也从不因脏数据抛错。
+ * 把这一页的出边渲染成按钮注入正文。按钮是矩阵的功能，不是页面内容 ——
+ * 连线存在配置里，渲染时才拼进去。落点三选一：命名锚点、兜底栏、拖拽点绝对定位。
+ * 每个按钮带 data-mx-from / data-mx-to，设计器预览据此找到它、量出位置；脏数据不抛错。
  */
 function injectLinks(
   htmlText: string,
@@ -1095,12 +1042,10 @@ function injectLinks(
 
   let out2 = injectFallbackNav(result, fallback);
 
-  // 拖拽落点：把这撮按钮绝对定位到整页坐标（百分比）。
-  // 定位祖先得是「铺满整页」的那一层，且原点在页顶 —— 于是选 html，给它一屏的
-  // 最小高：短页也撑到一屏，长页本来就是内容高。
-  // 不用 body：它是内容高（短页只有几十像素），百分比会被压进顶部一小条；它还
-  // 自带 8px 外边距，原点对不上。不用初始包含块（视口）：长页面全挤在首屏。
-  // 没有 body 时 isPoint 已是 false，它们自然落进上面的兜底栏，无处安放就算了。
+  // 拖拽落点：绝对定位到整页坐标（百分比）。定位祖先得铺满整页且原点在页顶，
+  // 所以选 html 并给它一屏最小高：短页撑到一屏，长页就是内容高。
+  // 不用 body（内容高，百分比被压进顶部一小条，还自带 8px 外边距）；不用视口（长页全挤在首屏）。
+  // 没有 body 时 isPoint 已是 false，按钮会落进上面的兜底栏。
   const points = rendered.filter((r) => r.isPoint);
   if (points.length) {
     out2 = injectAfterBody(
@@ -1113,9 +1058,9 @@ function injectLinks(
 }
 
 /**
- * 正文里手写的绝对外链：扫出来改写成经门卫页，相对路径 / 锚点 / 站内链接不碰。
- * 只认 <a href="…">，不碰 <img>/<script>/<iframe> —— 门卫管的是「人往站外走」这件事。
- * 沙箱页是硬例外，调用方按 page.sandbox 跳过（沙箱已隔离，再改写会动到页面自己的逻辑）。
+ * 正文里手写的绝对外链：扫出来改写成经门卫页；相对路径 / 锚点 / 站内链接不碰。
+ * 只认 <a href="…">，不碰 <img>/<script>/<iframe> —— 门卫管的是「人往站外走」。
+ * 沙箱页是硬例外，调用方按 page.sandbox 跳过（再改写会动到页面自己的逻辑）。
  */
 const A_HREF_RE = /(<a\b[^>]*?\shref\s*=\s*)"([^"]*)"|(<a\b[^>]*?\shref\s*=\s*)'([^']*)'/gi;
 
@@ -1227,8 +1172,8 @@ async function servePage(
   // 本页 CSS 紧跟其后：同在后段，天然压过默认值；且只注这一页，不越界。
   if (page.css)
     withStyle = injectIntoHead(withStyle, `<style id="mx-page-css">${page.css}</style>`);
-  // 再注通路、最后注悬浮菜单：菜单插在 <body> 后，通路栏贴在 </body> 前，
-  // 各管一头互不干扰；通路注入早做，锚点搜索也就扫不到菜单自己
+  // 再注通路、最后注悬浮菜单：菜单插 <body> 后、通路栏贴 </body> 前，各管一头；
+  // 通路先注，锚点搜索也就扫不到菜单自己
   const withLinks = injectLinks(withStyle, page, cfg, viewer);
   const body = injectAfterBody(withLinks, buildNav(viewer, cfg, page.path));
   return html(body, page.sandbox ? { "Content-Security-Policy": SANDBOX_CSP } : {});
@@ -1316,7 +1261,7 @@ export class MatrixInputError extends Error {}
 
 /**
  * 保存一页（新建或整页覆盖）。管理面 FormData 与 AI 工具共用这一份逻辑 ——
- * 两边同一套收口，不存在「走工具就能绕过校验」的口子。
+ * 同一套收口，不存在「走工具就能绕过校验」的口子。
  */
 export async function savePageCore(
   env: MatrixEnv,
@@ -1333,8 +1278,7 @@ export async function savePageCore(
 
   const id = typeof input.id === "string" && input.id ? input.id : newId();
   // id 要直接拼进 R2 key（matrix/page/<id>.html），跟解包同一把尺：只认小写字母与数字。
-  // 不卡的话，管理面带个 `/` 的 id 就能把正文写到桶里别处，导出的包还会因「嵌套
-  // 目录」被解包丢掉正文 —— 存得进、却装不回来
+  // 不卡的话，带 `/` 的 id 能把正文写到桶里别处，导出的包还会因「嵌套目录」丢正文 —— 存得进、装不回来
   if (!PACK_ID_RE.test(id))
     throw new MatrixInputError("页面 id 不合法（只认小写字母与数字，最长 32 位）");
   const existing = cfg.pages.find((p) => p.id === id);
@@ -1363,8 +1307,7 @@ export async function savePageCore(
       access === "types" && Array.isArray(input.types)
         ? input.types.map((t) => String(t)).filter(Boolean).slice(0, 50)
         : undefined,
-    // 入口页必须公开且不许勾沙箱：它是所有人的门面，不能自己把自己挡在门外。
-    // 非网页类型也没有可沙箱的正文
+    // 入口页必须公开且不许勾沙箱：它是所有人的门面，不能自己把自己挡在门外；非网页类型没有正文可沙箱
     sandbox: entry || !isPage ? false : sandbox,
     entry,
     external: isPage ? external || undefined : undefined,
@@ -1372,9 +1315,8 @@ export async function savePageCore(
     updatedAt: Date.now(),
   };
 
-  // 正文：外站链接不出正文；否则按 上传文件 / 粘贴文本 / 引用云盘文件 三选一。
-  // 「引用云盘文件」不拷贝正文，只记下 key —— 那边改了页面跟着变（见 servePage）。
-  // 门卫/助手/功能块不进这一段：它们本来就没有正文
+  // 正文：外站页不出正文；否则按 上传文件 / 粘贴文本 / 引用云盘文件 三选一。
+  // 「引用云盘文件」不拷贝正文，只记 key —— 那边改了页面跟着变（见 servePage）。门卫/助手/功能块不进这段。
   if (isPage && !page.external) {
     const file = input.file;
     const text = input.text;
@@ -1867,9 +1809,8 @@ async function equipMatrixPack(
   // 先验后动：unpack 抛错的话，线上一个字节都还没动
   const { cfg, bodies, droppedLinks, droppedSites } = unpackMatrixPack(bytes);
 
-  // 引用云盘文件的页：与「保存一页」同一道收口 —— 那只文件得真在桶里、且不超上限。
-  // 不核的话，包里写个不存在的 key 也能装上线，那一页当场变成「引用的文件不见了」，
-  // 而保存一页走的头一道 head() 明明会把它拦下 —— 两条路同一套规矩
+  // 引用云盘文件的页：与「保存一页」同一道收口 —— 文件得真在桶里且不超上限。
+  // 不核的话，包里写个不存在的 key 也能装上线，那一页当场变成「引用的文件不见了」。
   for (const p of cfg.pages) {
     if (!p.driveKey) continue;
     const src = await env.MEMORY_BUCKET.head(p.driveKey);
@@ -1889,10 +1830,9 @@ async function equipMatrixPack(
     snapshot = true;
   }
 
-  // 清掉现有正文：整体替换，上一版留下的正文一个都不留。
-  // 外站页与引用云盘文件的页本来就没有正文，不受影响。
-  // 必须翻页删到 list_complete —— 只删第一页的话，正文超过 1000 个对象时
-  // 旧页会残留在桶里，那就只是「半个替换」，与整体替换的承诺不符
+  // 清掉现有正文：整体替换，上一版留下的正文一个都不留（外站页与引用云盘文件的页本就没正文）。
+  // 必须翻页删到 list_complete：只删第一页的话，正文超过 1000 个对象时旧页会残留，
+  // 那就只是「半个替换」，与整体替换的承诺不符。
   let cursor: string | undefined;
   do {
     const listed = await env.MEMORY_BUCKET.list({
@@ -1925,9 +1865,8 @@ async function equipMatrixPack(
 }
 
 /**
- * 管理面（/api/matrix/*）。viewer 由主包算好传进来 —— 这里再核一遍：
- * 管理员，或主包核过「权限矩阵」长期权益的人（matrix 位）。这一档是整面给的，
- * 过了这道闸之后每一项都按全量执行，没有半开的子权限。
+ * 管理面（/api/matrix/*）。viewer 由主包算好传进来，这里再核一遍：管理员，
+ * 或主包核过「权限矩阵」长期权益的人（matrix 位）。整面给权，没有半开的子权限；
  * 推送入口那条路没有会话，它带的 role 本身就是 admin。
  */
 export async function handleMatrixApi(
@@ -1936,8 +1875,7 @@ export async function handleMatrixApi(
   pathname: string,
   viewer: MatrixViewer,
 ): Promise<Response> {
-  // 第二道闸：管理员，或主包核过「权限矩阵」这一档的持卡来客。
-  // 只认 user + matrix：过路人（public）无论谁把 matrix 位置起来都不放行 ——
+  // 第二道闸：只认 admin，或 user + matrix。过路人（public）无论谁把 matrix 位置起来都不放行 ——
   // 这道闸防的就是上游漏判，放行面不能靠调用方自觉。
   const canManage =
     viewer.role === "admin" || (viewer.role === "user" && viewer.matrix === true);
@@ -2005,8 +1943,8 @@ export async function handleMatrixApi(
     }
     return json({ ok: true, data: { sites: cfg.sites ?? [] } });
   }
-  // 矩阵包：GET 导出当前这套（下载一个 zip），POST 装备一个包（**整体替换**）。
-  // 包体格式与用法见文件上半部分的说明。管理员专属（上面那道闸已经拦过）
+  // 矩阵包：GET 导出当前这套（zip），POST 装备一个包（**整体替换**）。管理员专属；
+  // 包体格式见文件上半部分。
   if (pathname === "/api/matrix/pack") {
     if (req.method === "POST") {
       // 先看声明的大小：真想拦的是「读完才发现太大」—— 那时整包已经躺在内存里了
@@ -2029,8 +1967,7 @@ export async function handleMatrixApi(
       "Content-Disposition": `attachment; filename="matrix-${Date.now()}.zip"`,
       "Cache-Control": "no-store",
     };
-    // 正文没进包的页如实报出去（回执头）—— 静默的包会骗人：
-    // 这种包装不回来，得让导出的人当场知道
+    // 正文没进包的页如实报出去（回执头）—— 这种包装不回来，不能让导出的人以为成功了
     if (missing.length) {
       headers["X-Matrix-Pack-Missing"] = String(missing.length);
       headers["X-Matrix-Pack-Missing-Paths"] = encodeURIComponent(
@@ -2080,10 +2017,8 @@ export async function handleMatrixApi(
 
 /**
  * 主包的构建信息：版本号 + 构建号（与主包同一对值，见 vite.config.ts 的 define）。
- *
- * 打包时它们被内联成字面量；裸 `wrangler dev`（不走 vite）里那两个标识符压根
- * 不存在 —— 直接引用会把这个模块整个炸掉。所以这里探一下：探不到就留空，
- * 由前端退回它自己那份构建信息显示，界面不空着。
+ * 打包时被内联成字面量；裸 `wrangler dev`（不走 vite）里这两个标识符不存在，直接引用会炸模块。
+ * 所以这里探一下：探不到就留空，由前端退回自己的构建信息显示。
  */
 const PKG_VERSION: string = (() => {
   try {
@@ -2103,8 +2038,8 @@ const PKG_BUILD: string = (() => {
 // ── 主包调用的入口 ──────────────────────────────────────
 
 /**
- * 页面直吐：认领这条路径就返回响应，认领不了返回 null（由主包回落应用）。
- * viewer 由主包算好传进来 —— 主包那边验过 cookie，这次请求是谁由它说了算。
+ * 页面直吐：认领这条路径就返回响应，认领不了返回 null（主包回落应用）。
+ * viewer 由主包算好传进来 —— 它验过 cookie，这次请求是谁由它说了算。
  */
 export async function serveMatrixPage(
   req: Request,
@@ -2125,7 +2060,7 @@ export async function serveMatrixPage(
 }
 
 // ── 给助手工具直接用的一组域函数 ──────────────────────────
-// 工具跑在主包进程里，直接读同一份配置、写同一只桶 —— 不再绕 HTTP、不再签名。
+// 工具跑在主包进程里，直接读同一份配置、写同一只桶 —— 不绕 HTTP、不签名。
 
 export interface MatrixPagesData {
   rev: number;

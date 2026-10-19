@@ -1,11 +1,7 @@
-// 网页矩阵工具：让助手也能建页、改页、连通路、换外观。
-//
-// 它是「外站守则」的执行侧：外站能不能去由认定表说了算 —— 这里不往表里加域名
-// （认可是人的决定），表外的一律如实回报「访客会被门卫页拦下」；伪协议
-// （javascript: / data: / blob:）任何动作都不放行。
-//
-// 矩阵已并回主包，工具直接调 src/matrix/core.ts 的域函数 —— 同进程、同一只桶，
-// 不再绕 HTTP、不再签名。参数不合规时 core 抛 MatrixInputError，这里翻成人话。
+// 网页矩阵工具：建页、改页、连通路、换外观。它是「外站守则」的执行侧：
+// 外站能不能去由认定表说了算 —— 这里不往表里加域名（认可是人的决定），表外如实回报会被门卫拦下；
+// 伪协议（javascript: / data: / blob:）任何动作都不放行。
+// 矩阵已并回主包，工具直接调 src/matrix/core.ts 的域函数（同进程、同一只桶），参数不合规由 core 抛 MatrixInputError。
 
 import { tool } from "ai";
 import { z } from "zod";
@@ -45,10 +41,7 @@ const BLOCKED_SCHEME_RE =
 const ABS_URL_RE = /^(?:https?:)?\/\//i;
 
 /**
- * 落点速记 → core 要的形状。三种写法：
- *   auto           兜底栏（页面末尾的「通路」栏）
- *   anchor:名字    填进正文里名为「名字」的命名锚点
- *   point:12,34    拖拽落点到整页的百分比坐标
+ * 落点速记 → core 要的形状：auto 兜底栏 / anchor:名字 填命名锚点 / point:12,34 百分比坐标。
  * 认不出来的当 auto —— 落点错了顶多难找，不该让整次操作失败。
  */
 function parsePlace(raw?: string): unknown {
@@ -313,8 +306,8 @@ export function matrixTools(ctx: ToolCtx) {
             const rawTo = (a.to ?? "").trim();
             let target: MatrixPage | undefined;
             let note = "";
-            // 伪协议先拦：javascript: 之类不以 // 开头，会漏进站内路径分支，
-            // 被当成「找不到这一页」混过去 —— 所以排在分流之前。
+            // 伪协议先拦：javascript: 之类不以 // 开头，会漏进站内路径分支、被当成「找不到」混过去，
+            // 所以排在分流之前
             if (BLOCKED_SCHEME_RE.test(rawTo))
               return "这条外站地址用的协议不被允许（javascript / data / blob 之类），我不放行。";
             if (ABS_URL_RE.test(rawTo)) {

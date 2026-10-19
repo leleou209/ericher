@@ -1,16 +1,7 @@
-// mail_config：邮件通道的配置（单行表，id 恒为 'main'）。
-//
-// src/mail/smtp.ts 那台内核只管「连上加密服务器、把一封发出去」，它不知道这台机器
-// 该用哪个服务器、哪把钥匙、每天最多寄几封 —— 那些是这台机器的属性，归这张表。
-// 红线同 model/tts/search 几套配置目录：表里只存 secret 的**变量名**（keySecret），
-// 口令本体既不入库、也不回显。
-//
-// 默认值一律 fail-closed：enabled=0、dailyCap 给个保守数。
-// 新部署没配好之前一封都寄不出去，比「按某个来历不明的配置悄悄往外灌邮件」好收拾得多。
-//
-// 每日额度的账（sent_day / sent_count）和 lastSend 也挂在这张表上：
-// 测试发送和（下一轮的）主动消息邮件副本走的是同一个 reserveMailSlot，
-// 两条路各记各的账，就会有一封谁都没记、上限形同虚设。
+// mail_config：邮件通道配置（单行表 id='main'）。smtp.ts 只管发，服务器/钥匙/日额度归这张表。
+// 红线同 model/tts/search：只存 secret 变量名 keySecret，口令本体不入库、不回显。
+// 默认 fail-closed：enabled=0、dailyCap 保守；没配好之前一封都发不出去。
+// 每日额度（sent_day/sent_count）与 lastSend 也在这张表：测试发送与离线副本共用 reserveMailSlot，各记各的账就会漏。
 
 import type { SqlTag } from "../agent/state";
 import { HttpError } from "../shared/httpInput";
@@ -56,11 +47,7 @@ export interface MailConfigView extends MailConfigStored {
 export type MailConfigPatch = Partial<MailConfigStored>;
 
 /**
- * 出厂默认。
- *
- * enabled 关、额度 20：一台没配过邮件的机器就该是这样 —— 想发的人得自己动手开。
- * port/secure 给的是 465 隐式 TLS：那是各家服务商里唯一不需要 STARTTLS 协商
- * 也能保证加密的一档，新手照着填不容易错。
+ * 出厂默认：enabled 关、额度 20；port 465 隐式 TLS（不需要 STARTTLS 协商也能保证加密，新手不易填错）。
  */
 export const DEFAULT_MAIL_CONFIG: MailConfigStored = {
   enabled: false,
@@ -131,12 +118,8 @@ function asStr(v: unknown): string {
 }
 
 /**
- * 地址表文本 → 地址数组。
- *
- * 换行、逗号、分号都算分隔（人在面板上敲哪一种都该得到同一张表）；去空、
- * 按小写去重但保留原写法（本地部分区分大小写，不该被我们改成另一个人）。
- * 这里**不判形状** —— 形状是 assertAddressList 的事，拆成两步是因为
- * 视图要能如实显示半填的表，而保存必须拦下坏值。
+ * 地址表文本 → 数组：换行/逗号/分号都算分隔，去空、按小写去重但保留原写法。
+ * 这里不判形状（assertAddressList 才判）：视图要显示半填的表，保存必须拦坏值。
  */
 export function parseAddressList(text: string): string[] {
   const out: string[] = [];
@@ -184,10 +167,8 @@ export function ensureMailConfigSchema(sql: SqlTag): void {
        say_mail    INTEGER NOT NULL DEFAULT 0,
        inbox_enabled INTEGER NOT NULL DEFAULT 0
      )`;
-  // 记账与 lastSend 三列是「先有配置、后加额度」那类演进最可能落成的地方，
-  // 老库里可能没有：ADD COLUMN 撞上已有的列会抛，报错就当已经有了。
-  // 补列必须带 DEFAULT —— 不写默认值 SQLite 会给老行填 NULL，
-  // 而 NULL 在「今天寄了几封」这里既可能是没寄过、也可能是没这一列，读的人分不清。
+  // 记账三列老库可能没有：ADD COLUMN 撞已有列会抛，报错当已有。
+  // 补列必须带 DEFAULT——否则老行为 NULL，「今天寄了几封」分不清没寄过还是没这列。
   try {
     sql`ALTER TABLE mail_config ADD COLUMN sent_day TEXT NOT NULL DEFAULT ''`;
   } catch {
@@ -203,8 +184,7 @@ export function ensureMailConfigSchema(sql: SqlTag): void {
   } catch {
     /* 已有该列 */
   }
-  // 这两闸都是后加的：老库里没有就得补上，而补出来的默认值必须是「关」——
-  // 升级本身不该顺手把离线副本或收信落库打开。
+  // 这两闸都是后加的：老库补列，默认值必须是「关」——升级本身不该顺手打开离线副本或收信落库。
   try {
     sql`ALTER TABLE mail_config ADD COLUMN say_mail INTEGER NOT NULL DEFAULT 0`;
   } catch {
@@ -247,10 +227,7 @@ function rowToConfig(r: MailRow | null): MailConfigStored {
 }
 
 /**
- * 那个变量在这台机器上配了没有。
- *
- * 只报「有没有」，值本体一眼都不看、更不出去 —— 面板要显示的是「这把钥匙在不在」，
- * 不是「这把钥匙是什么」。
+ * 那个变量配了没有：只报有没有，值本体不看也不出去。
  */
 export function isSecretConfigured(
   env: Record<string, unknown>,
@@ -297,8 +274,7 @@ export function getMailConfigView(
 }
 
 /**
- * 今天（按他的日子算，不按 UTC —— 与「今天主动开口几次」同一把尺）的日期键。
- * 额度的重置点就是它变了的那一刻。
+ * 今天（按他的日子，UTC+8）的日期键；额度重置点就是它变了那一刻。
  */
 export function mailDayKey(now: Date = new Date()): string {
   return new Date(now.getTime() + 8 * 3600_000).toISOString().slice(0, 10);
@@ -312,14 +288,9 @@ function usedToday(r: MailRow | null, day: string): number {
 export type MailQuota = { ok: true } | { ok: false; error: string };
 
 /**
- * 占一格额度。查、判、写三步必须在同一个同步块里跑完。
- *
- * 为什么这么写：这间屋子里两封邮件可以在同一秒并发进来（提醒和测试撞上同一刻）。
- * 中间只要让出一个 tick 去 await，两封读到的都是同一个「今天已寄 N 封」，
- * 于是双双过闸 —— 上限就变成了「同一秒能寄几封看运气」。
- *
- * 占上就不退：sendMail 半路断的时候服务器可能已经收了件，把额度还回去，
- * 同一件事就可能被寄出第二封。宁可少寄一封。
+ * 占一格额度：查、判、写在同一同步块里跑完。
+ * 两封可同秒并发（提醒与测试撞上），中间 await 会让双方读到同一个已寄数、双双过闸。
+ * 占上不退：sendMail 半路断时服务器可能已收件，还额度就可能寄出第二封。宁可少寄一封。
  */
 export function reserveMailSlot(sql: SqlTag, now: Date = new Date()): MailQuota {
   const r = readRow(sql);
@@ -345,11 +316,8 @@ export function recordMailSend(sql: SqlTag, log: MailLastSend): void {
 }
 
 /**
- * 落库前的最后一道形状关。
- *
- * 空值放过：半填的配置是合法的（管理员先存一半再补），发不出去由 send.ts 拦。
- * 不放过的是「存了也永远发不出去」的错值：端口 25 平台就封、地址里带尖括号换行
- * 就能往协议行里插命令 —— 这些留在表里只会变成将来查半天的悬案。
+ * 落库前最后一道形状关。空值放过（半填合法，发不出去由 send.ts 拦）；
+ * 端口 25 平台封、地址带尖括号/换行能插协议命令——这些错值留表里只会变悬案。
  */
 function assertChannelShape(c: MailConfigStored): void {
   if (c.hostname && !HOSTNAME_RE.test(c.hostname))
@@ -361,17 +329,14 @@ function assertChannelShape(c: MailConfigStored): void {
 }
 
 /**
- * 保存：只认白名单那十一格，其余键（含任何口令字段）连读都不读。
- *
- * 白名单写在这里而不是写在各调用方，是因为调用方会增多：HTTP 路由、将来的
- * 工具/脚本。「忘了过滤」不该变成一个能把口令写进配置的口子。
+ * 保存：只认白名单十一格，其余键（含任何口令字段）连读都不读。
+ * 白名单写在这里而非各调用方——「忘了过滤」不该变成把口令写进配置的口子。
  */
 export function saveMailConfig(sql: SqlTag, patch: MailConfigPatch): void {
   ensureMailConfigSchema(sql);
   const cur = rowToConfig(readRow(sql));
   const p = patch ?? {};
-  // 只按名取那十一格（其余键连读都不读），文本一律 String() 兜一层：
-  // 从 RPC 直连进来的脏值该被归一，不该以一个 TypeError 的形式冒到面板上
+  // 只按名取那十一格，文本一律 String() 兜一层：RPC 直连的脏值该被归一，不该以 TypeError 冒到面板
   const txt = (v: unknown, keep: string, max: number): string =>
     v === undefined ? keep : String(v).trim().slice(0, max);
   const next: MailConfigStored = {
@@ -406,12 +371,8 @@ export function saveMailConfig(sql: SqlTag, patch: MailConfigPatch): void {
 }
 
 /**
- * HTTP 边界上的字段闸：白名单挑出十一格，顺手把类型错、端口 25、地址非法
- * 变成 400 和一句人话 —— 状态码在这里还有意义，落库之后就只剩 500 了。
- *
- * 认不出的键（password / pass / smtpPassword / auth 之类）不进 patch。
- * null 和 undefined 当「这一格没给」，不当「清空」：前端表单交空值很常见，
- * 把它当清空会在人没打算改的时候把配置洗掉。
+ * HTTP 边界字段闸：白名单挑十一格，类型错/端口 25/地址非法变成 400 人话。
+ * 认不出的键（password 等）不进 patch；null/undefined 当「没给」而非清空，免得洗掉配置。
  */
 /** 文本那五格：键名写死成联合类型，免得哪天把 port 也当字符串塞进来 */
 const STRING_FIELDS = [
