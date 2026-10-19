@@ -1,0 +1,161 @@
+/* 发件箱 / 收件箱两块面（组件见 MailBoxPanels.tsx；列表行与弹页的壳复用 FormDialog.css）。
+   全部走主题 token，不写死颜色 —— 这套界面是可以换皮的。 */
+
+/* 面头上那一行：标题、常驻事实（开关状态 / 未读数）、刷新挤在同一行，窄屏自动折 */
+.mailbox-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 6px;
+}
+
+.mailbox-title {
+  margin: 0;
+  flex: 0 1 auto;
+}
+
+.mailbox-refresh {
+  margin-left: auto;
+}
+
+/* 行尾那颗常驻标记：成/败、通道开没开、未读几封。
+   不是按钮（点不动），所以不给 cursor，免得人对着它找「按下去会怎样」。 */
+.mailbox-flag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-s);
+  background: var(--yuzhe-bg-soft);
+  color: var(--yuzhe-ink-dim);
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.mailbox-flag.is-bad {
+  border-color: rgba(201, 54, 44, 0.4);
+  color: var(--yuzhe-danger);
+}
+
+.mailbox-flag.is-on {
+  color: var(--yuzhe-ok);
+}
+
+/* 通道没接是「别读错了」的那种提醒，比灰字要紧、比红字不要紧 */
+.mailbox-flag.is-warn {
+  border-color: var(--yuzhe-line-strong);
+  color: var(--yuzhe-ink-strong);
+}
+
+/* 未读点：EntityRow 的标题只收字符串，所以这颗点落在摘要行的头上。
+   已读与否在行尾那颗「标已读 / 标未读」上也写了一遍，不单靠这一点颜色。 */
+.mailbox-dot {
+  display: inline-block;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin: 0 7px 1px 0;
+  border-radius: 50%;
+  background: var(--yuzhe-black);
+  vertical-align: middle;
+}
+
+/* 后端原话：失败原因、正文。整段摆出来，不截、不折成省略号 ——
+   长报文的后半截常常才是真正的原因。 */
+.mailbox-raw {
+  margin: 8px 0 4px;
+  padding: 11px 12px;
+  max-height: 42vh;
+  overflow: auto;
+  background: var(--yuzhe-bg-soft);
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-m);
+  color: var(--yuzhe-ink);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* 收件人逐个列全：一行一个，好复制 */
+.mailbox-list {
+  margin: 6px 0 2px;
+  padding: 0 0 0 18px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mailbox-list li {
+  position: relative;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--yuzhe-ink);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.mailbox-list li::before {
+  content: "";
+  position: absolute;
+  left: -14px;
+  top: 9px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--yuzhe-line-strong);
+}
+
+/* 「只有摘要 / 被裁过 / 只有 HTML」那几条：一句一行，别揉成一段 */
+.mailbox-flags {
+  margin: 6px 0 2px;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.mailbox-flags li {
+  padding: 9px 11px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--yuzhe-ink-strong);
+  background: var(--yuzhe-bg-soft);
+  border-left: 2px solid var(--yuzhe-line-strong);
+  border-radius: var(--yuzhe-r-s);
+}
+
+/* 读不到清单：原话 + 出口就地重试（不刷新整页） */
+.mailbox-error {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0;
+  padding: 11px 12px;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-m);
+  background: var(--yuzhe-bg-soft);
+}
+
+.mailbox-error .err {
+  margin: 0;
+}
+
+.mailbox-error .btn {
+  align-self: flex-start;
+}
+
+@media (max-width: 640px) {
+  .mailbox-refresh {
+    margin-left: 0;
+  }
+  .mailbox-raw {
+    max-height: 32vh;
+  }
+}

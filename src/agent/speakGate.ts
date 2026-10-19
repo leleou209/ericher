@@ -183,3 +183,12 @@ export function mergeSays(says: PendingSay[]): MergedSay[] {
     ids: group.map((g) => g.id),
   }));
 }
+
+/**
+ * 一句主动消息最终落在哪儿。
+ *
+ * 「history / dropped」这两种就是「他此刻没在这句话属于的那一场跟前」——
+ * 邮件副本那一档（见 cowork.ts 的 mailMissedSays）认的正是这个，
+ * 而不是去猜运行时有几条 WebSocket：那个数在这儿既测不到也没法写成用例。
+ */
+export type SayWhere = "live" | "history" | "dropped";

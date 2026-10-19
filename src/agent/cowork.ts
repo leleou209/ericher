@@ -1,3 +1,7 @@
+import { SESSION_RUNNING_MESSAGE } from "../shared/sessionConflict";
+import { chatMemoryBlocks } from "../shared/chatMemoryBlocks";
+import { ChatIngress } from "./adapters/chatIngress";
+import { AskDelivery } from "./adapters/askDelivery";
 // ericher 主体：AIChatAgent + 原生工具调用。
 //
 // 类名 CoworkAgent 必须保持不变 —— DO 存储按类标识派生，改名等于换存储桶，
@@ -10,6 +14,7 @@ import {
 } from "@cloudflare/ai-chat";
 import {
   getCurrentAgent,
+  type AgentContext,
   type Connection,
   type ConnectionContext,
 } from "agents";
@@ -174,9 +179,11 @@ import {
   mergeSays,
   pruneSays,
   quietEndsAt,
+  type SayWhere,
 } from "./speakGate";
 import {
   COMMON_TYPE_ID,
+  cardPermFallback,
   createGuestType as createGuestTypeRow,
   ensureGuestTypesSchema,
   findGuestTypeByPassword,
@@ -189,6 +196,7 @@ import {
   defaultCommonGuestTypeInfo,
   disabledGuestTypeInfo,
   guestHasTool,
+  type GuestCardPerm,
   type GuestTypeInfo,
   type GuestTypeInput,
   type GuestTypePatch,
@@ -269,6 +277,33 @@ import {
   updateSearchConfig,
   type SearchConfig,
 } from "./searchConfigs";
+import {
+  getMailConfigView,
+  saveMailConfig,
+  type MailConfigPatch,
+  type MailConfigView,
+} from "../mail/store";
+import { sendConfiguredMail, type MailJob, type MailSendResult } from "../mail/send";
+import {
+  INGEST_MAX_BYTES,
+  MAIL_PREVIEW_MAX,
+  findMailIn,
+  getEml,
+  insertMailIn,
+  listMailIn,
+  listMailOut,
+  mailInUnread,
+  putEml,
+  setMailInRead,
+  toHex,
+  type EmlStore,
+} from "../mail/mailbox";
+import { parseIncoming } from "../mail/inbound";
+import type {
+  MailIngestResult,
+  MailInRow,
+  MailOutRow,
+} from "../mail/mailboxTypes";
 import {
   defaultTheme,
   deleteThemeSet,
@@ -412,6 +447,20 @@ function messageText(m: UIMessage): string {
 }
 
 export class CoworkAgent extends AIChatAgent<Env, ChatState> {
+  private chatIngress?: ChatIngress;
+  constructor(ctx: AgentContext, env: Env) {
+    super(ctx, env);
+    // AIChatAgent 在其构造器包装 onMessage；此处必须位于 super 之后，
+    // 才能在 SDK 持久化整份历史和启动模型之前拦住重复提交。
+    const dispatch = this.onMessage.bind(this);
+    const ingress = this.chatIngress = new ChatIngress(this.db);
+    this.onMessage = async (connection, message) => {
+      if (typeof message !== "string") return dispatch(connection, message);
+      await ingress.dispatch(connection, message,
+        (conn, frame) => dispatch(conn as Connection, frame), () => this.messages);
+    };
+  }
+
   initialState: ChatState = INITIAL_STATE;
 
   /** 只保留最近 200 条消息在 SQLite 里，避免无限增长 */
@@ -1969,6 +2018,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     const target = getSession(this.db, id);
     if (!target) return null;
 
+    // 旧场共用一间屋，运行中不能替换历史；导航不应隐式中断原任务。
+    if (this._activeStreamId || this.chatIngress?.running)
+      throw new Error(SESSION_RUNNING_MESSAGE);
     this.settleTurn();
     this.snapshotSession();
     await this.clearConversation();
@@ -2229,18 +2281,25 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
         })
       : await this.schedule(when, "fireReminder", { id });
 
-    insertReminder(this.db, {
-      id,
-      sessionId,
-      what: input.what.slice(0, 300),
-      at: input.at,
-      every: input.every,
-      scheduleId: handle.id,
-      created: new Date().toISOString(),
-      urgent,
-      mode,
-      title: mode === "new" ? (input.title || "").slice(0, 24) : "",
-    });
+    try {
+      insertReminder(this.db, {
+        id,
+        sessionId,
+        what: input.what.slice(0, 300),
+        at: input.at,
+        every: input.every,
+        scheduleId: handle.id,
+        created: new Date().toISOString(),
+        urgent,
+        mode,
+        title: mode === "new" ? (input.title || "").slice(0, 24) : "",
+      });
+    } catch (e) {
+      // 业务行没落库就把刚建好的调度撤掉：不然留下一个指向不存在 id 的孤立任务，
+      // 到点白醒一次，还白占 DO 的写行配额
+      await this.cancelSchedule(handle.id).catch(() => {});
+      throw e;
+    }
     return getReminder(this.db, id)!;
   }
 
@@ -2292,8 +2351,23 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
    * 他要的不是被叫醒，是别忘了 —— 所以我记着，等天亮再说。
    */
   async fireReminder(payload: { id: string }): Promise<void> {
+    // 同一条提醒的两次唤醒只投一次：durable queue 会重投，实例重建的自愈也会补投。
+    // 「已投递」的账要等说完话才落（下面 markReminderFired），中间那段重叠就是重复提醒。
+    if (this._firingReminders.has(payload.id)) return;
+    this._firingReminders.add(payload.id);
+    try {
+      await this.fireReminderOnce(payload.id);
+    } finally {
+      this._firingReminders.delete(payload.id);
+    }
+  }
+
+  /** 在途的提醒 id：两次唤醒只投一次 */
+  private _firingReminders = new Set<string>();
+
+  private async fireReminderOnce(id: string): Promise<void> {
     this.ensureReminders();
-    const r = getReminder(this.db, payload.id);
+    const r = getReminder(this.db, id);
     if (!r || r.status !== "pending") return;
 
     const end = quietEndsAt();
@@ -2352,19 +2426,59 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   /** SDK 到点叫我：把攒着的说出去。 */
   async flushSays(): Promise<void> {
+    // 两次唤醒共用一次投递：speak 是 await 的，其间第二次 flush 若各读一遍 pending，
+    // 同一批话会被说两遍 —— markSaysDelivered 要等说完才落账，挡不住这个窗口
+    return (this._flushingSays ??= this.deliverSays().finally(() => {
+      this._flushingSays = null;
+    }));
+  }
+
+  /** 在途的一次投递：并发的 flush 都接同一个 promise */
+  private _flushingSays: Promise<void> | null = null;
+
+  private async deliverSays(): Promise<void> {
     this.ensureSpeak();
     const pending = listPendingSays(this.db);
     if (!pending.length) return;
+    // 没进他当前那一场对话流的那些句话：他此刻不在跟前的证据，攒起来一起寄一份
+    const missed: string[] = [];
     for (const m of mergeSays(pending)) {
+      let where: SayWhere;
       try {
-        await this.speak(m.sessionId, m.line);
+        where = await this.speak(m.sessionId, m.line);
       } catch {
         // 说失败就先留着，下次 flush 再试 —— 宁可重复一次，也不能把它弄丢
         return;
       }
+      if (where !== "live") missed.push(m.line);
       markSaysDelivered(this.db, m.ids);
     }
     pruneSays(this.db);
+    if (missed.length) await this.mailMissedSays(missed);
+  }
+
+  /**
+   * 人不在界面前时，把这一批主动消息另寄一份到邮箱。
+   *
+   * 「不在界面前」用的是**这句有没有进他当前那一场**这个当场就看得出的事实，
+   * 没有去赌运行时的 WebSocket 计数：那个数我在这里既测不到也没法写成用例，
+   * 拿它当闸只会得到一个「静默不寄、也没人能证明为什么」的黑盒。
+   *
+   * 一批一封（与界面上「攒一分半再说」同一条理由：连珠炮的邮件只会让人关掉这一档）。
+   * 寄不动不打扰他：邮件这一路的失败只进发件箱流水，不改界面那条的账。
+   */
+  private async mailMissedSays(lines: string[]): Promise<void> {
+    // 没话可寄就别占额度：这一句不是防御性检查，是「空的一批也去拨号」这个真形状
+    if (!lines.length) return;
+    if (!getMailConfigView(this.db, this.secretBag).sayMail) return;
+    const subject =
+      lines.length === 1
+        ? "ericher：有一条话你没在界面前听到"
+        : `ericher：有 ${lines.length} 条话你没在界面前听到`;
+    const text = `${lines.map((l) => `- ${l}`).join("\n")}\n\n` +
+      `（这些是我在你没开着界面的时候想说的，界面上那条也照样记在你那一场里了。）`;
+    const r = await this.sendMailViaOwnerRoom({ subject, text, source: "say" });
+    if (!r.ok) console.warn("[mail] 主动消息的邮件副本没寄出", r.error);
   }
 
   /**
@@ -2376,7 +2490,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
    * 局部的事不该串到别场去，串过去只会让人莫名其妙。丢的只是这句话本身，
    * 提醒自己的账照记（fireReminder / flushSays 该走的收尾一步不少），不影响别的提醒。
    */
-  private async speak(sessionId: string, line: string): Promise<void> {
+  private async speak(sessionId: string, line: string): Promise<SayWhere> {
     const msg: UIMessage = {
       id: crypto.randomUUID(),
       role: "assistant",
@@ -2384,18 +2498,23 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     };
 
     const target = sessionId ? getSession(this.db, sessionId) : null;
-    if (target && sessionId === this.state.activeSession) {
+    // 落点在这里就定下来，不再重读 state：persistMessages 是 await 的，
+    // 期间他可能换了场，重算会把「当场进了流」的那句误判成没进而多寄一封
+    const where: SayWhere =
+      target && sessionId === this.state.activeSession ? "live" : target ? "history" : "dropped";
+    if (where === "live") {
       await this.persistMessages([...this.messages, msg]);
-    } else if (target) {
+    } else if (where === "history") {
       appendSessionMessage(this.db, sessionId, msg);
       touchSession(this.db, sessionId, new Date().toISOString());
     } else {
       // 那场会话已经删了：这句话不落到任何一场头上。原先这里会塞进当前对话，
       // 结果就是一句本属于别场的话凭空冒出来（串场）。宁可丢，不串。
       console.warn("[speak] 目标会话已删，这句话不落任何一场", { sessionId });
-      return;
+      return "dropped";
     }
     this.notify(line.slice(0, 140));
+    return where;
   }
 
   /** 今天她主动开口了几次。面板上给他看：数字大了，他会知道该关掉几条盯梢。 */
@@ -2683,6 +2802,12 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       writeSelfCore: (content) => agent.writeSelfCore(content),
       writeSelfDemand: (content) => agent.writeSelfDemand(content),
       notify: (text) => agent.notify(text),
+      // 发信：配置、额度、fail-closed 判定全在 src/mail 里，这里只是把工具接上；
+      // 场屋那间必须绕回主屋取配置（见 sendMailViaOwnerRoom），账上写明是工具寄的
+      sendMail: (job) => agent.sendMailViaOwnerRoom({ ...job, source: "tool" }),
+      mailOutbox: (limit) => agent.mailOutbox(limit),
+      mailInbox: (limit) => agent.mailInbox(limit),
+      mailInboxRead: (id) => agent.mailInboxRead(id),
       enqueueVector: (entry) => agent.enqueueVector(entry),
       maintenance: (system, user) => agent.maintenance(system, user),
       drawTiers: () => agent.fetchDrawTiers(),
@@ -2792,58 +2917,27 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     // 每条都标「学到多久了」：记忆写下来的那天是真的，不等于今天还是真的，
     // 时间标出来，我才有依据决定是先确认一句还是直接当实情讲；
     // 会变又久没核对的再挂个 ⚠️（标记规则见 memoryHitLines）。
-    let memoryBlock = "";
-    // 还没对上、又还新鲜的疑问（挂在提示词里，最多 3 条、7 天后不再提）。
-    // 人也是这样：心里存着个没弄明白的事，下次聊到就顺口问一句，而不是专门开个会去对账。
-    let doubtBlock = "";
-    // 管理员公开的 + 这位客人名下的，检索回来放这一块。只有来客那间会填，主人那边永远是空的。
-    let publicBlock = "";
-    if (userText) {
-      ensureMemorySchema(this.db);
-      try {
-        doubtBlock = conflictBlock(this.db);
-      } catch {
-        // 疑问块是锦上添花：表还没补好列之类的问题，不该让这轮说不了话
-      }
-      // 档位把「记忆」关掉的来客：工具已经移除（tools/index.ts），自动注入
-      // 也一并关 —— 说明、注册、注入三处必须同一口径，不然模型看着注入块
-      // 还会顺嘴承认「我记下了」，那是一条根本没落库的记忆
-      const memoryPermOff =
-        !!this.state.guestType && !guestHasTool(this.state.guestType, "memory");
-      if (guest && !memoryPermOff) {
-        // 来客那间走「受限读」：管理员公开过的 + 他名下的，过滤在主人那间的 SQL 里完成。
-        // 主人那间没醒、或一笔都没翻到时，退回本地这一场的存底兜底 ——
-        // 刚记下的话当场就接不上，比什么都伤（没报名的客人他的记录只在本地有）。
-        let lines: string[] = [];
-        try {
-          lines = await this.guestReadableOf(userText);
-        } catch {
-          // 主人那间没醒，用本地兜底
-        }
-        if (!lines.length) {
-          const hits = await searchMemories(this.db, this.env, userText, 5, {
-            cache: this.recallCache,
-          }).catch(() => []);
-          lines = memoryHitLines(hits);
-        }
-        if (lines.length) {
-          publicBlock =
-            "\n\n## 记忆库里翻到的（管理员公开的 + 这位客人名下的）\n" +
-            lines.join("\n");
-        }
-      } else {
-        // 统一检索入口：人屋本尊走本地，场屋本地加主屋各搜一遍合并去重 ——
-        // 别的场记下的结论，这边聊到相关话题也该想得起来
-        const hits = await this.searchMemoriesMerged(userText, 5).catch(
-          () => [],
-        );
-        if (hits.length) {
-          memoryBlock =
-            "\n\n## 相关记忆（检索自长期记忆库）\n" +
-            memoryHitLines(hits).join("\n");
-        }
-      }
-    }
+    // 检索相关记忆注入系统提示词。判定口径全在 chatMemoryBlocks：
+    // 档位把「记忆」关掉的来客三个块一个都不给 —— 工具已移除、说明已剪掉，
+    // 注入块要是还在，模型就会照着一条根本没落库的记忆承认「我记下了」。
+    if (userText) ensureMemorySchema(this.db);
+    const { memoryBlock, doubtBlock, publicBlock } = await chatMemoryBlocks(
+      {
+        // 还没对上、又还新鲜的疑问（最多 3 条、7 天后不再提）
+        doubts: () => conflictBlock(this.db),
+        // 来客走受限读：管理员公开的 + 这位客人名下的，过滤在主人那间的 SQL 里完成
+        guestLines: (q) => this.guestReadableOf(q),
+        // 主人那间没醒、或一笔都没翻到时退回本地存底
+        local: (q) =>
+          searchMemories(this.db, this.env, q, 5, { cache: this.recallCache }),
+        // 人屋本尊走本地，场屋本地加主屋各搜一遍合并去重
+        merged: (q) => this.searchMemoriesMerged(q, 5),
+        hitLines: (hits) => memoryHitLines(hits),
+      },
+      userText,
+      guest,
+      !this.state.guestType || guestHasTool(this.state.guestType, "memory"),
+    );
 
     // 上下文压缩：很久以前的部分折成摘要，只把近处原样发出去。
     // 存储不受影响 —— this.messages 永远是完整原文，recall 和会话回顾照样翻得到。
@@ -2925,24 +3019,27 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
     // 这一轮被谁叫停：aborted 的轮次没有流级错误，只剩「结果未知」一个状态字。
     // 信号带 reason 就照抄，不带也留一行 —— 至少分得清「没被叫停」和「被叫停」
-    options?.abortSignal?.addEventListener(
-      "abort",
-      () => {
-        const why = options?.abortSignal?.reason;
-        const reason =
-          why instanceof Error
-            ? `${why.name}: ${why.message}`
-            : String(why ?? "(无 reason)");
-        console.warn("[stream] 轮次被叫停", {
-          session: turnSession,
-          reason,
-        });
-        // 死因攒批：轮尾翻成人话写进 state.turnErrors，界面上才看得见「为什么停」，
-        // 而不是只剩一个「中断」的状态字
-        this.turnCapture = { kind: "aborted", abortReason: reason };
-      },
-      { once: true },
-    );
+    const aborted = () => {
+      const why = options?.abortSignal?.reason;
+      const reason =
+        why instanceof Error
+          ? `${why.name}: ${why.message}`
+          : String(why ?? "(无 reason)");
+      console.warn("[stream] 轮次被叫停", {
+        session: turnSession,
+        reason,
+      });
+      // 死因攒批：轮尾翻成人话写进 state.turnErrors，界面上才看得见「为什么停」，
+      // 而不是只剩一个「中断」的状态字
+      this.turnCapture = { kind: "aborted", abortReason: reason };
+    };
+    // 叫停在流起来之前就发生的（Esc 抢跑）：abort 事件不会再补，死因得当场记下，
+    // 否则界面只剩一个「中断」，查不出是谁叫的停
+    if (options?.abortSignal?.aborted) aborted();
+    // 轮子一结束就把监听摘掉：不摘的话，一场结束后才飘来的 abort
+    // 会改写这一轮已经结算好的 turnCapture
+    const dropAbortListener = () =>
+      options?.abortSignal?.removeEventListener("abort", aborted);
 
     const result = streamText({
       model: resolved.model,
@@ -2965,6 +3062,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       stopWhen: stepCountIs(MAX_STEPS),
       abortSignal: options?.abortSignal,
       onFinish: (r) => {
+        // 先进收尾就把 abort 监听摘掉：这一轮已经开始结算，之后才飘来的叫停
+        // 不该再改写 turnCapture（否则下一句「为什么停」是别人的死因）
+        dropAbortListener();
         // 轮尾收账：这一轮的留痕整块一行落库，再去跑外面的收尾
         this.endVisitorBatch();
         // 上下文占用回传前端：这一轮烧了多少、窗口还剩多宽，聊天头部直接画出来。
@@ -3001,10 +3101,18 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
           url?: string;
           responseBody?: unknown;
         };
-        const body =
-          typeof e?.responseBody === "string"
-            ? e.responseBody.slice(0, 1500)
-            : JSON.stringify(e?.responseBody ?? null).slice(0, 1500);
+        let body: string;
+        try {
+          body = (
+            typeof e?.responseBody === "string"
+              ? e.responseBody
+              : JSON.stringify(e?.responseBody ?? null)
+          ).slice(0, 1500);
+        } catch {
+          // 响应体里带循环引用时 stringify 自己会抛：在 onError 里再抛一次，
+          // 这一轮的死因就彻底查无实据了 —— 宁可留一句「无法序列化」
+          body = "(响应体无法序列化)";
+        }
         console.error(
           "[stream] 流级错误：",
           `${e?.name ?? "Error"}: ${e?.message ?? String(error)}`,
@@ -3025,12 +3133,18 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
           url: e?.url,
           body,
         };
+        dropAbortListener();
       },
       // 输出上限跟着生效的配置走 —— 每家厂商的墙不一样高，管理员按自己那家填。
       // 没配就回到 32K：兼容层不认识 DeepSeek 这类第三方模型名，会兜底限到 4096
       // 输出 token，长思考加正文根本不够用，流「正常结束」但话说到一半就被掐断。
       maxOutputTokens: resolved.maxOutput,
     });
+
+    // 监听挂在流建起来之后：streamText 同步就拒（配置/校验错）时，
+    // 不会留下一个永远没人摘的 abort 监听
+    if (!options?.abortSignal?.aborted)
+      options?.abortSignal?.addEventListener("abort", aborted, { once: true });
 
     // 开口之前那一段静默对等在外面的人来说和卡住没区别（见 think.ts）。
     // 挂在 waitUntil 上：它自己按节拍醒，谁也不等它，这一轮答慢答快都与它无关。
@@ -3748,7 +3862,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     this.askWaiters.delete(id);
     waiter(
       "用户超时未回答（600 秒）。请基于现有信息自行决策并继续；" +
-        "用户后续补充的回答将以新消息形式到达。",
+        "用户可在核对后自行补充回答。",
     );
     return true;
   }
@@ -3756,11 +3870,11 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   /**
    * 收卡 + 喂答案。answer 空串 = 先不答。
    * delivered=false 表示那张卡已经过期（超时已放行、或这间屋重启过）：卡照收，
-   * 但答案没能回喂给挂起的工具 —— 前端得知道，好把话退回当普通消息发，
+   * 但答案没能回喂给挂起的工具 —— 前端得知道，保留答案供用户自行决定，
    * 否则那句回答会在「已送达」的假象里凭空消失。
    */
   answerAsk(id: string, answer = ""): { delivered: boolean; state: ChatState } {
-    const delivered = this.resolveAsk(id, answer);
+    const delivered = new AskDelivery(this.db).deliver(id, answer, () => this.resolveAsk(id, answer));
     const asks = (this.state.asks || []).filter((a) => a.id !== id);
     this.patchState({ asks });
     return { delivered, state: this.state };
@@ -4646,22 +4760,22 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
-   * 一张卡在所属类型档下有没有某项长期权益（记事本 / 云盘 / 公开）。
+   * 一张卡在所属类型档下有没有某项长期权益（记事本 / 云盘 / 公开 / 矩阵）。
    * 内置通用档名册上查无此档 —— 就地按全开算；卡没了、档被删都按没有算。
    * 路由层的权益接线（notes / upload 放行）隔着 DO 走这一条。
    */
   async cardPerm(
     cardId: string,
-    perm: "permNotes" | "permFiles" | "permPublic",
+    perm: GuestCardPerm,
   ): Promise<boolean> {
     const card = getUserCard(this.db, cardId);
     if (!card) return false;
     // 档位权益现查名册（内置通用档也在名册里，管理员关掉就真的关掉）
     const row = getGuestType(this.db, card.typeId);
     if (row) return row[perm];
-    // 兜底分两路：内置档的行缺失（异常）时维持历史全开 —— 那是门口最后一把
-    // 钥匙，不能把在场的长期客人锁在门外；别的档核实不了就按没有算。
-    return card.typeId === COMMON_TYPE_ID;
+    // 查无此档的兜底口径见 guestTypes.ts 的 cardPermFallback：
+    // 老三项维持历史全开，矩阵权一律按没有算
+    return cardPermFallback(card.typeId, perm);
   }
 
   /**
@@ -4835,6 +4949,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   /** 主屋推来的：目录/指派变了，手里那 30 秒缓存作废，下一句话重取 */
   dropCatalogCache(): void {
+    this._catalogGen++;
     this._activeCatalog.clear();
   }
 
@@ -4998,6 +5113,268 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     }
   }
 
+  // ── 邮件通道（mail_config，见 mail/store.ts）──────────────────
+  // 表归主人那间，一行 'main'。红线同 model/tts/search 几套目录：里面只有 secret 的
+  // 变量名，口令本体既不入库也不回显（发的那一刻才从 env 取，见 mail/send.ts）。
+  // 每日额度的账也记在同一行上 —— 测试发送和（下一轮）fireReminder / flushSays
+  // 在人不在时寄的那份副本走的是同一个 reserveMailSlot，两条路不会各记各的账。
+
+  /** env 当「变量名 → 值」的袋子用：只用来判某个 secret 配没配，值不外流 */
+  private get secretBag(): Record<string, unknown> {
+    return this.env as unknown as Record<string, unknown>;
+  }
+
+  /** 面板读：十一格可写字段 + keyAvailable（那把钥匙在不在）+ lastSend */
+  async mailConfigGet(): Promise<MailConfigView> {
+    return getMailConfigView(this.db, this.secretBag);
+  }
+
+  /**
+   * 保存：入参已由路由过了一遍白名单闸（mail/store.ts 的 parseMailConfigInput），
+   * 这里再按名取那十一格 —— 谁从别处调进来多塞一个 password 也写不进表。
+   */
+  async mailConfigSave(patch: MailConfigPatch): Promise<MailConfigView> {
+    if (this.name !== OWNER_AGENT) throw new Error("邮件配置只在主屋那一行");
+    saveMailConfig(this.db, patch);
+    return getMailConfigView(this.db, this.secretBag);
+  }
+
+  /**
+   * 试一封：收件人可省（省了就发配置里那个默认收件地址）。
+   * 失败不吞：内核那句「认证被拒绝」「STARTTLS 不通」原样回到面板 ——
+   * 寄不出去却说「已发送」，管理员会一直等那封永远不来的邮件。
+   */
+  async mailTestSend(to?: string): Promise<MailSendResult> {
+    if (this.name !== OWNER_AGENT) throw new Error("邮件配置只在主屋那一行");
+    return sendConfiguredMail(this.db, this.secretBag, {
+      to,
+      subject: "ericher 接待台：测试邮件",
+      text: "收到这封，说明 SMTP 通道、口令变量和每日额度都是通的。",
+      source: "panel",
+    });
+  }
+
+  /**
+   * 人亲自动笔寄一封（信箱页上那个「寄出去」）。
+   *
+   * 与 mailTestSend 的分别是文案谁写：那一条是固定两句验通道，这一条是人家自己
+   * 写的正文 —— 所以必填检查放在**服务端**，不靠界面上的按钮禁用：从别处直连 RPC
+   * 进来的一条空信也该被拦下，而且拦下时**不占额度**（sendConfiguredMail 里
+   * 额度在拨号前才占，这里连它都不进）。
+   */
+  async mailComposeSend(input: {
+    to?: string;
+    subject?: string;
+    text?: string;
+  }): Promise<MailSendResult> {
+    if (this.name !== OWNER_AGENT) throw new Error("写信只认主屋那行配置");
+    const subject = String(input?.subject ?? "").trim().slice(0, 200);
+    const text = String(input?.text ?? "").trim().slice(0, 20_000);
+    const to = String(input?.to ?? "").trim() || undefined;
+    if (!subject || !text)
+      return { ok: false, error: "主题和正文都得有内容，这次没发" };
+    return sendConfiguredMail(this.db, this.secretBag, {
+      to,
+      subject,
+      text,
+      source: "panel",
+    });
+  }
+
+  /**
+   * 工具那条路的发信：只认主屋那一行配置。
+   *
+   * 配置表和每日额度都存在主屋的库里，场屋（`default--某场`）自己那张是空表 ——
+   * 就地读必然读出「enabled 没开」，管理员配好的通道被悄悄绕过（fetchDrawTiers
+   * 注释里写的是同一个坑）。都转交主屋还有第二件事：额度只有一本账，不会因为
+   * 多开几场就各记各的、每天多寄好几份。
+   */
+  async mailSendForAgent(job: MailJob): Promise<MailSendResult> {
+    if (this.name !== OWNER_AGENT) throw new Error("发信只认主屋那行配置");
+    return sendConfiguredMail(this.db, this.secretBag, job);
+  }
+
+  /** 场屋发信转交主屋；主屋没应答就照实说没寄出，绝不假装成功 */
+  async sendMailViaOwnerRoom(job: MailJob): Promise<MailSendResult> {
+    if (this.name === OWNER_AGENT) return this.mailSendForAgent(job);
+    try {
+      return await this.ownerRoom().mailSendForAgent(job);
+    } catch (e) {
+      return {
+        ok: false,
+        error: `主屋没有应答，这一封没寄出（${String((e as Error)?.message ?? e).slice(0, 120)}）`,
+      };
+    }
+  }
+
+  /**
+   * 主屋那间的替身。
+   *
+   * 凡「配置表与流水只存在主屋库里」的东西（发信、发件箱、收件箱）都得经它一手，
+   * 场屋就地读必然读到自己的空表 —— 见 fetchDrawTiers 那个同型的坑。
+   */
+  private ownerRoom(): CoworkAgent {
+    return this.env.COWORK_AGENT.get(
+      this.env.COWORK_AGENT.idFromName(OWNER_AGENT),
+    ) as unknown as CoworkAgent;
+  }
+
+  /**
+   * 发件箱：最近寄出去的每一封，成与败都在。
+   *
+   * 读的是主屋那一本账（流水只在那儿落），场屋要看得见就转过去；
+   * 主屋没应答回一个空列表 —— 发件箱读不到是一句界面提示，不该把整块面板带崩。
+   */
+  async mailOutbox(limit?: number): Promise<MailOutRow[]> {
+    if (this.name !== OWNER_AGENT) {
+      try {
+        return await this.ownerRoom().mailOutbox(limit);
+      } catch {
+        return [];
+      }
+    }
+    return listMailOut(this.db, limit);
+  }
+
+  /** 云盘那一格有没有：原件存不存得下全看它（没配桶时行照记、原件不落） */
+  private get mailBucket(): EmlStore | null {
+    const b = this.env.MEMORY_BUCKET;
+    return b ? (b as unknown as EmlStore) : null;
+  }
+
+  /**
+   * 收件箱：行、未读数、以及这台机器开没开收信。
+   *
+   * 三件事分开回，是因为界面上必须让人分清「还没接收件通道」与「通道开着但没人寄」——
+   * 都显示成「收件箱是空的」会让人白等，也会让人误关掉闸。
+   */
+  async mailInbox(
+    limit?: number,
+  ): Promise<{ rows: MailInRow[]; unread: number; enabled: boolean }> {
+    if (this.name !== OWNER_AGENT) {
+      try {
+        return await this.ownerRoom().mailInbox(limit);
+      } catch {
+        return { rows: [], unread: 0, enabled: false };
+      }
+    }
+    return {
+      rows: listMailIn(this.db, limit),
+      unread: mailInUnread(this.db),
+      enabled: getMailConfigView(this.db, this.secretBag).inboxEnabled,
+    };
+  }
+
+  /**
+   * 读一封的正文。
+   *
+   * 能拿到原件就重新过一遍解析给全文，拿不到才退回行上那段摘要 —— 而且把
+   * 「这是摘要」写进 note：让人以为读到全文，比不给他读更糟。
+   */
+  async mailInboxRead(id: string): Promise<{
+    row: MailInRow | null;
+    text: string;
+    note: string;
+  }> {
+    if (this.name !== OWNER_AGENT) {
+      try {
+        return await this.ownerRoom().mailInboxRead(id);
+      } catch {
+        return { row: null, text: "", note: "主屋没有应答" };
+      }
+    }
+    const row = findMailIn(this.db, id);
+    if (!row) return { row: null, text: "", note: "收件箱里没有这一封" };
+    const raw = await getEml(this.mailBucket, row.emlKey);
+    if (!raw)
+      return {
+        row,
+        text: row.preview,
+        note: row.emlKey
+          ? "原件已经取不到了，下面这段是当时存下的摘要"
+          : "这封当时就没落原件（太大或这台机器没配云盘），下面这段是摘要",
+      };
+    const parsed = parseIncoming(raw);
+    return {
+      row,
+      text: parsed.text,
+      note: parsed.truncated
+        ? "正文过长，这里给到截断处为止"
+        : parsed.htmlOnly
+          ? "这封只有 HTML，下面是剥了标签的文字"
+          : "",
+    };
+  }
+
+  /** 标已读/未读。行不在就 null —— 不替它造一个「成功」 */
+  async mailInboxOpen(
+    id: string,
+    read: boolean,
+  ): Promise<{ id: string; read: boolean } | null> {
+    if (this.name !== OWNER_AGENT) return this.ownerRoom().mailInboxOpen(id, read);
+    const r = setMailInRead(this.db, id, read);
+    return r ? { id: r.id, read: r.read } : null;
+  }
+
+  /**
+   * 收一封进来：Cloudflare 的 email() 投递与面板上的「喂一封」都落到这里。
+   *
+   * 顺序是有意的 —— 先算指纹、再落原件、最后写行；写行时如果发现这一封已经在，
+   * 就把刚写进去的原件抹掉。反过来（先写行再写件）失败时会留下一行指不到件的账，
+   * 那种行在界面上点不开，比缺一封更难解释。
+   */
+  async mailIngest(raw: string): Promise<MailIngestResult> {
+    if (this.name !== OWNER_AGENT) throw new Error("收件箱只认主屋那本账");
+    if (!getMailConfigView(this.db, this.secretBag).inboxEnabled)
+      return {
+        ok: false,
+        duplicate: false,
+        error: "收信落库是关着的（配置里 inboxEnabled 没开）",
+      };
+    const bytes = new TextEncoder().encode(raw ?? "");
+    if (!bytes.byteLength)
+      return { ok: false, duplicate: false, error: "空的报文" };
+    if (bytes.byteLength > INGEST_MAX_BYTES)
+      return {
+        ok: false,
+        duplicate: false,
+        error: `这一封 ${(bytes.byteLength / 1048576).toFixed(1)} MiB，超过 ${(INGEST_MAX_BYTES / 1048576).toFixed(0)} MiB 就不收了（解析它是公网任何人都能敲的 CPU）`,
+      };
+    // now 一定要给：报文里没有 Date（或坏掉）时落进「此刻」，
+    // 不传的话解析器按约定退到 epoch —— 那一封会被排在收件箱最末尾、
+    // 原件也存进 mail/in/1970-01-01/ 这种没人找得到的目录里
+    const parsed = parseIncoming(bytes, Date.now());
+    const hash = toHex(
+      await crypto.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer),
+    );
+    const id = crypto.randomUUID();
+    const emlKey = await putEml(this.mailBucket, parsed.at, id, bytes);
+    const row: MailInRow = {
+      id,
+      at: parsed.at,
+      from: parsed.from,
+      fromName: parsed.fromName,
+      to: parsed.to,
+      subject: parsed.subject,
+      bytes: bytes.byteLength,
+      read: false,
+      hasAttachment: parsed.hasAttachment,
+      preview: parsed.text.slice(0, MAIL_PREVIEW_MAX),
+      emlKey,
+    };
+    const bucket = this.mailBucket;
+    const inserted = insertMailIn(this.db, row, hash, (k) => {
+      // 被挤出保留数的旧信：行没了，原件跟着删；这一步不 await —— 它在 DO 的
+      // 收尾里跑，卡在这儿只会让收信这条入口白白多等一次网络往返
+      void bucket?.delete(k).catch(() => {});
+    });
+    if (!inserted) {
+      if (emlKey) await bucket?.delete(emlKey).catch(() => {});
+      return { ok: false, duplicate: true, error: "这一封已经在收件箱里了" };
+    }
+    return { ok: true, row: inserted };
+  }
+
   // ── 全局美术主题（theme_config，见 themeConfig.ts）───────────
   // 皮肤/名字头像/弹页/主题包全在这份文档里。**读全局可见**（门口/Gate 也要
   // 看得到皮肤），写只有管理员（路由层总闸 + 这里的 isOwnerRoom 守卫）。
@@ -5116,6 +5493,8 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     boolean,
     { at: number; cat: ActiveCatalog | null }
   >();
+  /** 缓存代次：作废就升一代，在途的旧响应回来时认得出自己已经过期 */
+  private _catalogGen = 0;
   /** 来问过目录的屋名单（只主屋用）：目录一改就点名推它们作废缓存 */
   private _catalogServedRooms = new Set<string>();
   /**
@@ -5144,6 +5523,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     }
     const c = this._activeCatalog.get(deep);
     if (c && Date.now() - c.at < ACTIVE_CONFIG_CACHE_MS) return c.cat;
+    const gen = this._catalogGen;
     // 跨间调用偶发抖动时重试一次：目录是聊天的命根子 —— 抖一下就回落旧链，
     // 而这台机器旧链多半没配 key，等于一句话都发不出去；多等一跳比哑火强。
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -5167,7 +5547,10 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
         // 缓存一个 null，后面 30 秒里每句话都会白跑一趟还照样失败
         if (cat) {
           diagKeyMissing(cat);
-          this._activeCatalog.set(deep, { at: Date.now(), cat });
+          // 取的过程中目录被改过（主屋已推来作废）：这一份已经是旧的，
+          // 照常交给本轮用，但不回填 —— 否则旧目录带着新时间戳再驻 30 秒
+          if (gen === this._catalogGen)
+            this._activeCatalog.set(deep, { at: Date.now(), cat });
         } else {
           this._catalogDiag = "主屋目录为空或没有生效的模型条目";
         }

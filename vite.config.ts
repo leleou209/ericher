@@ -39,6 +39,27 @@ export default defineConfig({
   },
   root: path.resolve(import.meta.dirname, "web"),
   plugins: [
+    {
+      name: "inline-startup-css",
+      apply: "build",
+      transformIndexHtml: {
+        order: "post",
+        handler(html, context) {
+          // 入口 CSS 内联，弱网不必再等一次样式请求才能画出启动/门禁界面。
+          // 可选页面的 CSS 仍随对应动态 chunk 加载，不内联整套应用。
+          return html.replace(/<link\b[^>]*rel="stylesheet"[^>]*>/g, tag => {
+            const href = /href="([^"]+)"/.exec(tag)?.[1];
+            const asset = href ? context.bundle?.[href.replace(/^\/+/, "")] : undefined;
+            if (!asset || asset.type !== "asset") return tag;
+            const css = typeof asset.source === "string" ? asset.source : Buffer.from(asset.source).toString("utf8");
+            // 内容已内联，移除原 link：既不重复下载，也不占 Vite 的依赖预加载表
+            // （否则聊天框架加载时又被追加一次同样的样式请求）。
+            void tag;
+            return `<style data-startup-css>${css}</style>`;
+          });
+        },
+      },
+    },
     ...(isTest
       ? []
       : [

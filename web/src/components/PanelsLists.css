@@ -1,0 +1,26 @@
+/* 记忆 / 人脉两个面板改用「列表 + 详情弹页」之后的补充样式。
+   列表行与弹页本体的视觉都在 FormDialog.css 里，这里只补两处套进原有面板时才需要的：
+   一是嵌套在既有浅底块里的那层描边要去掉，二是挂在行右侧的下拉不该按满宽算。
+   全部走主题 token，不写死颜色 —— 和原语同一套，这套界面是可以换皮的。 */
+
+/* tag 门槛那块本来就自带浅底和描边：行只留分隔线，别再套一层框 */
+.tag-gates .entity-list {
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
+.tag-gates .entity-row {
+  padding: 8px 0;
+}
+
+/* 门槛档位的下拉挂在行右侧：.field 的满宽会把整行撑开，这里让它按内容收 */
+.entity-row .gate-select {
+  width: auto;
+  max-width: 160px;
+}
+
+/* 摘要里的徽标（「内置类型」这类）跟着文字排，别把 nowrap 的摘要挤掉 */
+.entity-summary .tag {
+  margin-left: 6px;
+}

@@ -1,3 +1,4 @@
+import { request as req, requestResponse, json, assertApiSuccess as bizOk, ApiError } from "./http";
 // Worker `/api/*` 的薄封装。
 //
 // 为什么不用 agents 的客户端 RPC（`agent.call()`）：那要求服务端方法带 `@callable()`
@@ -9,6 +10,8 @@ import type {
   ChatState,
   DrawConfig,
   FeedbackSummary,
+  MailConfigPatch,
+  MailConfigView,
   MemEntry,
   ModelEntry,
   ModelFormat,
@@ -52,94 +55,9 @@ import type {
   ApprovedSite,
   LinkPlace,
 } from "./types";
-import {
-  defaultTheme,
-  type ThemeConfig,
-  type ThemeConfigPatch,
-  type ThemeSet,
-} from "./theme";
+import { defaultTheme, type ThemeConfig, type ThemeConfigPatch, type ThemeSet } from "./theme";
 
-interface ApiOk<T> {
-  ok: true;
-  data: T;
-}
-interface ApiErr {
-  ok: false;
-  error: string;
-}
-
-/**
- * 身份过期时的回调。门禁挂上它 —— 收到 401 就把人请回门口重新验证。
- *
- * 不挂的话，token 过期后界面看着还是开着的，只是每个请求都在悄悄失败：
- * 会话列表空着、面板点不动，而人不会想到「我该重新登录」，只会以为坏了。
- */
-let onUnauthorized: (() => void) | null = null;
-
-export function setUnauthorizedHandler(fn: (() => void) | null): void {
-  onUnauthorized = fn;
-}
-
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(path, init);
-  const text = await r.text();
-  // 不是每个响应都是 JSON：网关的 502、路由没配好时回的 HTML 都会走到这里。
-  // 直接 JSON.parse 的话，抛出来的是「Unexpected token <」—— 这行字谁也读不懂，
-  // 而它真正想说的是「服务端没按约定回话」。
-  let body: unknown = null;
-  if (text) {
-    try {
-      body = JSON.parse(text) as unknown;
-    } catch {
-      body = null;
-    }
-  }
-  // 登录接口的 401 是「密码错」，不是「身份过期」—— 那种情况下人本来就在门口站着
-  if (r.status === 401 && path !== "/api/auth") {
-    onUnauthorized?.();
-    const msg = (body as ApiErr | null)?.error || "登录已过期，请重新验证";
-    throw new Error(msg);
-  }
-  if (!r.ok) {
-    const msg =
-      (body as ApiErr | null)?.error ||
-      `${r.status} ${r.statusText || "请求失败"}`;
-    throw new Error(msg);
-  }
-  if (
-    body &&
-    typeof body === "object" &&
-    "ok" in (body as object) &&
-    "data" in (body as object)
-  ) {
-    return (body as ApiOk<T>).data;
-  }
-  return body as T;
-}
-
-const json = (method: string, payload: unknown): RequestInit => ({
-  method,
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(payload),
-});
-
-/**
- * 业务失败的兜底：有的端点把失败装在 200 响应里回（{ ok:false, error }），
- * req 只看 HTTP 状态，看不出这种。这里再翻一遍，翻到了就抛成异常，
- * 调用方就统一走 try/catch，不用每处都记得检查 ok 字段。
- */
-function bizOk<T>(body: unknown, fallback: string): T {
-  if (
-    body &&
-    typeof body === "object" &&
-    "ok" in (body as object) &&
-    (body as { ok: unknown }).ok === false
-  ) {
-    const e = (body as { error?: unknown }).error;
-    throw new Error(typeof e === "string" && e ? e : fallback);
-  }
-  return body as T;
-}
+export { setUnauthorizedHandler } from "./http";
 
 /** 与后端 `src/auth.ts` 的 Role 对齐：user 只能聊天，admin 才有面板与写权限 */
 export type Role = "admin" | "user";
@@ -155,7 +73,7 @@ export const api = {
   login: (pw: string) => req<Identity>("/api/auth", json("POST", { pw })),
 
   /** 已登录时返回当前身份；未登录抛错（401），门禁用这个判断是否已放行 */
-  me: () => req<Identity>("/api/me"),
+  me: (signal?: AbortSignal) => req<Identity>("/api/me", { signal }),
 
   logout: () => fetch("/api/logout", { method: "POST" }),
 
@@ -300,7 +218,7 @@ export const api = {
       "/api/delete",
       json("POST", { folder }),
     ),
-  upload: (file: File, folder = "") => {
+  upload: (file: File, folder = "", signal?: AbortSignal) => {
     const form = new FormData();
     form.append("file", file);
     if (folder) form.append("folder", folder);
@@ -309,6 +227,7 @@ export const api = {
       {
         method: "POST",
         body: form,
+        signal,
       },
     );
   },
@@ -321,8 +240,8 @@ export const api = {
    * native：这张图前端会以原图（file part）直接放进消息 —— 服务端就不必再请
    * 视觉模型转述一遍了；只有前端没敢内联的图（太大 / 格式冷门）才走转述。
    */
-  attach: (key: string, name: string, native?: boolean) =>
-    req<Attachment>("/api/attach", json("POST", { key, name, native })),
+  attach: (key: string, name: string, native?: boolean, signal?: AbortSignal) =>
+    req<Attachment>("/api/attach", { ...json("POST", { key, name, native }), signal }),
 
   // ── 会话（元信息与消息都在后端 DO 里）──
   sessions: () => req<SessionMeta[]>("/api/sessions"),
@@ -534,6 +453,7 @@ export const api = {
     permNotes?: boolean;
     permFiles?: boolean;
     permPublic?: boolean;
+    permMatrix?: boolean;
   }) => req<GuestType>("/api/guest-types", json("POST", input)),
   guestTypePatch: (input: {
     id: string;
@@ -544,6 +464,7 @@ export const api = {
     permNotes?: boolean;
     permFiles?: boolean;
     permPublic?: boolean;
+    permMatrix?: boolean;
     active?: boolean;
   }) => req<GuestType>("/api/guest-types", json("PATCH", input)),
   guestTypeDelete: (id: string) =>
@@ -659,18 +580,7 @@ export const api = {
    * 这种包装不回来，导出的人得当场知道。
    */
   matrixPackExport: async (): Promise<{ blob: Blob; missing: string[] }> => {
-    const r = await fetch("/api/matrix/pack");
-    if (r.status === 401) onUnauthorized?.();
-    if (!r.ok) {
-      const text = await r.text().catch(() => "");
-      let err = "";
-      try {
-        err = (JSON.parse(text) as ApiErr).error || "";
-      } catch {
-        /* 不是 JSON 就当没有说明 */
-      }
-      throw new Error(err || `${r.status} 导出失败`);
-    }
+    const r = await requestResponse("/api/matrix/pack");
     const raw = r.headers.get("X-Matrix-Pack-Missing-Paths") || "";
     let missing: string[] = [];
     if (raw) {
@@ -879,6 +789,27 @@ export const api = {
       "保存搜索配置失败",
     ),
 
+  // ── 邮件（SMTP 发信账号；仅管理员）──
+  /** 读这一份配置：keyAvailable 与 lastSend 是后端算出来的只读事实 */
+  mailConfig: () => req<MailConfigView>("/api/mail/config"),
+  /**
+   * 保存。提交的就是那九格可写字段，请求体里没有口令 ——
+   * 口令住在 keySecret 所指的 Worker secret 里，浏览器从来没见过它。
+   */
+  mailConfigSave: (patch: MailConfigPatch) =>
+    req<MailConfigView>("/api/mail/config", json("POST", patch)),
+  /**
+   * 发一封测试邮件：to 不给就寄到配置里那个默认收件地址。
+   * 后端失败回的是 200 里的 {ok:false,error}，req() 已经把它抛成 ApiError，
+   * 所以这条 promise 落定就是真发出去了；调用方接住错的原话显示，别当成功。
+   */
+  mailTest: (to?: string) =>
+    req<{ ok: true }>("/api/mail/test", json("POST", { to })),
+  // 人亲自动笔那一封：契约同 mailTest —— {ok:true} / {ok:false,error}，
+  // 失败那句是后端原话（req 会把它抛成 ApiError，界面整段显示，不截不改写）
+  mailSend: (job: { to?: string; subject: string; text: string }) =>
+    req<{ ok: true }>("/api/mail/send", json("POST", job)),
+
   // ── 主题（门面装点；读是免鉴权的，写只有管理员）──
   themeGet: async (): Promise<ThemeConfig> => {
     const r = bizOk<{ theme?: ThemeConfig }>(
@@ -926,13 +857,7 @@ export const api = {
     ),
   /** 导出当前主题包（zip 下载） */
   themeExportPack: async (): Promise<Blob> => {
-    const r = await fetch("/api/theme/pack");
-    if (!r.ok) {
-      const j = (await r.json().catch(() => null)) as { error?: unknown } | null;
-      throw new Error(
-        typeof j?.error === "string" && j?.error ? j.error : "导出主题包失败",
-      );
-    }
+    const r = await requestResponse("/api/theme/pack");
     return r.blob();
   },
 
@@ -988,14 +913,10 @@ export const api = {
     voice: string,
   ): Promise<{ blob: Blob } | { why: string }> => {
     try {
-      const r = await fetch("/api/tts", json("POST", { text, voice }));
-      if (r.ok) return { blob: await r.blob() };
-      const j = (await r.json().catch(() => null)) as { why?: unknown } | null;
-      return {
-        why: typeof j?.why === "string" && j.why ? j.why : "云端这会儿不通",
-      };
-    } catch {
-      return { why: "没连上网络" };
+      const r = await requestResponse("/api/tts", json("POST", { text, voice }));
+      return { blob: await r.blob() };
+    } catch (error) {
+      return { why: error instanceof ApiError ? error.message : "没连上网络" };
     }
   },
 

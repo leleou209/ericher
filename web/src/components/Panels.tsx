@@ -28,8 +28,39 @@ import {
 } from "../lib/types";
 import { Icon, type IconName } from "./Icons";
 import { zoomIn } from "./Lightbox";
+import {
+  EntityAddButton,
+  EntityNote,
+  EntityRow,
+  FormDialog,
+  FormRow,
+  FormSection,
+  useDraft,
+} from "./FormDialog";
+import {
+  DEFAULT_MEMORY_SHELF,
+  MAX_MEMORY_CONTENT,
+  contentSnippet,
+  gateLevelLabel,
+  memoryContentTooLong,
+  memoryMissingFields,
+  memoryPayloadOf,
+  tagStatSummary,
+  type MemoryDraft,
+} from "../lib/memoryForm";
+import {
+  MAX_PERSON_CHARS,
+  contactMissingFields,
+  contactPayloadOf,
+  hasGuestPerson,
+  isGuestPerson,
+  personNameTooLong,
+  personSummary,
+  type ContactDraft,
+} from "../lib/contactForm";
 import { ageText, fmtWhen, needReview, type Patch } from "./PanelsShared";
 import "./Panels.css";
+import "./PanelsLists.css";
 
 // 对外契约：旧 Panels.tsx 的全部非组件导出，一个不少地在这里再导出
 // （Messages.tsx 从这里拿 toolMeta，Pages.tsx 从这里拿 deviceId）。
@@ -52,6 +83,22 @@ const sensRank = (s: string) => SENSITIVITIES.indexOf(s as Sensitivity);
 // 内置类型名：AI 写记忆时会自动把 type 塞进 tags —— 给这类 tag 开门，
 // 等于把一个类型整个放出去，比普通 tag 的门宽得多。开门前该多看一眼。
 const TYPE_TAGS = new Set(["insight", "fact", "update", "book", "image"]);
+
+/** 新增记忆的起手草稿：架子落在「知识」，和旧的那根输入条同一个默认值 */
+const blankMemoryDraft = (): MemoryDraft => ({
+  content: "",
+  shelf: DEFAULT_MEMORY_SHELF,
+  tags: "",
+  volatility: "stable",
+});
+
+/** 人脉的起手草稿：人还没名字，正文也空着 */
+const blankContactDraft = (): ContactDraft => ({
+  person: "",
+  content: "",
+  tags: "",
+  volatility: "stable",
+});
 
 function Row({
   children,
@@ -284,9 +331,15 @@ export function MemoryPanel() {
   const [q, setQ] = useState("");
   // 语义检索的请求定序：只有最新一次请求的响应才准许落库（见 load）
   const reqSeq = useRef(0);
-  const [draft, setDraft] = useState("");
-  const [draftShelf, setDraftShelf] = useState<Shelf>("knowledge");
   const [err, setErr] = useState("");
+  // 写一条记忆改到弹页里做：这里编辑的是「打开弹页那一刻拍下的草稿」，按下记下才提交。
+  // hook 一律留在函数体最上面 —— 放到条件分支或早退之后，React 会报
+  // "Rendered more hooks than during the previous render"，面板就停在读取中不动了。
+  const memForm = useDraft<MemoryDraft>(blankMemoryDraft());
+  const [memDialog, setMemDialog] = useState(false);
+  const [memErr, setMemErr] = useState("");
+  const [savingMem, setSavingMem] = useState(false);
+
   // 已作废的记忆默认藏起来：它们不再参与检索，摆在正列表里只会让人以为它们还算数
   const [showRetired, setShowRetired] = useState(false);
   // 只看该复核的：复核是一件事，不该在几百条里靠眼睛找
@@ -376,14 +429,39 @@ export function MemoryPanel() {
     return () => window.clearTimeout(t);
   }, [load]);
 
-  const add = async () => {
-    if (!draft.trim()) return;
+  const patchMem = (p: Partial<MemoryDraft>) =>
+    memForm.setDraft((prev) => ({ ...prev, ...p }));
+
+  const openAddMem = () => {
+    memForm.reset(blankMemoryDraft());
+    setMemErr("");
+    setMemDialog(true);
+  };
+
+  const closeAddMem = () => {
+    setMemDialog(false);
+    setMemErr("");
+  };
+
+  const saveMem = async () => {
+    if (savingMem) return;
+    const missing = memoryMissingFields(memForm.draft);
+    if (missing.length) {
+      setMemErr(missing.map((m) => m.message).join("；"));
+      return;
+    }
+    setSavingMem(true);
+    setMemErr("");
     try {
-      await api.memoryAdd({ content: draft.trim(), shelf: draftShelf });
-      setDraft("");
+      await api.memoryAdd(memoryPayloadOf(memForm.draft));
+      // 成功后先回填列表再关窗：列表摆的是落库后的真值，不做乐观更新
       await load();
+      setMemDialog(false);
     } catch (e) {
-      setErr((e as Error).message);
+      // 后端校验不过原样摆在弹页里，不关窗
+      setMemErr((e as Error).message);
+    } finally {
+      setSavingMem(false);
     }
   };
 
@@ -391,7 +469,7 @@ export function MemoryPanel() {
     // 删除不是作废 —— 条目直接没了。先问一句，别让手滑把一条还作数的记忆永久抹掉
     if (
       !window.confirm(
-        `永久删除这条记忆？「${m.content.slice(0, 40)}${m.content.length > 40 ? "…" : ""}」删了就找不回来了。`,
+        `永久删除这条记忆？「${contentSnippet(m.content)}」删了就找不回来了。`,
       )
     )
       return;
@@ -593,46 +671,55 @@ export function MemoryPanel() {
             一类一类地开，
             不用一条条点公开。一般只建议开到「不重要」：门槛往上提，放出去的是一整类，不是一条。
           </p>
-          {!tagData && <p className="empty-sm">读取中…</p>}
-          {tagData &&
-            tagData.stats.map((s) => (
-              <div className="tag-gate" key={s.tag}>
-                <span className="tag">{s.tag}</span>
-                {TYPE_TAGS.has(s.tag) && (
-                  <span
-                    className="tag warn"
-                    title="这是记忆的内置类型名：AI 写每条记忆都会自动带上它。开这道门等于把整个类型按量级放出去，比普通 tag 的门宽得多 —— 想清楚再开"
-                  >
-                    内置类型
-                  </span>
-                )}
-                <span className="meta">
-                  {s.n} 条（不重要 {s.trivial} · 一般 {s.normal} · 重要{" "}
-                  {s.important} · 机密 {s.secret}
-                  {s.topsecret ? ` · 绝密 ${s.topsecret}（永不出门）` : ""}）
-                </span>
-                <select
-                  value={gateLevelOf(s.tag)}
-                  onChange={(e) => setGate(s.tag, e.target.value)}
-                  title="这个 tag 允许出门的最高量级；「不公开」是关门"
-                  aria-label={`tag ${s.tag} 的公开门槛`}
-                >
-                  <option value="">不公开</option>
-                  {TAG_GATE_LEVELS.map((lv) => (
-                    <option key={lv} value={lv}>
-                      {SENSITIVITY_LABEL[lv]}及以下
-                    </option>
-                  ))}
-                </select>
-              </div>
-            ))}
-          {tagData && !tagData.stats.length && (
-            <p className="empty-sm">
+          {!tagData && <EntityNote>读取中…</EntityNote>}
+          {!!tagData?.stats.length && (
+            <div className="entity-list">
+              {tagData.stats.map((s) => (
+                <EntityRow
+                  key={s.tag}
+                  title={s.tag}
+                  summary={
+                    <>
+                      {tagStatSummary(s)}
+                      {TYPE_TAGS.has(s.tag) && (
+                        <span
+                          className="tag warn"
+                          title="这是记忆的内置类型名：AI 写每条记忆都会自动带上它。开这道门等于把整个类型按量级放出去，比普通 tag 的门宽得多 —— 想清楚再开"
+                        >
+                          内置类型
+                        </span>
+                      )}
+                    </>
+                  }
+                  right={
+                    <select
+                      className="field gate-select"
+                      value={gateLevelOf(s.tag)}
+                      onChange={(e) => setGate(s.tag, e.target.value)}
+                      title="这个 tag 允许出门的最高量级；「不公开」是关门"
+                      aria-label={`tag ${s.tag} 的公开门槛`}
+                    >
+                      <option value="">不公开</option>
+                      {TAG_GATE_LEVELS.map((lv) => (
+                        <option key={lv} value={lv}>
+                          {gateLevelLabel(lv)}
+                        </option>
+                      ))}
+                    </select>
+                  }
+                />
+              ))}
+            </div>
+          )}
+          {!!tagData && !tagData.stats.length && (
+            <EntityNote>
               还没有带 tag 的记忆 —— 写记忆时打上标签，这里就有门可开。
-            </p>
+            </EntityNote>
           )}
         </div>
       )}
+
+      <EntityAddButton label="写一条新记忆" onClick={openAddMem} />
 
       <ul className="rows">
         {(kind === "all"
@@ -670,32 +757,88 @@ export function MemoryPanel() {
         )}
       </ul>
 
-      <div className="inline-form sticky">
-        <input
-          className="field"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder="写一条新记忆…"
-        />
-        <select
-          className="field"
-          value={draftShelf}
-          onChange={(e) => setDraftShelf(e.target.value as Shelf)}
+      {/* 新增弹页：写完按下「记下」才进库。量级 / 公开 / 会不会变这些仍在行上点，
+          它们是天天要动的事，不该为它们开一次窗 */}
+      {memDialog && (
+        <FormDialog
+          wide
+          title="写一条新记忆"
+          subtitle="一条一件事。存进来以后就在上面这个列表里，量级、公开、作废都在行上随手改。"
+          saveLabel="记下"
+          busy={savingMem}
+          error={memErr}
+          dirty={memForm.dirty(memForm.draft)}
+          onClose={closeAddMem}
+          onSave={() => void saveMem()}
         >
-          {SHELVES.map((s) => (
-            <option key={s} value={s}>
-              {SHELF_LABEL[s]}
-            </option>
-          ))}
-        </select>
-        <button
-          className="btn btn-primary btn-sm"
-          onClick={add}
-          disabled={!draft.trim()}
-        >
-          记下
-        </button>
-      </div>
+          <FormSection title="正文">
+            <FormRow
+              label="要记住的事"
+              wide
+              hint={
+                memoryContentTooLong(memForm.draft.content)
+                  ? `这一条写了 ${memForm.draft.content.trim().length} 字：服务端单条只留前 ${MAX_MEMORY_CONTENT} 字，后面会被截掉，建议拆成几条`
+                  : "谁、发生了什么、从什么时候算起 —— 一句说得清的事就够一条"
+              }
+            >
+              <textarea
+                className="field"
+                rows={4}
+                placeholder="写一条新记忆…"
+                value={memForm.draft.content}
+                onChange={(e) => patchMem({ content: e.target.value })}
+              />
+            </FormRow>
+          </FormSection>
+
+          <FormSection title="归置">
+            <FormRow label="架子" hint="书架上摆在哪一格，翻的时候按这一格筛">
+              <select
+                className="field"
+                value={memForm.draft.shelf}
+                onChange={(e) => patchMem({ shelf: e.target.value as Shelf })}
+                aria-label="记忆架子"
+              >
+                {SHELVES.map((s) => (
+                  <option key={s} value={s}>
+                    {SHELF_LABEL[s]}
+                  </option>
+                ))}
+              </select>
+            </FormRow>
+            <FormRow
+              label="会不会变"
+              hint="说的是他现在怎么样就选「会变」，过一阵会提醒复核；说他一直如此选「稳定」"
+            >
+              <select
+                className="field"
+                value={memForm.draft.volatility}
+                onChange={(e) =>
+                  patchMem({
+                    volatility: e.target.value as MemoryDraft["volatility"],
+                  })
+                }
+                aria-label="会不会变"
+              >
+                <option value="stable">稳定</option>
+                <option value="volatile">会变</option>
+              </select>
+            </FormRow>
+            <FormRow
+              label="标签"
+              hint="逗号、顿号或空格分开。「按 tag 公开」那道门就是按这里的名字开的，写准一点"
+            >
+              <input
+                className="field"
+                placeholder="workflow、硬件"
+                value={memForm.draft.tags}
+                onChange={(e) => patchMem({ tags: e.target.value })}
+              />
+            </FormRow>
+          </FormSection>
+        </FormDialog>
+      )}
+
       {err && <p className="err">{err}</p>}
     </div>
   );
@@ -1267,9 +1410,14 @@ export function ContactPanel() {
   );
   const [who, setWho] = useState<string | null>(null);
   const [items, setItems] = useState<MemEntry[]>([]);
-  const [draft, setDraft] = useState("");
-  const [newWho, setNewWho] = useState("");
   const [err, setErr] = useState("");
+  // 记一条关于某人的事改到弹页里做：编辑的是「打开弹页那一刻拍下的草稿」，按下记下才提交。
+  // hook 必须留在函数体最上面 —— 这个面板有一句 `if (who) return …` 的早退，
+  // 放到它后面就会报 "Rendered more hooks than during the previous render"，面板停在读取中。
+  const contactForm = useDraft<ContactDraft>(blankContactDraft());
+  const [contactDialog, setContactDialog] = useState(false);
+  const [contactErr, setContactErr] = useState("");
+  const [savingContact, setSavingContact] = useState(false);
   const [showRetired, setShowRetired] = useState(false);
   // 来客一天来好几拨，人脉列表很快被「来客·X」淹没 —— 给个开关把他们拢到一起看
   const [onlyGuests, setOnlyGuests] = useState(false);
@@ -1370,17 +1518,43 @@ export function ContactPanel() {
     if (who) await loadItems(who, showRetired);
   };
 
-  const add = async () => {
-    const target = (who || newWho).trim();
-    if (!target || !draft.trim()) return;
+  const patchContact = (p: Partial<ContactDraft>) =>
+    contactForm.setDraft((prev) => ({ ...prev, ...p }));
+
+  /** 新增与「关于某个人的第一条」共用同一份草稿：从谁那一行点进来，名字就带着走 */
+  const openAddContact = () => {
+    contactForm.reset({ ...blankContactDraft(), person: who || "" });
+    setContactErr("");
+    setContactDialog(true);
+  };
+
+  const closeAddContact = () => {
+    setContactDialog(false);
+    setContactErr("");
+  };
+
+  const saveContact = async () => {
+    if (savingContact) return;
+    const missing = contactMissingFields(contactForm.draft);
+    if (missing.length) {
+      setContactErr(missing.map((m) => m.message).join("；"));
+      return;
+    }
+    setSavingContact(true);
+    setContactErr("");
     try {
-      await api.memoryAdd({ content: draft.trim(), person: target });
-      setDraft("");
+      await api.memoryAdd(contactPayloadOf(contactForm.draft));
+      const target = contactForm.draft.person.trim();
+      // 回填名单与这个人的条目之后再关窗：列表摆的是落库后的真值，不做乐观更新
       if (who) await loadItems(who);
       else setWho(target);
       await loadPeople();
+      setContactDialog(false);
     } catch (e) {
-      setErr((e as Error).message);
+      // 后端校验不过原样摆在弹页里，不关窗
+      setContactErr((e as Error).message);
+    } finally {
+      setSavingContact(false);
     }
   };
 
@@ -1388,7 +1562,7 @@ export function ContactPanel() {
     // 和记忆面板同一条规矩：删除是永久的，先问一句再动手
     if (
       !window.confirm(
-        `永久删除关于${who}的这条记忆？「${m.content.slice(0, 40)}${m.content.length > 40 ? "…" : ""}」删了就找不回来了。`,
+        `永久删除关于${who}的这条记忆？「${contentSnippet(m.content)}」删了就找不回来了。`,
       )
     )
       return;
@@ -1396,6 +1570,98 @@ export function ContactPanel() {
     if (who) await loadItems(who);
     await loadPeople();
   };
+
+  // 弹页在两种进入方式里是同一个：名单下面「新记一个人」要填名字，
+  // 从某人页里点进来名字已经带着，只留正文与归置那几格
+  const contactDialogNode = contactDialog && (
+    <FormDialog
+      wide
+      title={who ? `记一条关于${who}的事` : "新记一个人"}
+      subtitle={
+        who
+          ? "存进来就在下面这个列表里；公开、量级、作废这些仍在行上点。"
+          : "先给人立个户口，再写下第一条关于他的事 —— 同一个称呼反复用，人才翻得起来。"
+      }
+      saveLabel="记下"
+      busy={savingContact}
+      error={contactErr}
+      dirty={contactForm.dirty(contactForm.draft)}
+      onClose={closeAddContact}
+      onSave={() => void saveContact()}
+    >
+      {!who && (
+        <FormSection title="这个人">
+          <FormRow
+            label="姓名 / 称呼"
+            hint={
+              personNameTooLong(contactForm.draft.person)
+                ? `称呼写了 ${contactForm.draft.person.trim().length} 字：服务端单条只留前 ${MAX_PERSON_CHARS} 字，后面会被截掉`
+                : "和记忆里已有的写法保持一致，别同一个人记成两个名字"
+            }
+          >
+            <input
+              className="field"
+              placeholder="人物姓名 / 称呼"
+              value={contactForm.draft.person}
+              onChange={(e) => patchContact({ person: e.target.value })}
+            />
+          </FormRow>
+        </FormSection>
+      )}
+
+      <FormSection title="正文">
+        <FormRow
+          label="要记住的事"
+          wide
+          hint={
+            memoryContentTooLong(contactForm.draft.content)
+              ? `这一条写了 ${contactForm.draft.content.trim().length} 字：服务端单条只留前 ${MAX_MEMORY_CONTENT} 字，后面会被截掉，建议拆成几条`
+              : "关于他的这一件事，一句说得清就够一条"
+          }
+        >
+          <textarea
+            className="field"
+            rows={4}
+            placeholder="关于他的一条记忆…"
+            value={contactForm.draft.content}
+            onChange={(e) => patchContact({ content: e.target.value })}
+          />
+        </FormRow>
+      </FormSection>
+
+      <FormSection title="归置">
+        <FormRow
+          label="会不会变"
+          hint="说的是他现在怎么样就选「会变」，过一阵会提醒复核；说他一直如此选「稳定」"
+        >
+          <select
+            className="field"
+            value={contactForm.draft.volatility}
+            onChange={(e) =>
+              patchContact({
+                volatility: e.target.value as ContactDraft["volatility"],
+              })
+            }
+            aria-label="会不会变"
+          >
+            <option value="stable">稳定</option>
+            <option value="volatile">会变</option>
+          </select>
+        </FormRow>
+        <FormRow
+          label="标签"
+          hint="逗号、顿号或空格分开。「按 tag 公开」那道门就是按这里的名字开的，写准一点"
+        >
+          <input
+            className="field"
+            placeholder="近况、家里"
+            value={contactForm.draft.tags}
+            onChange={(e) => patchContact({ tags: e.target.value })}
+          />
+        </FormRow>
+      </FormSection>
+    </FormDialog>
+  );
 
   if (who) {
     return (
@@ -1424,6 +1690,10 @@ export function ContactPanel() {
           />
           连已作废的也显示
         </label>
+        <EntityAddButton
+          label={`记一条关于${who}的事`}
+          onClick={openAddContact}
+        />
         <ul className="rows">
           {items.map((m) => (
             <MemRow
@@ -1444,21 +1714,7 @@ export function ContactPanel() {
             </li>
           )}
         </ul>
-        <div className="inline-form sticky">
-          <input
-            className="field"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder={`记一条关于${who}的事…`}
-          />
-          <button
-            className="btn btn-primary btn-sm"
-            onClick={add}
-            disabled={!draft.trim()}
-          >
-            记下
-          </button>
-        </div>
+        {contactDialogNode}
         {err && <p className="err">{err}</p>}
       </div>
     );
@@ -1466,7 +1722,7 @@ export function ContactPanel() {
 
   return (
     <div className="panel-body">
-      {people.some((p) => p.person.startsWith("来客·")) && (
+      {hasGuestPerson(people) && (
         <label className="check-line">
           <input
             type="checkbox"
@@ -1476,55 +1732,34 @@ export function ContactPanel() {
           只看来客
         </label>
       )}
-      <ul className="rows">
-        {(onlyGuests
-          ? people.filter((p) => p.person.startsWith("来客·"))
-          : people
-        ).map((p) => (
-          <Row key={p.person}>
-            <button
-              className="link"
-              onClick={() => {
+      <EntityAddButton label="新记一个人" onClick={openAddContact} />
+      {!!people.length && (
+        <div className="entity-list">
+          {(onlyGuests
+            ? people.filter((p) => isGuestPerson(p.person))
+            : people
+          ).map((p) => (
+            <EntityRow
+              key={p.person}
+              title={p.person}
+              summary={personSummary(p.n)}
+              onEdit={() => {
                 // 先把上一个人的记忆清掉：留着的话，新的一进来会先顶着旧数据，
                 // 标题上那个「N 条」就成了别人的数字
                 setItems([]);
                 setWho(p.person);
               }}
-            >
-              {p.person} <span className="meta">{p.n} 条</span>
-            </button>
-          </Row>
-        ))}
-        {!people.length && (
-          <li className="empty-sm">
-            {loadingPeople ? "读取中…" : "还没有归属到具体人物的记忆"}
-          </li>
-        )}
-      </ul>
-
-      <div className="inline-form sticky col">
-        <input
-          className="field"
-          value={newWho}
-          onChange={(e) => setNewWho(e.target.value)}
-          placeholder="人物姓名 / 称呼"
-        />
-        <div className="inline-form">
-          <input
-            className="field"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="关于他的一条记忆…"
-          />
-          <button
-            className="btn btn-primary btn-sm"
-            onClick={add}
-            disabled={!newWho.trim() || !draft.trim()}
-          >
-            记下
-          </button>
+            />
+          ))}
         </div>
-      </div>
+      )}
+      {!people.length && (
+        <EntityNote>
+          {loadingPeople ? "读取中…" : "还没有归属到具体人物的记忆"}
+        </EntityNote>
+      )}
+
+      {contactDialogNode}
       <p className="meta pad">
         联系人就是记忆库的人脉入口：同一条记忆在「记忆」里按分类看，在这里按人看。
       </p>

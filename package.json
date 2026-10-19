@@ -15,7 +15,15 @@
     "types": "wrangler types",
     "tail": "wrangler tail",
     "typecheck": "tsc -b",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run build && node scripts/check-startup-bundle.mjs",
+    "test:web-encoding": "node scripts/test-web-encoding.mjs",
+    "test:chat-recovery": "npm run build && node scripts/test-chat-recovery.mjs",
+    "test:weak-network": "npm run build && node scripts/test-weak-network.mjs",
+    "probe:email": "node scripts/probe-email.mjs",
+    "feed:mail": "node scripts/feed-mail.mjs",
+    "fixture:weak-network": "node scripts/start-weak-network-fixture.mjs",
+    "fixture:weak-network:stop": "node scripts/stop-weak-network-fixture.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.118",

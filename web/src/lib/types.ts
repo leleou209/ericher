@@ -506,7 +506,12 @@ export interface UsageReport {
 }
 
 /** 四个顶层页面：对话 / 笔记本 / 回想 / 设置 */
-export type ViewKey = "chat" | "note" | "memory-session" | "settings";
+export type ViewKey =
+  | "chat"
+  | "note"
+  | "memory-session"
+  | "mailbox"
+  | "settings";
 
 /** 谁写的。user = 管理员，assistant = ericher 的笔迹；共用一个本子，但笔迹分得开 */
 type NoteAuthor = "user" | "assistant";
@@ -618,6 +623,12 @@ export interface GuestType {
   permFiles: boolean;
   /** 长期权益：公开内容与公开文件（凭身份卡解锁） */
   permPublic: boolean;
+  /**
+   * 长期权益：网页矩阵的全量管理权（给了就是整面：页面、连线、外观、
+   * 外站认定表、打包/装备，不拆子权限）。
+   * 可选是刻意的：老后端不回这一格，读不到就按「没有这个权」算（`?? false`）。
+   */
+  permMatrix?: boolean;
   /** 停用后这个口令进不来，配置保留 */
   active: boolean;
   created: string;
@@ -784,6 +795,42 @@ export interface SearchConfig {
   keySecret: string;
 }
 
+/** 最后一次发信的回执（形状照后端，字段一个不加不减） */
+export type MailLastSend = NonNullable<MailConfigView["lastSend"]>;
+
+/**
+ * 邮件（SMTP 发信账号）：后端算好的那一份视图，单条。
+ * 界面上永远不出现口令 —— `keySecret` 是 Worker secret 的变量名，口令本体不进浏览器。
+ * `keyAvailable` 与 `lastSend` 是只读事实，不由这里提交。
+ */
+export interface MailConfigView {
+  enabled: boolean;
+  hostname: string;
+  port: number;
+  /** true = 465/997 隐式 TLS；false = 587 起步但必须 STARTTLS 成功 */
+  secure: boolean;
+  username: string;
+  /** Worker secret 的变量名，不是口令本身 */
+  keySecret: string;
+  /** 发件地址 */
+  from: string;
+  /** 默认收件地址（管理员自己的邮箱） */
+  to: string;
+  dailyCap: number;
+  /** 后端算出来的只读事实：那个变量在这台机器上配没配 */
+  keyAvailable: boolean;
+  lastSend: { at: string; ok: boolean; error: string; to: string } | null;
+}
+
+/**
+ * 保存时提交的那九格（其余是只读事实，不该由界面回传）。
+ * 从 MailConfigView 上 Pick 出来：名字与后端对不上就编译不过，抄不出第二套拼法。
+ */
+export type MailConfigPatch = Pick<
+  MailConfigView,
+  "enabled" | "hostname" | "port" | "secure" | "username" | "keySecret" | "from" | "to" | "dailyCap"
+>;
+
 /** 设置页左导航的条目。工具不在这些条目里 —— 它们在对话里被直接调用，只有技能配方归这里。 */
 /** 外观主题：白纸黑字 / 晨曦微蓝 / 夜墨 / 跟随系统（见 theme.css 的 token 组） */
 export type ThemeKey = "paper" | "dawn" | "dark" | "system";
@@ -806,6 +853,8 @@ export type SettingsKey =
   | "ttsConfigs"
   | "drawConfigs"
   | "searchConfigs"
+  // 邮件：SMTP 发信账号（提醒这类主动能力要往外寄东西时走它）
+  | "mail"
   | "task"
   | "remind"
   | "skills"
@@ -970,3 +1019,97 @@ export interface MatrixPackResult {
   /** 装之前有没有留下「装前那一版」的留底 */
   snapshot: boolean;
 }
+
+// ── 信箱（发件流水 / 收件箱）────────────────────────────────
+//
+// 字段名与后端 src/mail/mailboxTypes.ts 一一对应。web 从不 import src（那会把
+// Workers 全局类型带进浏览器侧），所以这里照抄一份 —— 本仓库既有惯例：
+// 改一边必须同轮改另一边，否则合流那天两边字段名对不上还都绿灯。
+//
+// 上面 MailConfigView 的 `to` 那一格现在存的是「地址表文本」（一行一个地址）；
+// 拆分/拼回/校验的纯规则在 lib/mailForm.ts，界面读法在 lib/mailBoxView.ts。
+
+/** 这一封是谁要寄的：面板「试一封」/ ericher 的工具 / 提醒・盯梢的离线副本 */
+export type MailSource = "panel" | "tool" | "say";
+
+/** 发件箱里的一行：已落账的一封，成功失败都在 */
+export interface MailOutRow {
+  /** ISO 时刻 */
+  at: string;
+  /** 这一封实际寄给谁，可有多个 */
+  to: string[];
+  subject: string;
+  ok: boolean;
+  /** 失败原因原文；成功是空串 */
+  error: string;
+  source: MailSource;
+}
+
+/**
+ * 收件箱里的一行：头部在 DO 表里，正文与原件在 R2。
+ *
+ * `emlKey` 为空 = 原件没落盘（太大或这台机器没配桶），只留摘要与字节数 ——
+ * 界面要能看出「这封只有摘要」，不能假装点得开全文。
+ */
+export interface MailInRow {
+  id: string;
+  at: string;
+  from: string;
+  fromName: string;
+  to: string;
+  subject: string;
+  /** 整封原始报文的字节数，不是正文字节数 */
+  bytes: number;
+  read: boolean;
+  hasAttachment: boolean;
+  /** 纯文本正文的开头一段；随列表一起回 */
+  preview: string;
+  emlKey: string;
+}
+
+/** GET /api/mail/outbox 的 data */
+export interface MailOutboxView {
+  rows: MailOutRow[];
+}
+
+/** GET /api/mail/inbox 的 data：清单 + 未读总数 + 收信开关（关着 ≠ 空的） */
+export interface MailInboxView {
+  rows: MailInRow[];
+  unread: number;
+  enabled: boolean;
+}
+
+/** GET /api/mail/inbox/read 的 data：这一封的行 + 正文 + 后端那一句说明 */
+export interface MailInReadView {
+  row: MailInRow;
+  text: string;
+  note: string;
+}
+
+/** POST /api/mail/inbox/open 的 data（标已读 / 标未读的回执） */
+export interface MailInOpenReceipt {
+  id: string;
+  read: boolean;
+}
+
+/**
+ * 邮件配置新增的三格。全部可选是刻意的：后端还没合流时 GET 回不来，
+ * 界面按「两个开关都关着、地址表从 `to` 文本里拆」兜住，不能整页报错。
+ */
+export interface MailConfigExtras {
+  /** 提醒 / 盯梢另寄一份邮件副本的总开关；默认关 */
+  sayMail?: boolean;
+  /** 收信落库开关；默认关（没接 MX 之前就该关着） */
+  inboxEnabled?: boolean;
+  /** 默认收件地址表；`to` 那格存的就是它的文本形态 */
+  toList?: string[];
+}
+
+/** GET /api/mail/config 的现值（原九格 + 新增三格） */
+export type MailConfigViewFull = MailConfigView & MailConfigExtras;
+
+/** POST /api/mail/config 现在送的那十一格：原九格 + 两个开关 */
+export type MailConfigPatchFull = MailConfigPatch & {
+  sayMail: boolean;
+  inboxEnabled: boolean;
+};

@@ -1,0 +1,202 @@
+/* 信箱页（组件见 MailboxPage.tsx）。
+   骨架全部复用笔记本那一套 nm-*（NoteMemo.css）—— 同一件「左边一条条、右边读或写」的事
+   不该有两套手势和两套尺寸。这里只补 nm-* 里没有的那几样，且不写死颜色，全走主题 token。 */
+
+/* 行前那颗未读点：没读的信一眼看得见。不是色盲唯一线索 —— 面上同时有「未读」字样 */
+.mailbox-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--yuzhe-ink-strong);
+  flex: 0 0 auto;
+}
+
+/* 读信那一面顶部的小按钮群（翻已读 / 回这封） */
+.mailbox-actions {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mailbox-read {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 2px;
+}
+
+/* 那句框架不是装饰：来信是公网任何人写进来的话，读的人必须先知道这一点 */
+.mailbox-quote-mark {
+  margin: 0;
+  font-size: 12px;
+  color: var(--yuzhe-ink-dim);
+  border-left: 2px solid var(--yuzhe-line-strong);
+  padding-left: 8px;
+}
+
+/* 正文与错误原文：都是"照原样给人看"的东西，所以同一套处理 ——
+   保留换行、不许注入 HTML、长串能折行 */
+.mailbox-body,
+.mailbox-textarea {
+  font: inherit;
+  color: var(--yuzhe-ink);
+  background: transparent;
+  border: 1px solid var(--yuzhe-line);
+  border-radius: var(--yuzhe-r-s);
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.7;
+}
+
+.mailbox-body {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.mailbox-textarea {
+  min-height: 220px;
+  resize: vertical;
+  margin-top: 8px;
+}
+
+/* 流水那一面的成/败标记 */
+.mailbox-state {
+  margin-left: auto;
+  font-size: 12px;
+}
+
+.mailbox-state.is-ok {
+  color: var(--yuzhe-ok);
+}
+
+.mailbox-state.is-bad {
+  color: var(--yuzhe-danger);
+}
+
+/* 寄完那一句：成与败除了颜色，字面上永远带「已寄出 / 没寄出」 */
+.mailbox-result {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mailbox-result.ok {
+  color: var(--yuzhe-ok);
+}
+
+.mailbox-result.bad {
+  color: var(--yuzhe-danger);
+}
+
+/* ── 整体放宽：只作用于这一页 ───────────────────────────
+   笔记本那套尺寸（NoteMemo.css）是共用的，不动它；这里按同一批类名在本页作用域内
+   把留白、行高、列宽放大。作用域靠根节点上多挂的那个 mailbox-page 类。 */
+
+.mailbox-page .nm-top {
+  gap: 10px;
+  padding: 16px 26px;
+}
+
+.mailbox-page .nm-top-title {
+  font-size: 19px;
+}
+
+.mailbox-page .nm-side {
+  width: 300px;
+}
+
+.mailbox-page .nm-side .nm-chips {
+  gap: 8px;
+  margin: 16px 16px 10px;
+}
+
+.mailbox-page .nm-list {
+  gap: 6px;
+  padding: 0 12px 18px;
+}
+
+.mailbox-page .nm-note {
+  padding: 14px 14px;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.mailbox-page .nm-note-preview,
+.mailbox-page .nm-note-meta {
+  margin-top: 6px;
+}
+
+.mailbox-page .nm-foot {
+  padding: 16px 18px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+/* 写作板：笔记本那套 .nm-editor 是 min-height:100%（长文写作用），
+   表单套它会把「寄出去」那一行顶到可视区之外 —— 看起来就是表单显示不全。
+   这一页要的是主题/收件人/正文/动作四段都在场，所以让正文去吃余量。 */
+.mailbox-page .nm-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 14px 38px 26px;
+}
+
+.mailbox-page .mailbox-modes {
+  gap: 8px;
+  margin: 2px 0 0;
+}
+
+.mailbox-page .mailbox-textarea {
+  flex: 1 1 auto;
+  min-height: 150px;
+  margin-top: 18px;
+  padding: 16px 18px;
+  line-height: 1.85;
+}
+
+.mailbox-page .nm-title-input {
+  padding: 18px 0 10px;
+}
+
+.mailbox-page .nm-head {
+  gap: 12px;
+  padding: 14px 0 18px;
+}
+
+.mailbox-page .nm-tag-input {
+  margin-top: 10px;
+}
+
+.mailbox-page .nm-blank {
+  padding: 60px 38px;
+}
+
+/* 读信那一面：正文左右各留 38px，与写信那面对齐 */
+.mailbox-page .mailbox-read {
+  gap: 16px;
+  padding: 22px 38px 44px;
+}
+
+.mailbox-page .mailbox-body {
+  padding: 18px 20px;
+  line-height: 1.9;
+}
+
+/* 窄屏（手机那侧）：nm-cols 自己会折，这里只管列表行别把主题挤没 */
+@media (max-width: 720px) {
+  .mailbox-page .mailbox-read,
+  .mailbox-page .nm-editor {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+
+  .mailbox-page .nm-side {
+    width: 232px;
+  }
+}
+

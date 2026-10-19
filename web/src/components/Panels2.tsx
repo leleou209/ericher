@@ -16,7 +16,6 @@ import {
 import { api } from "../lib/api";
 import { speak, stopSpeaking } from "../lib/speech";
 import {
-  DRAW_FORMAT_DEFAULTS,
   MODEL_FORMAT_LABEL,
   TTS_DEFAULTS,
   TTS_PROTOCOL_LABEL,
@@ -25,6 +24,58 @@ import {
   voiceLabel,
 } from "../lib/presets";
 import { Icon } from "./Icons";
+import {
+  EntityAddButton,
+  EntityNote,
+  EntityRow,
+  FormDialog,
+  FormRow,
+  FormSection,
+  useDraft,
+} from "./FormDialog";
+import {
+  entryFormOf,
+  entryMissingFields,
+  entrySummary,
+  looksLikeRawKey,
+  parseContextWindow,
+  parseMaxOutput,
+  providerMissingFields,
+  providerSummary,
+  type ProviderFormDraft,
+} from "../lib/modelCatalogForm";
+import {
+  COMMON_TYPE_ID,
+  GUEST_CARD_PERMS,
+  blankGuestDraft,
+  guestDraftOf,
+  guestMissingFields,
+  guestPasswordValue,
+  guestTypeSummary,
+  type GuestFormDraft,
+} from "../lib/guestTypeForm";
+import {
+  freshTtsDraft,
+  ttsDraftOf,
+  ttsMissingFields,
+  ttsPayloadOf,
+  ttsSummary,
+  ttsWithProtocol,
+  type TtsFormDraft,
+} from "../lib/ttsConfigForm";
+import {
+  DRAW_FORMAT_LABEL,
+  DRAW_TIER_META,
+  blankDrawDraft,
+  drawDraftOf,
+  drawIsBinding,
+  drawMissingFields,
+  drawPayloadOf,
+  drawSummary,
+  drawWithFormat,
+  parseDrawModels,
+  type DrawFormDraft,
+} from "../lib/drawConfigForm";
 import {
   SHELF_LABEL,
   type ChatState,
@@ -53,6 +104,7 @@ import {
 } from "../lib/types";
 import { fmtWhen, toolMeta, type Patch } from "./PanelsShared";
 import "./Panels.css";
+import "./Panels2Panels.css";
 
 /**
  * 行容器：左边正文、右边小动作、最右一个删除叉。
@@ -1889,27 +1941,15 @@ export function VisitorsPanel() {
 // 权益不在这里改 —— 逐工具的权限矩阵搬到了「来客权限管理」页（见 GuestPermsPanel）。
 // 这一页只管「有哪些档、各用什么口令进门、怎么接待」；新建的档默认对外工具全开。
 
-/** 行内编辑表单的草稿：从某一行复制出来，改完整体 PATCH */
-interface GuestDraft {
-  name: string;
-  password: string;
-  note: string;
-  active: boolean;
-}
-
-const draftOf = (t: GuestType): GuestDraft => ({
-  name: t.name,
-  // 口令不回显（后端只存摘要）：留空表示不改，要换才填
-  password: "",
-  note: t.note,
-  active: t.active,
-});
+/** 弹页认的「新增」标记；其余非空值是档位 id（编辑），空串 = 弹页关着 */
+const GUEST_NEW = "__new";
 
 /**
  * 来客类型管理：一个自定义口令就是一类来客。
  *
- * 列表 + 顶部新增表单 + 行内展开编辑。口令在后端只存 SHA-256 摘要，
- * 列表上永远只给掩码 —— 摘要不可逆，忘了口令就重设一个，没有「点开看」这条路。
+ * 列表 + 详情弹页：行只读、一行看清这一档现在能干什么，点行（或「新增类型」）才开表单。
+ * 口令在后端只存 SHA-256 摘要，列表与弹页都永远不给原值 —— 摘要不可逆，
+ * 忘了口令就在编辑里重设一个，没有「点开看」这条路。
  * 停用不是删除：配置留着，随时能再打开；只有真不要了这个口令才删。
  * 改动对之后新登录的来客生效。
  */
@@ -1918,19 +1958,13 @@ export function GuestTypesPanel() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
-  // 新增表单：名称 + 口令必填；对外工具与长期权益都走后端缺省
-  // （新档对外工具全开、长期权益全关：先来的是临时来客，私人空间等他领了卡再说）
-  const [nName, setNName] = useState("");
-  const [nPw, setNPw] = useState("");
-  const [nNote, setNNote] = useState("");
-  const [addErr, setAddErr] = useState("");
-  const [adding, setAdding] = useState(false);
-
-  // 行内编辑：editingId 非空时那一行展开成表单
-  const [editingId, setEditingId] = useState("");
-  const [draft, setDraft] = useState<GuestDraft | null>(null);
-  const [editErr, setEditErr] = useState("");
-  const [busy, setBusy] = useState(false);
+  // 列表行只读，改的都是「打开弹页那一刻拍下的草稿」，按下保存才提交。
+  // hook 一律留在函数体最上面：放到条件分支或早退之后，React 会报
+  // "Rendered more hooks than during the previous render"，面板就停在读取中不动了。
+  const form = useDraft<GuestFormDraft>(blankGuestDraft());
+  const [dialog, setDialog] = useState("");
+  const [dialogErr, setDialogErr] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -1947,60 +1981,68 @@ export function GuestTypesPanel() {
     void load();
   }, [load]);
 
-  const startEdit = (t: GuestType) => {
-    if (editingId === t.id) {
-      setEditingId("");
-      setDraft(null);
+  const patch = (p: Partial<GuestFormDraft>) =>
+    form.setDraft((prev) => ({ ...prev, ...p }));
+
+  // 新增与编辑共用同一个弹页：空草稿就是新增，快照就是编辑
+  const openAdd = () => {
+    form.reset(blankGuestDraft());
+    setDialogErr("");
+    setDialog(GUEST_NEW);
+  };
+
+  const openEdit = (t: GuestType) => {
+    form.reset(guestDraftOf(t));
+    setDialogErr("");
+    setDialog(t.id);
+  };
+
+  const closeDialog = () => {
+    setDialog("");
+    setDialogErr("");
+  };
+
+  const isNew = dialog === GUEST_NEW;
+  const editing = isNew ? null : types.find((t) => t.id === dialog) || null;
+  // 内置通用档：口令取自 env，没有重设这一说（后端见它带口令直接抛）
+  const builtin = editing?.id === COMMON_TYPE_ID;
+
+  const save = async () => {
+    if (!dialog || saving) return;
+    const missing = guestMissingFields(form.draft, isNew);
+    if (missing.length) {
+      setDialogErr(missing.map((m) => m.message).join("；"));
       return;
     }
-    setEditingId(t.id);
-    setEditErr("");
-    setDraft(draftOf(t));
-  };
-
-  const add = async () => {
-    if (!nName.trim() || !nPw.trim() || adding) return;
-    setAdding(true);
-    setAddErr("");
+    setSaving(true);
+    setDialogErr("");
     try {
-      // 工具权益与长期权益都不带：走后端缺省（对外全开、长期全关），
-      // 之后到「来客权限管理」页按件调
-      await api.guestTypeAdd({
-        name: nName.trim(),
-        password: nPw.trim(),
-        note: nNote.trim(),
-      });
-      setNName("");
-      setNPw("");
-      setNNote("");
+      if (isNew)
+        // 对外工具与长期权益都不带：走后端缺省（新档对外全开、长期全关），
+        // 之后到「来客权限管理」页按件调
+        await api.guestTypeAdd({
+          name: form.draft.name.trim(),
+          password: form.draft.password.trim(),
+          note: form.draft.note.trim(),
+        });
+      else {
+        // 口令留空 = 不改，干脆不带这个字段；填了才重设
+        const password = guestPasswordValue(form.draft.password);
+        await api.guestTypePatch({
+          id: dialog,
+          name: form.draft.name.trim(),
+          note: form.draft.note.trim(),
+          ...(password ? { password } : {}),
+        });
+      }
+      // 成功后重新拉一遍名册再关窗：列表显示的是落库后的真值，不做乐观更新
       await load();
+      setDialog("");
     } catch (e) {
-      // 后端校验不过（如口令和现有的重复）原样摆在这里，不翻译
-      setAddErr((e as Error).message);
+      // 后端校验不过（如口令和现有的重复）原样摆在弹页里，不关窗
+      setDialogErr((e as Error).message);
     } finally {
-      setAdding(false);
-    }
-  };
-
-  const saveEdit = async () => {
-    if (!draft || !editingId || busy) return;
-    setBusy(true);
-    setEditErr("");
-    try {
-      const { password, ...rest } = draft;
-      // 口令留空 = 不改；填了才带上这个字段
-      await api.guestTypePatch({
-        id: editingId,
-        ...rest,
-        password: password.trim() || undefined,
-      });
-      setEditingId("");
-      setDraft(null);
-      await load();
-    } catch (e) {
-      setEditErr((e as Error).message);
-    } finally {
-      setBusy(false);
+      setSaving(false);
     }
   };
 
@@ -2026,83 +2068,123 @@ export function GuestTypesPanel() {
         口令取自环境变量，改不得也删不得。
       </p>
 
-      <h3 className="sect">新增类型</h3>
-      <div className="inline-form col">
-        {addErr && <p className="err">{addErr}</p>}
-        <div className="inline-form">
-          <input
-            className="field"
-            placeholder="名称（必填）"
-            value={nName}
-            onChange={(e) => setNName(e.target.value)}
-          />
-          <input
-            className="field"
-            placeholder="口令（必填）"
-            value={nPw}
-            onChange={(e) => setNPw(e.target.value)}
-          />
-          <input
-            className="field"
-            placeholder="说明（可空）"
-            value={nNote}
-            onChange={(e) => setNNote(e.target.value)}
-          />
-        </div>
-        <p className="meta">
-          新档默认对外工具全开、长期权益全关 —— 到「来客权限管理」页再按件调。
-        </p>
-        <div className="inline-form">
-          <button
-            className="btn btn-primary btn-sm"
-            onClick={add}
-            disabled={adding || !nName.trim() || !nPw.trim()}
-          >
-            保存
-          </button>
-        </div>
-      </div>
-
       <h3 className="sect">类型（{types.length}）</h3>
-      <ul className="remind-list">
-        {types.map((t) => {
-          // 内置通用档恒在名册第一行：拿前台门禁口令进来的人都归它。
-          // 它跟自定义档一样能调工具与接待说明，但口令取自 env、也删不得停不得。
-          const builtin = t.id === "common";
-          return (
-            <li
-              className="remind-row"
-              key={t.id}
-              style={!t.active ? { opacity: 0.55 } : undefined}
-            >
-              <div className="remind-when">
-                <span style={{ fontWeight: 600 }}>{t.name}</span>
-                {builtin ? (
-                  <>
+      <EntityAddButton label="新增类型" onClick={openAdd} />
+
+      {!!types.length && (
+        <div className="entity-list">
+          {types.map((t) => {
+            // 内置通用档恒在名册第一行：拿前台门禁口令进来的人都归它。
+            // 它跟自定义档一样能调工具与接待说明，但口令取自 env、也删不得停不得。
+            const isBuiltin = t.id === COMMON_TYPE_ID;
+            return (
+              <EntityRow
+                key={t.id}
+                title={t.name}
+                summary={guestTypeSummary(t)}
+                disabled={!t.active}
+                editing={dialog === t.id}
+                onEdit={() => openEdit(t)}
+                onDelete={isBuiltin ? undefined : () => void del(t)}
+                deleteConfirm={`删掉「${t.name}」？这个口令之后就进不来了。`}
+                right={
+                  isBuiltin ? (
                     <span
                       className="tag"
                       title="前台门禁口令进来的来客都归这一档"
                     >
                       内置
                     </span>
-                    <span
-                      className="meta"
-                      title="口令取自环境变量，不在这张表里"
+                  ) : (
+                    // 停用/启用是动作，留在行上常驻：弹页只管叫什么、怎么接待、口令换成什么
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => void toggleActive(t)}
                     >
-                      口令：前台门禁口令
-                    </span>
-                  </>
-                ) : (
-                  <span className="meta" title="口令只存摘要不回显，忘了就重设">
-                    ••••••
-                  </span>
-                )}
-                {!t.active && <span className="tag">已停用</span>}
-              </div>
+                      {t.active ? "停用" : "启用"}
+                    </button>
+                  )
+                }
+              />
+            );
+          })}
+        </div>
+      )}
 
-              <div className="remind-when">
-                {t.tools.length ? (
-                  t.tools.map((n) => (
+      {loading && <p className="empty-sm">读取中…</p>}
+      {!loading && !types.length && !err && (
+        <p className="empty-sm">
+          还没有自定义类型。名册里只有内置的「通用来客」—— 拿前台门禁口令进来
+          的人都归这一档，它的工具在「来客权限管理」页按件调。
+        </p>
+      )}
+
+      {err && <p className="err">{err}</p>}
+
+      {/* 档位弹页：新增与编辑共用同一份表单，空草稿即新增 */}
+      {dialog && (
+        <FormDialog
+          title={isNew ? "新增类型" : `编辑「${editing?.name ?? ""}」`}
+          busy={saving}
+          error={dialogErr}
+          dirty={form.dirty(form.draft)}
+          onClose={closeDialog}
+          onSave={() => void save()}
+        >
+          <FormSection title="档位">
+            <FormRow label="名称" hint="必填">
+              <input
+                className="field"
+                placeholder="名称（必填）"
+                value={form.draft.name}
+                onChange={(e) => patch({ name: e.target.value })}
+              />
+            </FormRow>
+            <FormRow label="接待说明" hint="可空" wide>
+              <input
+                className="field"
+                placeholder="说明（可空）"
+                value={form.draft.note}
+                onChange={(e) => patch({ note: e.target.value })}
+              />
+            </FormRow>
+          </FormSection>
+
+          <FormSection title="口令">
+            {!builtin && (
+              <FormRow
+                label={isNew ? "进门口令" : "重设口令"}
+                hint={
+                  isNew
+                    ? "必填；只存摘要，之后不回显"
+                    : "留空 = 不改；填了才换成新口令"
+                }
+              >
+                <input
+                  className="field"
+                  placeholder={isNew ? "口令（必填）" : "口令（留空 = 不改）"}
+                  value={form.draft.password}
+                  onChange={(e) => patch({ password: e.target.value })}
+                />
+              </FormRow>
+            )}
+            <EntityNote>
+              {builtin
+                ? "口令就是前台门禁口令，取自环境变量，改不得；这一档也停不得、删不得 —— 它是门口最后一把钥匙。"
+                : "口令只存摘要、不回显：摘要不可逆，忘了就在这里重设一个。一档不能没有口令，所以这里没有「清除」这一说 —— 真不要这个口令就删掉整档。"}{" "}
+              对外工具与长期权益到「来客权限管理」页按件调。
+              {isNew
+                ? " 新档默认对外工具全开、长期权益全关：先来的是临时来客，私人空间等他领了卡再说。"
+                : ""}
+            </EntityNote>
+          </FormSection>
+
+          {/* 权限这格只读：这一页没有改工具的那条路，但得让人看清现在开着什么 */}
+          {editing && (
+            <FormSection title="这一档现在开着">
+              <div className="tabs">
+                {editing.tools.length ? (
+                  editing.tools.map((n) => (
                     <span
                       key={n}
                       className="chip on"
@@ -2114,156 +2196,15 @@ export function GuestTypesPanel() {
                 ) : (
                   <span className="meta">对外工具全关</span>
                 )}
-                {t.permNotes && (
-                  <span
-                    className="chip on"
-                    style={{ cursor: "default" }}
-                    title="只对持身份卡的长期使用者生效"
-                  >
-                    记事本
-                  </span>
-                )}
-                {t.permFiles && (
-                  <span
-                    className="chip on"
-                    style={{ cursor: "default" }}
-                    title="只对持身份卡的长期使用者生效"
-                  >
-                    云盘上传
-                  </span>
-                )}
-                {t.permPublic && (
-                  <span
-                    className="chip on"
-                    style={{ cursor: "default" }}
-                    title="只对持身份卡的长期使用者生效"
-                  >
-                    公开内容
-                  </span>
-                )}
               </div>
-
-              {t.note && (
-                <p
-                  className="meta"
-                  style={{
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {t.note}
-                </p>
-              )}
-
-              <div className="row-actions">
-                <button
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => startEdit(t)}
-                >
-                  {editingId === t.id ? "收起" : "编辑"}
-                </button>
-                {/* 内置档没有「停用」「删除」这两条路：口令就是门口那把总钥匙 */}
-                {!builtin && (
-                  <>
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={() => void toggleActive(t)}
-                    >
-                      {t.active ? "停用" : "启用"}
-                    </button>
-                    <button
-                      className="btn btn-danger btn-sm"
-                      onClick={() => void del(t)}
-                    >
-                      删除
-                    </button>
-                  </>
-                )}
-              </div>
-
-              {editingId === t.id && draft && (
-                <div className="panel-body">
-                  {editErr && <p className="err">{editErr}</p>}
-                  <div className="inline-form">
-                    <input
-                      className="field"
-                      placeholder="名称"
-                      value={draft.name}
-                      onChange={(e) =>
-                        setDraft({ ...draft, name: e.target.value })
-                      }
-                    />
-                    {!builtin && (
-                      <input
-                        className="field"
-                        placeholder="口令（留空 = 不改）"
-                        value={draft.password}
-                        onChange={(e) =>
-                          setDraft({ ...draft, password: e.target.value })
-                        }
-                      />
-                    )}
-                  </div>
-                  <input
-                    className="field"
-                    placeholder="说明（可空）"
-                    value={draft.note}
-                    onChange={(e) =>
-                      setDraft({ ...draft, note: e.target.value })
-                    }
-                  />
-                  <p className="meta pad">
-                    {builtin
-                      ? "对外工具与长期权益到「来客权限管理」页按件调。口令就是前台门禁口令，这一档不能停用，也删不得。"
-                      : "对外工具与长期权益到「来客权限管理」页按件调。"}
-                  </p>
-                  {!builtin && (
-                    <label className="check-line">
-                      <input
-                        type="checkbox"
-                        checked={draft.active}
-                        onChange={(e) =>
-                          setDraft({ ...draft, active: e.target.checked })
-                        }
-                      />
-                      启用：这个口令现在能进门
-                    </label>
-                  )}
-                  <div className="inline-form">
-                    <button
-                      className="btn btn-primary btn-sm"
-                      onClick={saveEdit}
-                      disabled={busy || !draft.name.trim()}
-                    >
-                      保存
-                    </button>
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={() => {
-                        setEditingId("");
-                        setDraft(null);
-                      }}
-                    >
-                      取消
-                    </button>
-                  </div>
-                </div>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-
-      {loading && <p className="empty-sm">读取中…</p>}
-      {!loading && !types.length && !err && (
-        <p className="empty-sm">
-          还没有自定义类型。名册里只有内置的「通用来客」—— 拿前台门禁口令进来
-          的人都归这一档，它的工具在「来客权限管理」页按件调。
-        </p>
+              <EntityNote>
+                {GUEST_CARD_PERMS.map((p) => `${p.label} ${editing[p.key] ? "开" : "关"}`).join(" · ")}
+                —— 这三项只对持身份卡的长期使用者生效。
+              </EntityNote>
+            </FormSection>
+          )}
+        </FormDialog>
       )}
-
-      {err && <p className="err">{err}</p>}
     </div>
   );
 }
@@ -2275,7 +2216,7 @@ export function GuestTypesPanel() {
  * 所以这组开关只对持身份卡的长期使用者生效（凭卡解锁，见 src/index.ts cardAllows）。
  */
 const CARD_PERMS: Array<{
-  key: "permNotes" | "permFiles" | "permPublic";
+  key: "permNotes" | "permFiles" | "permPublic" | "permMatrix";
   label: string;
   hint: string;
 }> = [
@@ -2285,6 +2226,11 @@ const CARD_PERMS: Array<{
     key: "permPublic",
     label: "公开内容",
     hint: "往公共墙上贴纸条、看公开文件",
+  },
+  {
+    key: "permMatrix",
+    label: "权限矩阵",
+    hint: "网页矩阵的整面管理权（不拆子权限）—— 后果见这一节下面那句话",
   },
 ];
 
@@ -2304,6 +2250,12 @@ export function GuestPermsPanel() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState("");
+  // 一次只发一张 PATCH：`next` 是从渲染闭包里的 t.tools 算出来的，
+  // 第一张还没落库就点第二格，第二次带的还是旧清单，后写会把先写盖掉，
+  // 两次都回成功、刷新后只有一格生效。
+  // 必须和其他 hook 一起声明在早退之前：放到 `if (!catalog) return` 后面，
+  // 首渲（catalog 还没到）少一个 hook，数据回来后再渲染就报「hooks 数量变了」
+  const submitting = useRef(false);
 
   const load = useCallback(async () => {
     try {
@@ -2341,29 +2293,41 @@ export function GuestPermsPanel() {
     const next = on
       ? [...new Set([...t.tools, name])]
       : t.tools.filter((x) => x !== name);
+    if (submitting.current) return;
+    submitting.current = true;
     setBusy(`${t.id}:${name}`);
     try {
-      await api.guestTypePatch({ id: t.id, tools: next });
+      const saved = await api.guestTypePatch({ id: t.id, tools: next });
+      setTypes((current) =>
+        current.map((type) => (type.id === t.id ? saved : type)),
+      );
       await load();
     } catch (e) {
       setErr((e as Error).message);
     } finally {
+      submitting.current = false;
       setBusy("");
     }
   };
 
   const setCardPerm = async (
     t: GuestType,
-    key: "permNotes" | "permFiles" | "permPublic",
+    key: "permNotes" | "permFiles" | "permPublic" | "permMatrix",
     on: boolean,
   ) => {
+    if (submitting.current) return;
+    submitting.current = true;
     setBusy(`${t.id}:${key}`);
     try {
-      await api.guestTypePatch({ id: t.id, [key]: on });
+      const saved = await api.guestTypePatch({ id: t.id, [key]: on });
+      setTypes((current) =>
+        current.map((type) => (type.id === t.id ? saved : type)),
+      );
       await load();
     } catch (e) {
       setErr((e as Error).message);
     } finally {
+      submitting.current = false;
       setBusy("");
     }
   };
@@ -2426,7 +2390,7 @@ export function GuestPermsPanel() {
                         <td key={tool.name}>
                           <button
                             className={`perm-cell ${on ? "on" : ""}`}
-                            disabled={busy === key}
+                            disabled={!!busy}
                             onClick={() => void setTool(t, tool.name, !on)}
                             aria-pressed={on}
                             aria-label={`${t.name} · ${toolMeta(tool.name).zh}`}
@@ -2458,7 +2422,7 @@ export function GuestPermsPanel() {
 
           <h3 className="sect">长期权益（凭身份卡）</h3>
           <p className="meta">
-            普通口令进来的临时来客没有持久身份，谈不上「自己的」东西，所以这三项只对持身份卡的长期使用者生效。
+            普通口令进来的临时来客没有持久身份，谈不上「自己的」东西，所以这四项只对持身份卡的长期使用者生效。
           </p>
           <ul className="remind-list">
             {types.map((t) => (
@@ -2479,7 +2443,7 @@ export function GuestPermsPanel() {
                       <button
                         key={p.key}
                         className={`chip ${on ? "on" : ""}`}
-                        disabled={busy === key}
+                        disabled={!!busy}
                         onClick={() => void setCardPerm(t, p.key, !on)}
                         title={p.hint}
                       >
@@ -2491,6 +2455,12 @@ export function GuestPermsPanel() {
               </li>
             ))}
           </ul>
+          <p className="meta pad">
+            「权限矩阵」这一档给出去的是<strong>整面</strong>管理权，没有只给一面的选项：除了页面与连线，还包含
+            <strong>外站认定表</strong>（决定「去外站」那道闸放行哪些域名，等于交出他能看见的全部出站面）和
+            <strong>打包 / 装备</strong>（装备是整体替换语义 —— 一次误操作覆盖现网所有页面，包括别人正在改的那些）。
+            一般不建议随意给。点掉这一格就收回：矩阵的读写每次请求现查名册，不是登录时定死的。
+          </p>
         </>
       )}
 
@@ -2579,17 +2549,6 @@ const blankEntryDraft = (): EntryDraft => ({
   contextWindow: "",
 });
 
-/** 上下文输入框里的 K 值折回 token；空着或不像样返回 undefined（= 不动 / 默认档） */
-const kToTokens = (s: string): number | undefined => {
-  const n = Number(s.trim());
-  return s.trim() && Number.isFinite(n) && n > 0
-    ? Math.round(n * 1000)
-    : undefined;
-};
-
-/** token 数画成 K：200000 → 200K */
-const tokensToK = (n: number): string => `${Math.round(n / 1000)}K`;
-
 /**
  * 模型目录：供应商管「接哪家」（地址、格式、Key 变量名），模型条目挂在各家
  * 底下、随便挂几个 —— 一家供应商不再只绑死一个模型。
@@ -2604,37 +2563,36 @@ export function ModelConfigsPanel() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
-  // 新增供应商表单：先挑厂商（或空白）预填「接哪一家」，首个模型可空、之后再加
+  // 列表行只读，改的都是「打开弹页那一刻拍下的草稿」，按下保存才提交。
+  // hook 一律留在函数体最上面：放到条件分支或早退之后，React 会报
+  // "Rendered more hooks than during the previous render"，面板就停在读取中不动了。
+  const providerForm = useDraft<ProviderFormDraft>({
+    ...blankProviderDraft(),
+    firstModel: "",
+    firstMax: "",
+  });
+  // "" = 关着；ADD_SCOPE = 新增；其余是供应商 id = 编辑。新增与编辑共用同一个弹页
+  const [providerDialog, setProviderDialog] = useState("");
   const [vendorKey, setVendorKey] = useState("");
-  const [draft, setDraft] = useState<ProviderDraft>(blankProviderDraft);
-  const [firstModel, setFirstModel] = useState("");
-  const [firstMax, setFirstMax] = useState("");
-  const [addErr, setAddErr] = useState("");
-  const [adding, setAdding] = useState(false);
+  const [providerErr, setProviderErr] = useState("");
+  const [savingProvider, setSavingProvider] = useState(false);
 
-  // 供应商行内编辑：editingId 非空时那一家展开成表单
-  const [editingId, setEditingId] = useState("");
-  const [editDraft, setEditDraft] = useState<ProviderDraft | null>(null);
-  const [editErr, setEditErr] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  // 给某家供应商添加模型：openAddFor 是展开着「添加模型」行的那家 id
-  const [openAddFor, setOpenAddFor] = useState("");
-  const [entryDraft, setEntryDraft] = useState<EntryDraft>(blankEntryDraft);
+  const entryForm = useDraft<EntryDraft>(blankEntryDraft());
+  // entryId 空 = 给这家新挂一条；非空 = 编辑那一条
+  const [entryDialog, setEntryDialog] = useState<{
+    providerId: string;
+    entryId: string;
+  } | null>(null);
   const [entryErr, setEntryErr] = useState("");
+  const [savingEntry, setSavingEntry] = useState(false);
 
-  // 条目行内编辑：entryEditId 非空时那一条展开成小表单
-  const [entryEditId, setEntryEditId] = useState("");
-  const [entryEdit, setEntryEdit] = useState<EntryDraft | null>(null);
-
-  // 拉模型列表：chips 展开在对应位置，点了填进对应草稿
-  const [listingId, setListingId] = useState("");
-  const [listing, setListing] = useState(false);
-  const [models, setModels] = useState<Array<{
-    id: string;
-    name?: string;
-  }> | null>(null);
-  const [listErr, setListErr] = useState("");
+  // 拉模型清单：scope 认弹页（ADD_SCOPE 或供应商 id）。
+  // pullSeq 是代次号：弹页换过目标后迟到的那一份必须丢掉，否则上一家的清单会盖进这一家
+  const pullSeq = useRef(0);
+  const [pullScope, setPullScope] = useState("");
+  const [pulling, setPulling] = useState(false);
+  const [models, setModels] = useState<Array<{ id: string; name?: string }>>([]);
+  const [pullErr, setPullErr] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -2654,283 +2612,275 @@ export function ModelConfigsPanel() {
     void load();
   }, [load]);
 
+  /** 丢掉在飞的拉取：弹页一开一关都走它 */
+  const clearPull = () => {
+    pullSeq.current += 1;
+    setPullScope("");
+    setPulling(false);
+    setModels([]);
+    setPullErr("");
+  };
+
+  /**
+   * 拉模型列表：scope 是弹页认的供应商 id 或 ADD_SCOPE（新增供应商）。
+   * 地址若是某厂商的已知门，就用该厂商标定过的列表端点与鉴权头 ——
+   * anthropic 家的兼容门下没有 /models，瞎拼只会白吃一个 404。
+   */
+  const pullModels = useCallback(
+    async (
+      scope: string,
+      format: ModelFormat,
+      baseUrl: string,
+      keySecret: string,
+    ) => {
+      const seq = (pullSeq.current += 1);
+      setPullScope(scope);
+      setModels([]);
+      setPullErr("");
+      setPulling(true);
+      try {
+        const preset = VENDOR_PRESETS.find((x) =>
+          Object.values(x.urls).includes(baseUrl),
+        );
+        const r = await api.modelListModels({
+          format,
+          baseUrl,
+          keySecret,
+          ...(preset
+            ? { listUrl: preset.listUrl, listAuth: preset.listAuth }
+            : {}),
+        });
+        if (seq !== pullSeq.current) return;
+        setModels(r.models);
+      } catch (e) {
+        if (seq !== pullSeq.current) return;
+        setPullErr((e as Error).message);
+        setModels([]);
+      } finally {
+        if (seq === pullSeq.current) setPulling(false);
+      }
+    },
+    [],
+  );
+
+  const patchProvider = (p: Partial<ProviderFormDraft>) =>
+    providerForm.setDraft((prev) => ({ ...prev, ...p }));
+
   const applyVendor = (key: string) => {
     setVendorKey(key);
     const v = VENDOR_PRESETS.find((x) => x.key === key);
     if (!v) {
-      setDraft(blankProviderDraft());
-      setFirstModel("");
-      setFirstMax("");
+      providerForm.setDraft({
+        ...blankProviderDraft(),
+        firstModel: "",
+        firstMax: "",
+      });
       return;
     }
     // 厂商只带出「接哪一家」的部分；首个模型名不预填，拉取列表后点选
-    setDraft({
+    providerForm.setDraft({
       name: v.label,
       format: v.format,
       baseUrl: v.baseUrl,
       keySecret: v.keySecret,
       maintKeySecret: "",
       maintModel: "",
+      firstModel: "",
+      firstMax: String(v.maxOutput),
     });
-    setFirstModel("");
-    setFirstMax(String(v.maxOutput));
   };
   const vendor = VENDOR_PRESETS.find((x) => x.key === vendorKey) || null;
 
-  const add = async () => {
-    if (adding) return;
-    setAdding(true);
-    setAddErr("");
-    try {
-      await api.modelProviderAdd({
-        ...providerPayloadOf(draft),
-        firstModel: firstModel.trim() || undefined,
-        maxOutput: firstMax.trim() ? Number(firstMax) : undefined,
-      });
-      setVendorKey("");
-      setDraft(blankProviderDraft());
-      setFirstModel("");
-      setFirstMax("");
-      await load();
-    } catch (e) {
-      // 后端校验不过（缺 Key、地址不对之类）原样摆在这里，不翻译
-      setAddErr((e as Error).message);
-    } finally {
-      setAdding(false);
-    }
+  const openAddProvider = () => {
+    setEntryDialog(null);
+    clearPull();
+    setVendorKey("");
+    providerForm.reset({
+      ...blankProviderDraft(),
+      firstModel: "",
+      firstMax: "",
+    });
+    setProviderErr("");
+    setProviderDialog(ADD_SCOPE);
   };
 
-  const startEdit = (p: ModelProvider) => {
-    if (editingId === p.id) {
-      setEditingId("");
-      setEditDraft(null);
+  const openEditProvider = (p: ModelProvider) => {
+    setEntryDialog(null);
+    clearPull();
+    // 厂商预设是新增时的脚手架，编辑不带：编辑该看见这一家现在真正配着什么
+    setVendorKey("");
+    providerForm.reset({ ...providerDraftOf(p), firstModel: "", firstMax: "" });
+    setProviderErr("");
+    setProviderDialog(p.id);
+  };
+
+  const closeProviderDialog = () => {
+    setProviderDialog("");
+    setProviderErr("");
+    clearPull();
+  };
+
+  const saveProvider = async () => {
+    if (savingProvider) return;
+    const missing = providerMissingFields(providerForm.draft);
+    if (missing.length) {
+      setProviderErr(missing.map((m) => m.message).join("；"));
       return;
     }
-    setEditingId(p.id);
-    setEditErr("");
-    setEditDraft(providerDraftOf(p));
-  };
-
-  const saveEdit = async () => {
-    if (!editDraft || !editingId || busy) return;
-    setBusy(true);
-    setEditErr("");
+    const isNew = providerDialog === ADD_SCOPE;
+    setSavingProvider(true);
+    setProviderErr("");
     try {
-      await api.modelProviderPatch({
-        id: editingId,
-        ...providerPayloadOf(editDraft),
-      });
-      setEditingId("");
-      setEditDraft(null);
+      const payload = providerPayloadOf(providerForm.draft);
+      if (isNew)
+        await api.modelProviderAdd({
+          ...payload,
+          firstModel: providerForm.draft.firstModel.trim() || undefined,
+          maxOutput: parseMaxOutput(providerForm.draft.firstMax),
+        });
+      else await api.modelProviderPatch({ id: providerDialog, ...payload });
+      // 成功后重新拉一遍目录再关窗：列表显示的是落库后的真值，不做乐观更新
       await load();
+      setProviderDialog("");
     } catch (e) {
-      setEditErr((e as Error).message);
+      // 后端校验不过（缺 Key、地址不对之类）原样摆在弹页里，不关窗
+      setProviderErr((e as Error).message);
     } finally {
-      setBusy(false);
+      setSavingProvider(false);
     }
   };
 
   const delProvider = async (p: ModelProvider) => {
-    if (!window.confirm(`删掉「${p.name}」？名下的模型条目会一并删除。`))
-      return;
     await api.modelProviderDelete(p.id).catch((e: Error) => setErr(e.message));
     await load();
   };
 
-  /**
-   * 拉模型列表：scope 是供应商 id（已保存的那家）或 ADD_SCOPE（新增表单）。
-   * 地址若是某厂商的已知门，就用该厂商标定过的列表端点与鉴权头 ——
-   * anthropic 家的兼容门下没有 /models，瞎拼只会白吃一个 404。
-   */
-  const pullModels = async (
-    scope: string,
-    format: ModelFormat,
-    baseUrl: string,
-    keySecret: string,
-  ) => {
-    if (listingId === scope) {
-      setListingId("");
-      setModels(null);
-      setListErr("");
-      return;
-    }
-    setListingId(scope);
-    setModels(null);
-    setListErr("");
-    setListing(true);
-    try {
-      const vendor = VENDOR_PRESETS.find((x) =>
-        Object.values(x.urls).includes(baseUrl),
-      );
-      const r = await api.modelListModels({
-        format,
-        baseUrl,
-        keySecret,
-        ...(vendor
-          ? { listUrl: vendor.listUrl, listAuth: vendor.listAuth }
-          : {}),
-      });
-      setModels(r.models);
-    } catch (e) {
-      setListErr((e as Error).message);
-      setModels([]);
-    } finally {
-      setListing(false);
-    }
+  const openAddEntry = (p: ModelProvider) => {
+    setProviderDialog("");
+    clearPull();
+    entryForm.reset(blankEntryDraft());
+    setEntryErr("");
+    setEntryDialog({ providerId: p.id, entryId: "" });
+    // 一开窗就去问这一家有哪些模型：点一个芯片填进「模型名」，拉不到不拦手填
+    void pullModels(p.id, p.format, p.baseUrl, p.keySecret);
   };
 
-  /** 点模型 chip：新增表单里填「首个模型名」；供应商行里直接挂成条目 */
-  const pickModel = async (scope: string, id: string) => {
-    if (scope === ADD_SCOPE) {
-      setFirstModel(id);
-      return;
-    }
-    try {
-      await api.modelEntryAdd({ providerId: scope, model: id });
-      setEntryDraft(blankEntryDraft());
-      await load();
-    } catch (e) {
-      setEntryErr((e as Error).message);
-    }
+  const openEditEntry = (e: ModelEntry) => {
+    const p = providers.find((x) => x.id === e.providerId);
+    setProviderDialog("");
+    clearPull();
+    entryForm.reset(entryFormOf(e));
+    setEntryErr("");
+    setEntryDialog({ providerId: e.providerId, entryId: e.id });
+    if (p) void pullModels(p.id, p.format, p.baseUrl, p.keySecret);
   };
 
-  /** 给某家挂一个手填的模型条目 */
-  const addEntry = async (providerId: string) => {
-    if (!entryDraft.model.trim()) return;
+  const closeEntryDialog = () => {
+    setEntryDialog(null);
+    setEntryErr("");
+    clearPull();
+  };
+
+  const saveEntry = async () => {
+    if (!entryDialog || savingEntry) return;
+    const missing = entryMissingFields(entryForm.draft);
+    if (missing.length) {
+      setEntryErr(missing.map((m) => m.message).join("；"));
+      return;
+    }
+    setSavingEntry(true);
     setEntryErr("");
     try {
-      await api.modelEntryAdd({
-        providerId,
-        model: entryDraft.model.trim(),
-        maxOutput: entryDraft.maxOutput.trim()
-          ? Number(entryDraft.maxOutput)
-          : undefined,
-        contextWindow: kToTokens(entryDraft.contextWindow),
-      });
-      setEntryDraft(blankEntryDraft());
+      const body = {
+        model: entryForm.draft.model.trim(),
+        maxOutput: parseMaxOutput(entryForm.draft.maxOutput),
+        contextWindow: parseContextWindow(entryForm.draft.contextWindow),
+      };
+      if (entryDialog.entryId)
+        await api.modelEntryPatch({ id: entryDialog.entryId, ...body });
+      else
+        await api.modelEntryAdd({
+          providerId: entryDialog.providerId,
+          ...body,
+        });
       await load();
+      setEntryDialog(null);
     } catch (e) {
       setEntryErr((e as Error).message);
+    } finally {
+      setSavingEntry(false);
     }
   };
 
-  const startEntryEdit = (e: ModelEntry) => {
-    if (entryEditId === e.id) {
-      setEntryEditId("");
-      setEntryEdit(null);
+  /** 点模型芯片：只填进当前弹页那格，提交仍要人按保存 */
+  const pickModel = (id: string) => {
+    if (providerDialog === ADD_SCOPE) {
+      patchProvider({ firstModel: id });
       return;
     }
-    setEntryEditId(e.id);
-    setEntryEdit({
-      model: e.model,
-      maxOutput: e.maxOutput ? String(e.maxOutput) : "",
-      contextWindow: e.contextWindow
-        ? String(Math.round(e.contextWindow / 1000))
-        : "",
-    });
+    entryForm.setDraft((prev) => ({ ...prev, model: id }));
   };
 
-  const saveEntryEdit = async () => {
-    if (!entryEdit || !entryEditId) return;
-    try {
-      await api.modelEntryPatch({
-        id: entryEditId,
-        model: entryEdit.model.trim(),
-        maxOutput: entryEdit.maxOutput.trim()
-          ? Number(entryEdit.maxOutput)
-          : undefined,
-        contextWindow: kToTokens(entryEdit.contextWindow),
-      });
-      setEntryEditId("");
-      setEntryEdit(null);
-      await load();
-    } catch (e) {
-      setErr((e as Error).message);
-    }
+  /** 生效只能换、不能摘：后端语义是全库唯一，摘掉就没有生效模型（原面板也没这条路） */
+  const setActive = async (e: ModelEntry) => {
+    if (e.active) return;
+    await api
+      .modelEntryPatch({ id: e.id, active: true })
+      .catch((er: Error) => setErr(er.message));
+    await load();
   };
 
   const delEntry = async (e: ModelEntry) => {
-    if (!window.confirm(`删掉模型「${e.model}」？`)) return;
     await api.modelEntryDelete(e.id).catch((er: Error) => setErr(er.message));
     await load();
   };
 
-  /** 新增与编辑共用的供应商字段集，保证两处要填的东西永远一致 */
-  const renderProviderFields = (
-    d: ProviderDraft,
-    patch: (p: Partial<ProviderDraft>) => void,
-    modelListId?: string,
-  ) => (
-    <>
-      <div className="inline-form">
-        <input
-          className="field"
-          placeholder="供应商名称"
-          value={d.name}
-          onChange={(e) => patch({ name: e.target.value })}
-        />
-        <select
-          className="field"
-          value={d.format}
-          onChange={(e) => {
-            const f = e.target.value as ModelFormat;
-            // 格式换了，门也得换：地址跟着预设表走，别让 anthropic 的门收 openai 的信
-            const next = urlForFormat(d.baseUrl, d.format, f);
-            patch(next ? { format: f, baseUrl: next } : { format: f });
-          }}
-          aria-label="接口格式"
-        >
-          {(Object.keys(MODEL_FORMAT_LABEL) as ModelFormat[]).map((f) => (
-            <option key={f} value={f}>
-              {MODEL_FORMAT_LABEL[f]}
-            </option>
-          ))}
-        </select>
-      </div>
-      <input
-        className="field"
-        placeholder="Base URL"
-        value={d.baseUrl}
-        onChange={(e) => patch({ baseUrl: e.target.value })}
-      />
-      <div className="inline-form">
-        <input
-          className="field"
-          list="mc-key-secrets"
-          placeholder="Key 变量名"
-          value={d.keySecret}
-          onChange={(e) => patch({ keySecret: e.target.value })}
-        />
-        {/* 常见手误：把 Key 本体当变量名贴进来。取不到值不说，Key 还落了库 */}
-        {/^sk-\S+/.test(d.keySecret.trim()) && (
-          <p className="err">
-            这串像是 Key 本体（sk- 开头）。这一栏填的是 secret 变量名，比如
-            DEEPSEEK_KEY；Key 本体在终端跑 npx wrangler secret put DEEPSEEK_KEY
-            配进这台机器。
-          </p>
-        )}
-      </div>
-      <div className="inline-form">
-        <input
-          className="field"
-          list="mc-key-secrets"
-          placeholder="维护用 Key（留空 = 用上面那把）"
-          value={d.maintKeySecret}
-          onChange={(e) => patch({ maintKeySecret: e.target.value })}
-        />
-        <input
-          className="field"
-          list={modelListId}
-          placeholder="维护用模型（留空 = 复用主线）"
-          value={d.maintModel}
-          onChange={(e) => patch({ maintModel: e.target.value })}
-        />
-      </div>
-    </>
-  );
-
   /** 遗留的通用环境变量：模型目录还没建起来时，它仍会被当作回落 */
   const hasLegacyKey = keySecrets.some((k) => k === "API_KEY");
+
+  const rawKeyHint =
+    "这串像是 Key 本体（sk- 开头）。这一栏填的是 secret 变量名，比如 DEEPSEEK_KEY；Key 本体在终端跑 npx wrangler secret put DEEPSEEK_KEY 配进这台机器。";
+
+  /** 拉回来的清单：只在它属于当前弹页时出现；失败就一句话，不拦人手动填 */
+  const pulledBlock = (scope: string) =>
+    pullScope !== scope ? null : (
+      <div className="form-pull">
+        {pulling && <p className="empty-sm">拉取中…</p>}
+        {pullErr && <p className="err">{pullErr}</p>}
+        {!pulling && !models.length && !pullErr && (
+          <p className="empty-sm">这一家没回模型清单 —— Key 或地址可能不对。</p>
+        )}
+        {!!models.length && (
+          <>
+            <div className="tabs">
+              {models.map((m) => (
+                <button
+                  key={m.id}
+                  className="chip"
+                  type="button"
+                  title={m.name && m.name !== m.id ? m.name : undefined}
+                  onClick={() => pickModel(m.id)}
+                >
+                  {m.id}
+                </button>
+              ))}
+            </div>
+            <p className="meta">点一个模型名，填进上面那一格；拉不到就手填。</p>
+          </>
+        )}
+      </div>
+    );
+
+  const entryId = entryDialog?.entryId ?? "";
+  const entryProviderId = entryDialog?.providerId ?? "";
+  const editingEntry = entryId
+    ? entries.find((e) => e.id === entryId) || null
+    : null;
+  const entryProvider = entryProviderId
+    ? providers.find((p) => p.id === entryProviderId) || null
+    : null;
+  const editingProvider =
+    providers.find((p) => p.id === providerDialog) || null;
 
   return (
     <div className="panel-body">
@@ -2939,386 +2889,364 @@ export function ModelConfigsPanel() {
         → 回复风格里指派，指派完下一轮对话生效。
       </p>
 
-      <h3 className="sect">新增供应商</h3>
-      <div className="inline-form col">
-        {addErr && <p className="err">{addErr}</p>}
-        <div className="inline-form">
-          <select
-            className="field"
-            value={vendorKey}
-            onChange={(e) => applyVendor(e.target.value)}
-            aria-label="从厂商开始"
-          >
-            <option value="">从厂商开始…</option>
-            {VENDOR_PRESETS.map((v) => (
-              <option key={v.key} value={v.key}>
-                {v.label}
-              </option>
-            ))}
-            <option value={BLANK_PRESET}>空白</option>
-          </select>
-          <button
-            className="btn btn-ghost btn-sm"
-            disabled={!draft.baseUrl.trim() || !draft.keySecret.trim()}
-            title="问这一家现在有哪些模型可挑"
-            onClick={() =>
-              void pullModels(
-                ADD_SCOPE,
-                draft.format,
-                draft.baseUrl.trim(),
-                draft.keySecret.trim(),
-              )
-            }
-          >
-            {listingId === ADD_SCOPE && listing ? "拉取中…" : "拉取模型列表"}
-          </button>
-        </div>
-        {vendor && (
-          <p className="meta">
-            {vendor.note}{" "}
-            <a href={vendor.modelsPage} target="_blank" rel="noreferrer">
-              官方模型列表站 ↗
-            </a>
-          </p>
-        )}
-        {listingId === ADD_SCOPE && (
-          <div className="panel-body">
-            {listErr && <p className="err">{listErr}</p>}
-            {listing && <p className="empty-sm">拉取中…</p>}
-            {models && !listing && !models.length && !listErr && (
-              <p className="empty-sm">
-                这一家没回模型清单 —— Key 或地址可能不对。
-              </p>
-            )}
-            {!!models?.length && (
-              <>
-                <div className="tabs">
-                  {models.map((m) => (
-                    <button
-                      key={m.id}
-                      className="chip"
-                      title={m.name && m.name !== m.id ? m.name : undefined}
-                      onClick={() => pickModel(ADD_SCOPE, m.id)}
-                    >
-                      {m.id}
-                    </button>
-                  ))}
-                </div>
-                <p className="meta">点一个模型名，填进「首个模型名」。</p>
-              </>
-            )}
-          </div>
-        )}
-        {renderProviderFields(draft, (p) =>
-          setDraft((prev) => ({ ...prev, ...p })),
-        )}
-        <div className="inline-form">
-          <input
-            className="field"
-            placeholder="首个模型名（可空，之后再加）"
-            value={firstModel}
-            onChange={(e) => setFirstModel(e.target.value)}
-          />
-          <input
-            className="field"
-            placeholder="输出上限（token，可空）"
-            value={firstMax}
-            onChange={(e) => setFirstMax(e.target.value)}
-          />
-        </div>
-        <p className="meta">
-          Key 填的是变量名：新厂商先在终端跑 npx wrangler secret put
-          DEEPSEEK_KEY 把 Key 配进这台机器，再到这里填变量名
-          {keySecrets.length ? "，配过的名字会出现在下拉里" : ""}。
-          {hasLegacyKey
-            ? " 检测到环境里还配着 API_KEY：未建模型目录时，它仍会被用作回落。"
-            : ""}
-        </p>
-        <div className="inline-form">
-          <button
-            className="btn btn-primary btn-sm"
-            onClick={add}
-            disabled={
-              adding ||
-              !draft.name.trim() ||
-              !draft.baseUrl.trim() ||
-              !draft.keySecret.trim()
-            }
-          >
-            {adding ? "保存中…" : "保存"}
-          </button>
-        </div>
-      </div>
-
       <h3 className="sect">供应商（{providers.length}）</h3>
-      <ul className="remind-list">
-        {providers.map((p) => {
-          const mine = entries.filter((x) => x.providerId === p.id);
-          return (
-            <li className="remind-row" key={p.id}>
-              <div className="remind-when">
-                <span style={{ fontWeight: 600 }}>{p.name}</span>
-                <span className="tag">
-                  {MODEL_FORMAT_LABEL[p.format] || p.format}
-                </span>
-                <span className="tag ghost">{p.keySecret}</span>
-                {p.maintModel && (
-                  <span className="meta">维护 {p.maintModel}</span>
-                )}
-              </div>
-              <div className="remind-when">
-                <span className="meta">{p.baseUrl}</span>
-              </div>
+      <EntityAddButton label="新增供应商" onClick={openAddProvider} />
 
-              <div className="row-actions">
-                <button
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => startEdit(p)}
-                >
-                  {editingId === p.id ? "收起" : "编辑"}
-                </button>
-                <button
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => {
-                    setOpenAddFor(openAddFor === p.id ? "" : p.id);
-                    setEntryDraft(blankEntryDraft());
-                    setEntryErr("");
-                    if (openAddFor !== p.id)
-                      void pullModels(p.id, p.format, p.baseUrl, p.keySecret);
-                  }}
-                  title="问这一家现在有哪些模型可挑"
-                >
-                  {listingId === p.id && listing ? "拉取中…" : "添加模型"}
-                </button>
-                <button
-                  className="btn btn-danger btn-sm"
-                  onClick={() => void delProvider(p)}
-                >
-                  删除
-                </button>
-              </div>
+      {!!providers.length && (
+        <div className="entity-list">
+          {providers.map((p) => {
+            const mine = entries.filter((x) => x.providerId === p.id);
+            return (
+              <div className="entity-group" key={p.id}>
+                <EntityRow
+                  title={p.name}
+                  summary={providerSummary(p, mine.length)}
+                  editing={providerDialog === p.id}
+                  onEdit={() => openEditProvider(p)}
+                  onDelete={() => void delProvider(p)}
+                  deleteConfirm={`删掉「${p.name}」？名下的模型条目会一并删除。`}
+                />
 
-              {/* 模型条目：这一家挂着的所有模型；普通模式用哪个，去「回复风格」页指派 */}
-              {mine.length > 0 && (
-                <ul className="remind-list">
+                {/* 模型条目：这一家挂着的所有模型；普通模式用哪个，去「回复风格」页指派 */}
+                <div className="entity-sublist">
                   {mine.map((e) => (
-                    <li className="remind-row" key={e.id}>
-                      <div className="remind-when">
-                        <span style={{ fontWeight: 600 }}>{e.model}</span>
-                        <span className="meta">
-                          输出上限 {e.maxOutput || "默认"} · 上下文{" "}
-                          {e.contextWindow
-                            ? tokensToK(e.contextWindow)
-                            : "默认"}
-                        </span>
-                      </div>
-                      <div className="row-actions">
+                    <EntityRow
+                      key={e.id}
+                      title={e.model}
+                      summary={entrySummary(e)}
+                      editing={entryId === e.id}
+                      onEdit={() => openEditEntry(e)}
+                      onDelete={() => void delEntry(e)}
+                      deleteConfirm={`删掉模型「${e.model}」？`}
+                      right={
                         <button
-                          className="btn btn-ghost btn-sm"
-                          onClick={() => startEntryEdit(e)}
+                          className={"chip" + (e.active ? " on" : "")}
+                          type="button"
+                          disabled={e.active}
+                          onClick={() => void setActive(e)}
+                          title={
+                            e.active
+                              ? "正在生效的模型；要换就点别的条目上的「设为生效」"
+                              : "把普通模式指到这一条"
+                          }
                         >
-                          {entryEditId === e.id ? "收起" : "编辑"}
+                          {e.active ? "生效中" : "设为生效"}
                         </button>
-                        <button
-                          className="btn btn-danger btn-sm"
-                          onClick={() => void delEntry(e)}
-                        >
-                          删除
-                        </button>
-                      </div>
-                      {entryEditId === e.id && entryEdit && (
-                        <div className="panel-body">
-                          <div className="inline-form">
-                            <input
-                              className="field"
-                              placeholder="模型名"
-                              value={entryEdit.model}
-                              onChange={(ev) =>
-                                setEntryEdit({
-                                  ...entryEdit,
-                                  model: ev.target.value,
-                                })
-                              }
-                            />
-                            <input
-                              className="field"
-                              placeholder="输出上限（token，可空）"
-                              value={entryEdit.maxOutput}
-                              onChange={(ev) =>
-                                setEntryEdit({
-                                  ...entryEdit,
-                                  maxOutput: ev.target.value,
-                                })
-                              }
-                            />
-                            <input
-                              className="field"
-                              placeholder="最大上下文（K，可空）"
-                              value={entryEdit.contextWindow}
-                              onChange={(ev) =>
-                                setEntryEdit({
-                                  ...entryEdit,
-                                  contextWindow: ev.target.value,
-                                })
-                              }
-                            />
-                            <button
-                              className="btn btn-primary btn-sm"
-                              onClick={() => void saveEntryEdit()}
-                            >
-                              保存
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </li>
+                      }
+                    />
                   ))}
-                </ul>
-              )}
-              {mine.length === 0 && (
-                <p className="empty-sm">
-                  这家还没挂模型 —— 点「添加模型」拉列表挑，或者手填一个。
-                </p>
-              )}
-
-              {/* 添加模型行：手填模型名，或点上面拉回来的 chips */}
-              {openAddFor === p.id && (
-                <div className="panel-body">
-                  {entryErr && <p className="err">{entryErr}</p>}
-                  {listing && <p className="empty-sm">拉取中…</p>}
-                  {listErr && listingId === p.id && (
-                    <p className="err">{listErr}</p>
+                  {!mine.length && (
+                    <EntityNote>
+                      这家还没挂模型 —— 点「添加模型」拉列表挑，或者手填一个。
+                    </EntityNote>
                   )}
-                  {models && !listing && !models.length && !listErr && (
-                    <p className="empty-sm">
-                      这一家没回模型清单 —— Key 或地址可能不对。
-                    </p>
-                  )}
-                  {!!models?.length && (
-                    <>
-                      <div className="tabs">
-                        {models.map((m) => (
-                          <button
-                            key={m.id}
-                            className="chip"
-                            title={
-                              m.name && m.name !== m.id ? m.name : undefined
-                            }
-                            onClick={() => void pickModel(p.id, m.id)}
-                          >
-                            {m.id}
-                          </button>
-                        ))}
-                      </div>
-                      <p className="meta">
-                        点一个模型名，直接挂进这一家；也可以在下面手填。
-                      </p>
-                    </>
-                  )}
-                  <div className="inline-form">
-                    <input
-                      className="field"
-                      placeholder="模型名"
-                      value={entryDraft.model}
-                      onChange={(ev) =>
-                        setEntryDraft({
-                          ...entryDraft,
-                          model: ev.target.value,
-                        })
-                      }
-                    />
-                    <input
-                      className="field"
-                      placeholder="输出上限（token，可空）"
-                      value={entryDraft.maxOutput}
-                      onChange={(ev) =>
-                        setEntryDraft({
-                          ...entryDraft,
-                          maxOutput: ev.target.value,
-                        })
-                      }
-                    />
-                    <input
-                      className="field"
-                      placeholder="最大上下文（K，可空）"
-                      value={entryDraft.contextWindow}
-                      onChange={(ev) =>
-                        setEntryDraft({
-                          ...entryDraft,
-                          contextWindow: ev.target.value,
-                        })
-                      }
-                    />
-                    <button
-                      className="btn btn-primary btn-sm"
-                      disabled={!entryDraft.model.trim()}
-                      onClick={() => void addEntry(p.id)}
-                    >
-                      添加
-                    </button>
-                  </div>
+                  <EntityAddButton
+                    label="添加模型"
+                    onClick={() => openAddEntry(p)}
+                  />
                 </div>
-              )}
-
-              {editingId === p.id && editDraft && (
-                <div className="panel-body">
-                  {editErr && <p className="err">{editErr}</p>}
-                  {renderProviderFields(
-                    editDraft,
-                    (patch) =>
-                      setEditDraft((prev) =>
-                        prev ? { ...prev, ...patch } : prev,
-                      ),
-                    `mm-${p.id}`,
-                  )}
-                  <p className="meta">
-                    维护用模型从这一家挂着的模型里挑（往下看有清单），留空就跟着主线走。
-                  </p>
-                  <div className="inline-form">
-                    <button
-                      className="btn btn-primary btn-sm"
-                      onClick={saveEdit}
-                      disabled={
-                        busy ||
-                        !editDraft.name.trim() ||
-                        !editDraft.baseUrl.trim() ||
-                        !editDraft.keySecret.trim()
-                      }
-                    >
-                      保存
-                    </button>
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={() => {
-                        setEditingId("");
-                        setEditDraft(null);
-                      }}
-                    >
-                      取消
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* 维护用模型的下拉选项：这一家自己的模型条目 */}
-              <datalist id={`mm-${p.id}`}>
-                {mine.map((e) => (
-                  <option key={e.id} value={e.model} />
-                ))}
-              </datalist>
-            </li>
-          );
-        })}
-      </ul>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {loading && <p className="empty-sm">读取中…</p>}
       {!loading && !providers.length && !err && (
         <p className="empty-sm">
-          还没有供应商。从上面的厂商挑一家起头，拉模型列表点选后保存；空白新建也行。
+          还没有供应商。点「新增供应商」从厂商挑一家起头，拉模型列表点选后保存；空白新建也行。
         </p>
       )}
 
       {err && <p className="err">{err}</p>}
+
+      {/* 供应商弹页：新增与编辑共用同一份表单，空草稿即新增 */}
+      {providerDialog && (
+        <FormDialog
+          wide
+          title={
+            providerDialog === ADD_SCOPE
+              ? "新增供应商"
+              : `编辑「${editingProvider?.name ?? ""}」`
+          }
+          busy={savingProvider}
+          error={providerErr}
+          dirty={providerForm.dirty(providerForm.draft)}
+          onClose={closeProviderDialog}
+          onSave={() => void saveProvider()}
+        >
+          {providerDialog === ADD_SCOPE && (
+            <FormSection title="起头">
+              <FormRow
+                label="从厂商开始"
+                hint="挑一家带出接口格式、地址与 Key 变量名；接别家就选空白"
+              >
+                <select
+                  className="field"
+                  value={vendorKey}
+                  onChange={(e) => applyVendor(e.target.value)}
+                  aria-label="从厂商开始"
+                >
+                  <option value="">从厂商开始…</option>
+                  {VENDOR_PRESETS.map((v) => (
+                    <option key={v.key} value={v.key}>
+                      {v.label}
+                    </option>
+                  ))}
+                  <option value={BLANK_PRESET}>空白</option>
+                </select>
+              </FormRow>
+              {vendor && (
+                <EntityNote>
+                  {vendor.note}{" "}
+                  <a href={vendor.modelsPage} target="_blank" rel="noreferrer">
+                    官方模型列表站 ↗
+                  </a>
+                </EntityNote>
+              )}
+            </FormSection>
+          )}
+
+          <FormSection title="基本信息">
+            <FormRow label="供应商名称">
+              <input
+                className="field"
+                placeholder="供应商名称"
+                value={providerForm.draft.name}
+                onChange={(e) => patchProvider({ name: e.target.value })}
+              />
+            </FormRow>
+            <FormRow label="接口格式" hint="换格式时接口地址跟着预设表换对">
+              <select
+                className="field"
+                value={providerForm.draft.format}
+                onChange={(e) => {
+                  const f = e.target.value as ModelFormat;
+                  // 格式换了，门也得换：地址跟着预设表走，别让 anthropic 的门收 openai 的信
+                  const next = urlForFormat(
+                    providerForm.draft.baseUrl,
+                    providerForm.draft.format,
+                    f,
+                  );
+                  patchProvider(
+                    next ? { format: f, baseUrl: next } : { format: f },
+                  );
+                }}
+                aria-label="接口格式"
+              >
+                {(Object.keys(MODEL_FORMAT_LABEL) as ModelFormat[]).map(
+                  (f) => (
+                    <option key={f} value={f}>
+                      {MODEL_FORMAT_LABEL[f]}
+                    </option>
+                  ),
+                )}
+              </select>
+            </FormRow>
+            <FormRow label="接口地址">
+              <input
+                className="field"
+                placeholder="Base URL"
+                value={providerForm.draft.baseUrl}
+                onChange={(e) => patchProvider({ baseUrl: e.target.value })}
+              />
+            </FormRow>
+          </FormSection>
+
+          <FormSection title="凭据">
+            <FormRow
+              label="Key 变量名"
+              hint={
+                looksLikeRawKey(providerForm.draft.keySecret)
+                  ? rawKeyHint
+                  : "填 secret 的变量名，不是 Key 本体"
+              }
+            >
+              <input
+                className="field"
+                list="mc-key-secrets"
+                placeholder="Key 变量名"
+                value={providerForm.draft.keySecret}
+                onChange={(e) => patchProvider({ keySecret: e.target.value })}
+              />
+            </FormRow>
+            <EntityNote>
+              Key 填的是变量名：新厂商先在终端跑 npx wrangler secret put
+              DEEPSEEK_KEY 把 Key 配进这台机器，再到这里填变量名
+              {keySecrets.length ? "，配过的名字会出现在下拉里" : ""}。
+              {hasLegacyKey
+                ? " 检测到环境里还配着 API_KEY：未建模型目录时，它仍会被用作回落。"
+                : ""}
+            </EntityNote>
+          </FormSection>
+
+          <FormSection title="维护性调用">
+            <FormRow
+              label="维护用 Key"
+              hint="后台整理记忆这类活单独用哪把；留空 = 用上面那把"
+            >
+              <input
+                className="field"
+                list="mc-key-secrets"
+                placeholder="维护用 Key（留空 = 用上面那把）"
+                value={providerForm.draft.maintKeySecret}
+                onChange={(e) =>
+                  patchProvider({ maintKeySecret: e.target.value })
+                }
+              />
+            </FormRow>
+            <FormRow
+              label="维护用模型"
+              hint="留空 = 复用当前生效的主线模型；可从这一家挂着的模型里挑"
+            >
+              <input
+                className="field"
+                list="mc-maint-models"
+                placeholder="维护用模型（留空 = 复用主线）"
+                value={providerForm.draft.maintModel}
+                onChange={(e) => patchProvider({ maintModel: e.target.value })}
+              />
+            </FormRow>
+          </FormSection>
+
+          {providerDialog === ADD_SCOPE && (
+            <FormSection title="首个模型">
+              <FormRow label="首个模型名" hint="可空，之后再加">
+                <input
+                  className="field"
+                  placeholder="首个模型名（可空，之后再加）"
+                  value={providerForm.draft.firstModel}
+                  onChange={(e) =>
+                    patchProvider({ firstModel: e.target.value })
+                  }
+                />
+              </FormRow>
+              <FormRow label="输出上限" hint="token，留空 = 用服务端默认">
+                <input
+                  className="field"
+                  placeholder="输出上限（token，可空）"
+                  value={providerForm.draft.firstMax}
+                  onChange={(e) => patchProvider({ firstMax: e.target.value })}
+                />
+              </FormRow>
+              <button
+                className="btn btn-ghost btn-sm"
+                type="button"
+                disabled={
+                  !providerForm.draft.baseUrl.trim() ||
+                  !providerForm.draft.keySecret.trim()
+                }
+                title="问这一家现在有哪些模型可挑"
+                onClick={() =>
+                  void pullModels(
+                    ADD_SCOPE,
+                    providerForm.draft.format,
+                    providerForm.draft.baseUrl.trim(),
+                    providerForm.draft.keySecret.trim(),
+                  )
+                }
+              >
+                {pullScope === ADD_SCOPE && pulling ? "拉取中…" : "拉取模型列表"}
+              </button>
+              {pulledBlock(ADD_SCOPE)}
+            </FormSection>
+          )}
+
+          {/* 维护用模型的下拉选项：编辑哪家就给哪家的模型条目 */}
+          <datalist id="mc-maint-models">
+            {(editingProvider
+              ? entries.filter((e) => e.providerId === editingProvider.id)
+              : []
+            ).map((e) => (
+              <option key={e.id} value={e.model} />
+            ))}
+          </datalist>
+        </FormDialog>
+      )}
+
+      {/* 模型条目弹页：新增与编辑共用；开窗自动拉这一家的清单，点芯片填模型名 */}
+      {entryDialog && entryProvider && (
+        <FormDialog
+          wide
+          title={
+            editingEntry
+              ? `编辑模型「${editingEntry.model}」`
+              : `给「${entryProvider.name}」添加模型`
+          }
+          subtitle="点下面的清单挑一个模型名，或者直接手填；两个额度格都可以留空。"
+          busy={savingEntry}
+          error={entryErr}
+          dirty={entryForm.dirty(entryForm.draft)}
+          onClose={closeEntryDialog}
+          onSave={() => void saveEntry()}
+        >
+          <FormSection title="模型">
+            <FormRow label="模型名">
+              <input
+                className="field"
+                placeholder="模型名"
+                value={entryForm.draft.model}
+                onChange={(e) =>
+                  entryForm.setDraft((prev) => ({
+                    ...prev,
+                    model: e.target.value,
+                  }))
+                }
+              />
+            </FormRow>
+            <button
+              className="btn btn-ghost btn-sm"
+              type="button"
+              title="重新问这一家有哪些模型可挑"
+              onClick={() =>
+                void pullModels(
+                  entryProvider.id,
+                  entryProvider.format,
+                  entryProvider.baseUrl,
+                  entryProvider.keySecret,
+                )
+              }
+            >
+              {pullScope === entryProvider.id && pulling
+                ? "拉取中…"
+                : "重新拉取模型列表"}
+            </button>
+            {pulledBlock(entryProvider.id)}
+          </FormSection>
+
+          <FormSection title="额度">
+            <FormRow label="输出上限" hint="token，留空 = 用服务端默认">
+              <input
+                className="field"
+                placeholder="输出上限（token，可空）"
+                value={entryForm.draft.maxOutput}
+                onChange={(e) =>
+                  entryForm.setDraft((prev) => ({
+                    ...prev,
+                    maxOutput: e.target.value,
+                  }))
+                }
+              />
+            </FormRow>
+            <FormRow
+              label="最大上下文"
+              hint="以 K 计，填 200 就是 200K；留空 = 不设，界面回落默认档"
+            >
+              <input
+                className="field"
+                placeholder="最大上下文（K，可空）"
+                value={entryForm.draft.contextWindow}
+                onChange={(e) =>
+                  entryForm.setDraft((prev) => ({
+                    ...prev,
+                    contextWindow: e.target.value,
+                  }))
+                }
+              />
+            </FormRow>
+          </FormSection>
+        </FormDialog>
+      )}
 
       {/* datalist 只渲染一次：多个输入框共享同一份 secret 名清单 */}
       <datalist id="mc-key-secrets">
@@ -3331,72 +3259,12 @@ export function ModelConfigsPanel() {
 }
 
 // ── 读音配置 ──────────────────────────────────────────
+//
+// 草稿、协议默认值联动、必填校验与行摘要都在 ../lib/ttsConfigForm.ts ——
+// 新增与编辑共用一个弹页，这套取舍得能测。
 
-/** 读音条目的草稿：新增与行内编辑共用 */
-interface TtsDraft {
-  name: string;
-  protocol: TtsProtocol;
-  baseUrl: string;
-  keySecret: string;
-  model: string;
-  voice: string;
-  style: string;
-}
-
-const blankTtsDraft = (): TtsDraft => ({
-  name: "",
-  protocol: "mimo-chat",
-  baseUrl: "",
-  keySecret: "",
-  model: "",
-  voice: "",
-  style: "",
-});
-
-/**
- * 「默认匹配」：换协议时，没被用户动过的字段跟到新协议的默认值
- * （地址 / Key 变量名 / 模型 / 音色一起换对），手填过的字段留住不洗。
- * 判「没动过」就看是不是空的、或者还停在旧协议的默认值上。
- */
-const ttsWithProtocol = (d: TtsDraft, next: TtsProtocol): TtsDraft => {
-  const from = TTS_DEFAULTS[d.protocol];
-  const to = TTS_DEFAULTS[next];
-  const swap = (cur: string, oldDef: string, newDef: string) =>
-    cur.trim() === "" || cur.trim() === oldDef.trim() ? newDef : cur;
-  return {
-    ...d,
-    protocol: next,
-    baseUrl: swap(d.baseUrl, from.baseUrl, to.baseUrl),
-    keySecret: swap(d.keySecret, from.keySecret, to.keySecret),
-    model: swap(d.model, from.model, to.model),
-    voice: swap(d.voice, from.voice, to.voice),
-  };
-};
-
-/** 新增表单一进来就带出默认协议（MiMo）的全套默认值，起个头再改 */
-const freshTtsDraft = (): TtsDraft =>
-  ttsWithProtocol(blankTtsDraft(), "mimo-chat");
-
-const ttsDraftOf = (t: TtsConfig): TtsDraft => ({
-  name: t.name,
-  protocol: t.protocol,
-  baseUrl: t.baseUrl,
-  keySecret: t.keySecret,
-  model: t.model,
-  voice: t.voice,
-  style: t.style,
-});
-
-/** 非MiMo 式的条目 style 没有意义，提交时清掉，免得留脏数据 */
-const ttsPayloadOf = (d: TtsDraft) => ({
-  name: d.name.trim(),
-  protocol: d.protocol,
-  baseUrl: d.baseUrl.trim(),
-  keySecret: d.keySecret.trim(),
-  model: d.model.trim(),
-  voice: d.voice.trim(),
-  style: d.protocol === "mimo-chat" ? d.style.trim() : "",
-});
+/** 弹页认的「新增」标记；其余非空值是条目 id（编辑），空串 = 弹页关着 */
+const TTS_NEW = "__new";
 
 /**
  * 读音配置：一条就是一副可用的嗓子。内置的三家已经移除，
@@ -3409,22 +3277,32 @@ export function TtsConfigsPanel() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
-  // 新增表单
-  const [draft, setDraft] = useState<TtsDraft>(freshTtsDraft);
-  const [addErr, setAddErr] = useState("");
-  const [adding, setAdding] = useState(false);
+  // 这副嗓子在这台机器上用不用得上，是后端按 env 判的（/api/voices 逐条回 why）。
+  // 不照前端那份 Key 下拉清单自己推：清单是有名目的闭集，填了别名会被误说成「没配」。
+  const [whyById, setWhyById] = useState<Record<string, string>>({});
 
-  // 行内编辑
-  const [editingId, setEditingId] = useState("");
-  const [editDraft, setEditDraft] = useState<TtsDraft | null>(null);
-  const [editErr, setEditErr] = useState("");
-  const [busy, setBusy] = useState(false);
+  // 列表行只读，改的都是「打开弹页那一刻拍下的草稿」，按下保存才提交。
+  // hook 一律留在函数体最上面：放到条件分支或早退之后，React 会报
+  // "Rendered more hooks than during the previous render"，面板就停在读取中不动了。
+  const form = useDraft<TtsFormDraft>(freshTtsDraft());
+  const [dialog, setDialog] = useState("");
+  const [dialogErr, setDialogErr] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const r = await api.ttsConfigs();
+      const [r, v] = await Promise.all([
+        api.ttsConfigs(),
+        // 顺带问一遍每条现在配不配得上；这一步挂了不影响配置面本身
+        api.voices().catch(() => null),
+      ]);
       setTts(r.tts);
       setKeySecrets(r.keySecrets);
+      setWhyById(
+        Object.fromEntries(
+          (v?.voices ?? []).filter((x) => x.why).map((x) => [x.id, x.why]),
+        ),
+      );
       setErr("");
     } catch (e) {
       setErr((e as Error).message);
@@ -3437,45 +3315,52 @@ export function TtsConfigsPanel() {
     void load();
   }, [load]);
 
-  const add = async () => {
-    if (adding) return;
-    setAdding(true);
-    setAddErr("");
-    try {
-      await api.ttsConfigAdd(ttsPayloadOf(draft));
-      setDraft(freshTtsDraft());
-      await load();
-    } catch (e) {
-      setAddErr((e as Error).message);
-    } finally {
-      setAdding(false);
-    }
+  const patch = (p: Partial<TtsFormDraft>) =>
+    form.setDraft((prev) => ({ ...prev, ...p }));
+
+  // 新增与编辑共用同一个弹页：起头草稿就是新增，快照就是编辑
+  const openAdd = () => {
+    form.reset(freshTtsDraft());
+    setDialogErr("");
+    setDialog(TTS_NEW);
   };
 
-  const startEdit = (t: TtsConfig) => {
-    if (editingId === t.id) {
-      setEditingId("");
-      setEditDraft(null);
+  const openEdit = (t: TtsConfig) => {
+    form.reset(ttsDraftOf(t));
+    setDialogErr("");
+    setDialog(t.id);
+  };
+
+  const closeDialog = () => {
+    setDialog("");
+    setDialogErr("");
+  };
+
+  const isNew = dialog === TTS_NEW;
+  const editing = isNew ? null : tts.find((t) => t.id === dialog) || null;
+  // 占位话与协议说明都跟着草稿的协议走：切了协议就该看到新那家的默认值
+  const def = TTS_DEFAULTS[form.draft.protocol];
+
+  const save = async () => {
+    if (!dialog || saving) return;
+    const missing = ttsMissingFields(form.draft);
+    if (missing.length) {
+      setDialogErr(missing.map((m) => m.message).join("；"));
       return;
     }
-    setEditingId(t.id);
-    setEditErr("");
-    setEditDraft(ttsDraftOf(t));
-  };
-
-  const saveEdit = async () => {
-    if (!editDraft || !editingId || busy) return;
-    setBusy(true);
-    setEditErr("");
+    setSaving(true);
+    setDialogErr("");
     try {
-      await api.ttsConfigPatch({ id: editingId, ...ttsPayloadOf(editDraft) });
-      setEditingId("");
-      setEditDraft(null);
+      if (isNew) await api.ttsConfigAdd(ttsPayloadOf(form.draft));
+      else await api.ttsConfigPatch({ id: dialog, ...ttsPayloadOf(form.draft) });
+      // 成功后重新拉一遍清单再关窗：列表显示的是落库后的真值，不做乐观更新
       await load();
+      setDialog("");
     } catch (e) {
-      setEditErr((e as Error).message);
+      // 后端校验不过（缺 Key 变量名之类）原样摆在弹页里，不关窗
+      setDialogErr((e as Error).message);
     } finally {
-      setBusy(false);
+      setSaving(false);
     }
   };
 
@@ -3483,81 +3368,6 @@ export function TtsConfigsPanel() {
     if (!window.confirm(`删掉「${t.name}」？这副嗓子之后就没人念了。`)) return;
     await api.ttsConfigDelete(t.id).catch((e: Error) => setErr(e.message));
     await load();
-  };
-
-  /** 新增与编辑共用的字段集：model / voice 的占位话跟着协议走 */
-  const renderTtsFields = (
-    d: TtsDraft,
-    patch: (p: Partial<TtsDraft>) => void,
-  ) => {
-    const def = TTS_DEFAULTS[d.protocol];
-    return (
-      <>
-        <div className="inline-form">
-          <input
-            className="field"
-            placeholder="名称"
-            value={d.name}
-            onChange={(e) => patch({ name: e.target.value })}
-          />
-          <select
-            className="field"
-            value={d.protocol}
-            onChange={(e) =>
-              patch(ttsWithProtocol(d, e.target.value as TtsProtocol))
-            }
-            aria-label="协议"
-          >
-            {(Object.keys(TTS_PROTOCOL_LABEL) as TtsProtocol[]).map((p) => (
-              <option key={p} value={p}>
-                {TTS_PROTOCOL_LABEL[p]}
-              </option>
-            ))}
-          </select>
-          <input
-            className="field"
-            list="tts-key-secrets"
-            placeholder="Key 变量名"
-            value={d.keySecret}
-            onChange={(e) => patch({ keySecret: e.target.value })}
-          />
-        </div>
-        <input
-          className="field"
-          placeholder="Base URL（可空 = 用这一家的默认地址）"
-          value={d.baseUrl}
-          onChange={(e) => patch({ baseUrl: e.target.value })}
-        />
-        <div className="inline-form">
-          <input
-            className="field"
-            placeholder={`模型（${def.model}）`}
-            value={d.model}
-            onChange={(e) => patch({ model: e.target.value })}
-          />
-          <input
-            className="field"
-            list={`tts-voices-${d.protocol}`}
-            placeholder={def.voicePh}
-            value={d.voice}
-            onChange={(e) => patch({ voice: e.target.value })}
-          />
-        </div>
-        {d.protocol === "mimo-chat" && (
-          <input
-            className="field"
-            placeholder="语气 style（这一家特有，可空）"
-            value={d.style}
-            onChange={(e) => patch({ style: e.target.value })}
-          />
-        )}
-        <p className="meta">
-          {def.note}
-          {d.protocol === "mimo-chat" ? "；语气 style 只有这一家用得上" : ""}
-          {keySecrets.length ? "；Key 配过的名字在下拉里" : ""}
-        </p>
-      </>
-    );
   };
 
   return (
@@ -3568,88 +3378,25 @@ export function TtsConfigsPanel() {
         可用的那条是默认嗓子。
       </p>
 
-      <h3 className="sect">新增嗓子</h3>
-      <div className="inline-form col">
-        {addErr && <p className="err">{addErr}</p>}
-        {renderTtsFields(draft, (p) => setDraft((prev) => ({ ...prev, ...p })))}
-        <div className="inline-form">
-          <button
-            className="btn btn-primary btn-sm"
-            onClick={add}
-            disabled={
-              adding ||
-              !draft.name.trim() ||
-              !draft.keySecret.trim() ||
-              !draft.model.trim()
-            }
-          >
-            {adding ? "保存中…" : "保存"}
-          </button>
-        </div>
-      </div>
-
       <h3 className="sect">嗓子（{tts.length}，排前面的优先）</h3>
-      <ul className="remind-list">
-        {tts.map((t) => (
-          <li className="remind-row" key={t.id}>
-            <div className="remind-when">
-              <span style={{ fontWeight: 600 }}>{t.name}</span>
-              <span className="tag">
-                {TTS_PROTOCOL_LABEL[t.protocol] || t.protocol}
-              </span>
-              <span className="meta">{t.model || "默认模型"}</span>
-              <span className="meta">音色 {voiceLabel(t.protocol, t.voice)}</span>
-            </div>
+      <EntityAddButton label="新增嗓子" onClick={openAdd} />
 
-            <div className="row-actions">
-              <button
-                className="btn btn-ghost btn-sm"
-                onClick={() => startEdit(t)}
-              >
-                {editingId === t.id ? "收起" : "编辑"}
-              </button>
-              <button
-                className="btn btn-danger btn-sm"
-                onClick={() => void del(t)}
-              >
-                删除
-              </button>
-            </div>
-
-            {editingId === t.id && editDraft && (
-              <div className="panel-body">
-                {editErr && <p className="err">{editErr}</p>}
-                {renderTtsFields(editDraft, (p) =>
-                  setEditDraft((prev) => (prev ? { ...prev, ...p } : prev)),
-                )}
-                <div className="inline-form">
-                  <button
-                    className="btn btn-primary btn-sm"
-                    onClick={saveEdit}
-                    disabled={
-                      busy ||
-                      !editDraft.name.trim() ||
-                      !editDraft.keySecret.trim() ||
-                      !editDraft.model.trim()
-                    }
-                  >
-                    保存
-                  </button>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => {
-                      setEditingId("");
-                      setEditDraft(null);
-                    }}
-                  >
-                    取消
-                  </button>
-                </div>
-              </div>
-            )}
-          </li>
-        ))}
-      </ul>
+      {/* 默认嗓子由列表顺序表达（排在最前且 Key 可用的那条），行上不再加「默认」标记 */}
+      {!!tts.length && (
+        <div className="entity-list">
+          {tts.map((t) => (
+            <EntityRow
+              key={t.id}
+              title={t.name}
+              summary={ttsSummary(t, whyById[t.id] ?? "")}
+              editing={dialog === t.id}
+              onEdit={() => openEdit(t)}
+              onDelete={() => void del(t)}
+              deleteConfirm={`删掉「${t.name}」？这副嗓子之后就没人念了。`}
+            />
+          ))}
+        </div>
+      )}
 
       {loading && <p className="empty-sm">读取中…</p>}
       {!loading && !tts.length && !err && (
@@ -3657,6 +3404,104 @@ export function TtsConfigsPanel() {
       )}
 
       {err && <p className="err">{err}</p>}
+
+      {/* 嗓子弹页：新增与编辑共用同一份表单，起头草稿即新增 */}
+      {dialog && (
+        <FormDialog
+          wide
+          title={isNew ? "新增嗓子" : `编辑「${editing?.name ?? ""}」`}
+          subtitle="一条就是一副可用的嗓子；留空的格子走这一家的默认值。"
+          busy={saving}
+          error={dialogErr}
+          dirty={form.dirty(form.draft)}
+          onClose={closeDialog}
+          onSave={() => void save()}
+        >
+          <FormSection title="基本信息">
+            <FormRow label="名称">
+              <input
+                className="field"
+                placeholder="名称"
+                value={form.draft.name}
+                onChange={(e) => patch({ name: e.target.value })}
+              />
+            </FormRow>
+            <FormRow label="协议" hint="换协议时，没动过的格子跟着换到这一家的默认值">
+              <select
+                className="field"
+                value={form.draft.protocol}
+                onChange={(e) =>
+                  form.setDraft(
+                    ttsWithProtocol(form.draft, e.target.value as TtsProtocol),
+                  )
+                }
+                aria-label="协议"
+              >
+                {(Object.keys(TTS_PROTOCOL_LABEL) as TtsProtocol[]).map((p) => (
+                  <option key={p} value={p}>
+                    {TTS_PROTOCOL_LABEL[p]}
+                  </option>
+                ))}
+              </select>
+            </FormRow>
+          </FormSection>
+
+          <FormSection title="凭据">
+            <FormRow label="Key 变量名" hint="填的是 secret 变量名，不是 Key 本体">
+              <input
+                className="field"
+                list="tts-key-secrets"
+                placeholder="Key 变量名"
+                value={form.draft.keySecret}
+                onChange={(e) => patch({ keySecret: e.target.value })}
+              />
+            </FormRow>
+            <FormRow label="接口地址" wide>
+              <input
+                className="field"
+                placeholder="Base URL（可空 = 用这一家的默认地址）"
+                value={form.draft.baseUrl}
+                onChange={(e) => patch({ baseUrl: e.target.value })}
+              />
+            </FormRow>
+          </FormSection>
+
+          <FormSection title="嗓子">
+            <FormRow label="模型" hint="留空也走这一家的默认模型">
+              <input
+                className="field"
+                placeholder={`模型（${def.model}）`}
+                value={form.draft.model}
+                onChange={(e) => patch({ model: e.target.value })}
+              />
+            </FormRow>
+            <FormRow label="音色" hint="点输入框能从预置表里挑；清单外的 id 手填也照收">
+              <input
+                className="field"
+                list={`tts-voices-${form.draft.protocol}`}
+                placeholder={def.voicePh}
+                value={form.draft.voice}
+                onChange={(e) => patch({ voice: e.target.value })}
+              />
+            </FormRow>
+            {form.draft.protocol === "mimo-chat" && (
+              <FormRow label="语气 style" hint="这一家特有，可空">
+                <input
+                  className="field"
+                  placeholder="语气 style（这一家特有，可空）"
+                  value={form.draft.style}
+                  onChange={(e) => patch({ style: e.target.value })}
+                />
+              </FormRow>
+            )}
+            <EntityNote>
+              {def.note}
+              {form.draft.protocol === "mimo-chat" ? "；语气 style 只有这一家用得上" : ""}
+              {keySecrets.length ? "；Key 配过的名字在下拉里" : ""}。
+            </EntityNote>
+          </FormSection>
+        </FormDialog>
+      )}
 
       <datalist id="tts-key-secrets">
         {keySecrets.map((k) => (
@@ -3677,79 +3522,31 @@ export function TtsConfigsPanel() {
   );
 }
 
-/** 三档的名目与定位。tier 就是配置主键，顺序永远是：high → fast → fallback */
-const DRAW_TIER_META: Record<
-  DrawConfig["tier"],
-  { title: string; desc: string }
-> = {
-  fast: { title: "主力 fast", desc: "日常配图走这档：便宜、不带平台水印" },
-  high: {
-    title: "高质量 high",
-    desc: "按张付费：画立绘、二次元、封面，或者他说「要好看点」时她才升档",
-  },
-  fallback: {
-    title: "兜底 fallback",
-    desc: "前面全栽了才轮到它：能出一张是正事",
-  },
-};
-
-const DRAW_FORMAT_LABEL: Record<DrawFormat, string> = {
-  "workers-ai": "Workers AI 绑定",
-  siliconflow: "硅基流动",
-  zhipu: "智谱",
-  minimax: "MiniMax",
-};
-
-/** 表单草稿：模型清单在输入框里是逗号分隔的字符串，存库时折回数组 */
-interface DrawDraft {
-  format: DrawFormat;
-  label: string;
-  endpoint: string;
-  models: string;
-  keySecret: string;
-}
-
-const drawDraftOf = (c: DrawConfig): DrawDraft => ({
-  format: c.format,
-  label: c.label,
-  endpoint: c.endpoint,
-  models: c.models.join(", "),
-  keySecret: c.keySecret,
-});
-
 /**
- * 「默认匹配」：换出图协议时，没被用户动过的字段跟到新格式的默认值
- * （端点 / 模型清单 / Key 变量名 / 标注名一起换对），手填过的留住不洗。
- */
-const drawWithFormat = (d: DrawDraft, next: DrawFormat): DrawDraft => {
-  const from = DRAW_FORMAT_DEFAULTS[d.format];
-  const to = DRAW_FORMAT_DEFAULTS[next];
-  const swap = (cur: string, oldDef: string, newDef: string) =>
-    cur.trim() === "" || cur.trim() === oldDef.trim() ? newDef : cur;
-  return {
-    ...d,
-    format: next,
-    endpoint: swap(d.endpoint, from.endpoint, to.endpoint),
-    models: swap(d.models, from.models, to.models),
-    keySecret: swap(d.keySecret, from.keySecret, to.keySecret),
-    label: swap(d.label, from.label, to.label),
-  };
-};
-
-/**
- * 绘图配置面板：出图三档各一张卡，每档配「出图协议 / 标注名 / 端点 /
- * 模型降级清单 / key 变量名」，存 draw_configs（见后端 agent/drawConfigs.ts）。
+ * 绘图配置面板：出图三档（fast 主力 / high 高质量 / fallback 兜底）各一行。
+ *
+ * 每档配「出图协议 / 标注名 / 端点 / 模型降级清单 / key 变量名」，
+ * 存 draw_configs（见后端 agent/drawConfigs.ts）。tier 就是主键：三档恒在，
+ * 后端没有新增与删除这条路，所以行上只有「编辑」。
  * workers-ai 档走平台 AI 绑定（neurons 计费），端点与 key 栏用不上。
  * 红线同模型/读音两套目录：key 栏填的是 secret 变量名，Key 本体永不进浏览器。
+ * 三档的名目、草稿联动、清单切分与行摘要在 ../lib/drawConfigForm.ts。
  */
 export function DrawConfigsPanel() {
   const [configs, setConfigs] = useState<DrawConfig[]>([]);
-  const [drafts, setDrafts] = useState<Record<string, DrawDraft>>({});
   const [keySecrets, setKeySecrets] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
-  const [savingTier, setSavingTier] = useState("");
   const [err, setErr] = useState("");
   const [saved, setSaved] = useState("");
+
+  // 行只读，改的都是「打开弹页那一刻拍下的草稿」，按下保存才提交。
+  // hook 一律留在函数体最上面 —— 下面那句 if (loading) 就是本组件的早退，
+  // 把 hook 放到它之后会报 "Rendered more hooks than during the previous render"。
+  const form = useDraft<DrawFormDraft>(blankDrawDraft());
+  // "" = 关着；其余是档位 = 编辑那档
+  const [dialog, setDialog] = useState<DrawConfig["tier"] | "">("");
+  const [dialogErr, setDialogErr] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -3759,9 +3556,6 @@ export function DrawConfigsPanel() {
         api.modelCatalog(),
       ]);
       setConfigs(r.configs);
-      setDrafts(
-        Object.fromEntries(r.configs.map((c) => [c.tier, drawDraftOf(c)])),
-      );
       setKeySecrets(catalog.keySecrets);
       setErr("");
     } catch (e) {
@@ -3775,65 +3569,105 @@ export function DrawConfigsPanel() {
     void load();
   }, [load]);
 
-  const save = async (tier: DrawConfig["tier"]) => {
-    const d = drafts[tier];
-    if (!d) return;
-    setSavingTier(tier);
-    setErr("");
+  const patch = (p: Partial<DrawFormDraft>) =>
+    form.setDraft((prev) => ({ ...prev, ...p }));
+
+  const openEdit = (c: DrawConfig) => {
+    form.reset(drawDraftOf(c));
+    setDialogErr("");
+    setDialog(c.tier);
+  };
+
+  const closeDialog = () => {
+    setDialog("");
+    setDialogErr("");
+  };
+
+  const binding = drawIsBinding(form.draft.format);
+  // 只提示、不拦保存：有的厂牌 Key 确实长这样（与模型目录同一个口径）
+  const badKey = !binding && looksLikeRawKey(form.draft.keySecret);
+  // 这串文本现在切出来是几个模型：降级顺序就是它，先数给人看
+  const modelCount = parseDrawModels(form.draft.models).length;
+
+  const save = async () => {
+    if (!dialog || saving) return;
+    const missing = drawMissingFields(form.draft);
+    if (missing.length) {
+      setDialogErr(missing.map((m) => m.message).join("；"));
+      return;
+    }
+    setSaving(true);
+    setDialogErr("");
     setSaved("");
     try {
-      await api.drawConfigPatch({
-        tier,
-        format: d.format,
-        label: d.label.trim(),
-        endpoint: d.endpoint.trim(),
-        keySecret: d.keySecret.trim(),
-        models: d.models
-          .split(/[，,]/)
-          .map((m) => m.trim())
-          .filter(Boolean),
-      });
-      setSaved(`${DRAW_TIER_META[tier].title} 已保存`);
+      await api.drawConfigPatch({ tier: dialog, ...drawPayloadOf(form.draft) });
+      // 先给回执，再重新拉一遍回填，然后关窗：列表显示的是落库后的真值
+      setSaved(`${DRAW_TIER_META[dialog].title} 已保存`);
       await load();
+      setDialog("");
     } catch (e) {
-      setErr((e as Error).message);
+      // 后端校验不过（清单空、协议不认识之类）原样摆在弹页里，不关窗
+      setDialogErr((e as Error).message);
     } finally {
-      setSavingTier("");
+      setSaving(false);
     }
   };
 
   if (loading) return <p className="empty-sm">读取中…</p>;
 
   return (
-    <div>
+    <div className="panel-body">
+      <h3 className="sect">出图三档（{configs.length}）</h3>
       {err && <p className="err">{err}</p>}
       {saved && <p className="meta">{saved}</p>}
-      {configs.map((c) => {
-        const d = drafts[c.tier];
-        if (!d) return null;
-        const isBinding = d.format === "workers-ai";
-        const badKey = !isBinding && d.keySecret.trim().startsWith("sk-");
-        return (
-          <div className="panel-body" key={c.tier}>
-            <div className="remind-when">
-              <span style={{ fontWeight: 600 }}>
-                {DRAW_TIER_META[c.tier].title}
-              </span>
+
+      {/* tier 是主键、三档恒在：没有「新增」入口，行上也不给删除 */}
+      {!!configs.length && (
+        <div className="entity-list">
+          {configs.map((c) => (
+            <div className="entity-group" key={c.tier}>
+              <EntityRow
+                title={DRAW_TIER_META[c.tier].title}
+                summary={drawSummary(c)}
+                editing={dialog === c.tier}
+                onEdit={() => openEdit(c)}
+              />
+              <EntityNote>{DRAW_TIER_META[c.tier].desc}</EntityNote>
             </div>
-            <p className="meta">{DRAW_TIER_META[c.tier].desc}</p>
-            <div className="inline-form">
+          ))}
+        </div>
+      )}
+
+      {!configs.length && (
+        <p className="empty-sm">后端没回绘图配置，刷新看看。</p>
+      )}
+
+      {/* 档位弹页：三档共用同一份表单，拍的就是这一档现在的配置 */}
+      {dialog && (
+        <FormDialog
+          wide
+          title={`编辑「${DRAW_TIER_META[dialog].title}」`}
+          subtitle={DRAW_TIER_META[dialog].desc}
+          busy={saving}
+          error={dialogErr}
+          dirty={form.dirty(form.draft)}
+          onClose={closeDialog}
+          onSave={() => void save()}
+        >
+          <FormSection title="走哪家">
+            <FormRow
+              label="出图协议"
+              hint="换协议时，没动过的格子跟着换到这一家的默认值"
+            >
               <select
                 className="field"
-                value={d.format}
+                value={form.draft.format}
                 onChange={(ev) =>
-                  setDrafts({
-                    ...drafts,
-                    [c.tier]: drawWithFormat(
-                      d,
-                      ev.target.value as DrawFormat,
-                    ),
-                  })
+                  form.setDraft(
+                    drawWithFormat(form.draft, ev.target.value as DrawFormat),
+                  )
                 }
+                aria-label="出图协议"
               >
                 {(Object.keys(DRAW_FORMAT_LABEL) as DrawFormat[]).map((f) => (
                   <option key={f} value={f}>
@@ -3841,66 +3675,54 @@ export function DrawConfigsPanel() {
                   </option>
                 ))}
               </select>
+            </FormRow>
+            <FormRow label="标注名" hint="画完图边上那行字">
               <input
                 className="field"
                 placeholder="标注名（画完图边上那行字）"
-                value={d.label}
-                onChange={(ev) =>
-                  setDrafts({
-                    ...drafts,
-                    [c.tier]: { ...d, label: ev.target.value },
-                  })
-                }
+                value={form.draft.label}
+                onChange={(ev) => patch({ label: ev.target.value })}
               />
-            </div>
-            <div className="inline-form">
-              <input
-                className="field"
-                placeholder="出图端点（workers-ai 用不上）"
-                value={d.endpoint}
-                disabled={isBinding}
-                onChange={(ev) =>
-                  setDrafts({
-                    ...drafts,
-                    [c.tier]: { ...d, endpoint: ev.target.value },
-                  })
-                }
-              />
+            </FormRow>
+          </FormSection>
+
+          <FormSection title="模型降级清单">
+            <FormRow label="模型清单" wide>
               <input
                 className="field"
                 placeholder="模型清单（逗号分隔，降级有序）"
-                value={d.models}
-                onChange={(ev) =>
-                  setDrafts({
-                    ...drafts,
-                    [c.tier]: { ...d, models: ev.target.value },
-                  })
-                }
+                value={form.draft.models}
+                onChange={(ev) => patch({ models: ev.target.value })}
               />
-            </div>
-            <div className="inline-form">
+            </FormRow>
+            <EntityNote>
+              现在这串是 {modelCount} 个模型
+              {modelCount > 1 ? "：前面的先试，没成才轮到后面" : ""}
+              {modelCount ? "" : " —— 至少要留一个模型名"}。
+            </EntityNote>
+          </FormSection>
+
+          <FormSection title="接口与钥匙">
+            <FormRow label="出图端点" wide hint="workers-ai 用不上">
+              <input
+                className="field"
+                placeholder="出图端点（workers-ai 用不上）"
+                value={form.draft.endpoint}
+                disabled={binding}
+                onChange={(ev) => patch({ endpoint: ev.target.value })}
+              />
+            </FormRow>
+            <FormRow label="key 变量名" hint="workers-ai 用不上">
               <input
                 className="field"
                 placeholder="key 的 secret 变量名（workers-ai 用不上）"
-                value={d.keySecret}
-                disabled={isBinding}
+                value={form.draft.keySecret}
+                disabled={binding}
                 list="draw-key-secrets"
-                onChange={(ev) =>
-                  setDrafts({
-                    ...drafts,
-                    [c.tier]: { ...d, keySecret: ev.target.value },
-                  })
-                }
+                onChange={(ev) => patch({ keySecret: ev.target.value })}
               />
-              <button
-                className="btn btn-primary btn-sm"
-                disabled={savingTier === c.tier}
-                onClick={() => void save(c.tier)}
-              >
-                {savingTier === c.tier ? "保存中…" : "保存"}
-              </button>
-            </div>
-            {isBinding && (
+            </FormRow>
+            {binding && (
               <p className="meta">
                 走平台 AI 绑定，按 neurons 计费，不用配端点和 key。
               </p>
@@ -3911,9 +3733,10 @@ export function DrawConfigsPanel() {
                 secret put 配进这台机器。
               </p>
             )}
-          </div>
-        );
-      })}
+          </FormSection>
+        </FormDialog>
+      )}
+
       <datalist id="draw-key-secrets">
         {keySecrets.map((k) => (
           <option key={k} value={k} />

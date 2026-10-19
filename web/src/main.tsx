@@ -1,6 +1,10 @@
-import { StrictMode, Suspense, lazy } from "react";
+import { StrictMode, lazy } from "react";
+import { LoadingBoundary } from "./components/LoadingBoundary";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+// 这两份是全站基础样式。生产构建会把结果内联进 index.html（见 vite.config.ts 的
+// inline-startup-css）：弱网不必等一次样式请求就能画出启动与门禁界面；
+// 保留静态导入是为了让 Vite 的依赖图知道聊天框架要用到它们。
 import "./theme.css";
 import "./styles.css";
 
@@ -21,9 +25,9 @@ const path = location.pathname.replace(/\/+$/, "");
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     {path === "/assistant/workbench" ? (
-      <Suspense fallback={<p className="dim" style={{ padding: 24 }}>正在载入工作台…</p>}>
+      <LoadingBoundary label="正在载入工作台" fullscreen>
         <Workbench />
-      </Suspense>
+      </LoadingBoundary>
     ) : (
       <App />
     )}

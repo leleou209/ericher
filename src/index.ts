@@ -1,3 +1,5 @@
+import { sessionConflictResponse } from "./shared/sessionConflict";
+import { fail, readJsonObject } from "./shared/httpInput";
 // Worker 入口：鉴权 → 路由 → routeAgentRequest → 静态资源回退。
 // Agent 本体在 ./agent/cowork.ts。
 
@@ -23,6 +25,9 @@ import {
   type Role,
 } from "./auth";
 import { COMMON_TYPE_ID } from "./agent/userCards";
+// 长期权益的四档口径与 DO 的现查同源（guestTypes.ts）：闸与 RPC 两端各写一遍联合类型，
+// 漏一项就是「REST 进得去、RPC 被拒」的半开
+import type { GuestCardPerm } from "./agent/guestTypes";
 import { compareSemver } from "./version";
 import {
   handleMatrixApi,
@@ -35,6 +40,8 @@ export { CoworkAgent } from "./agent/cowork";
 
 import { DEFAULT_BASE_PROMPT } from "./agent/prompt";
 import { DEFAULT_RECAP_PROMPT } from "./agent/recap";
+// 邮件配置的字段闸：白名单收口在 store 里，路由不自己列可写字段（漏一格就是一格口子）
+import { parseMailConfigInput } from "./mail/store";
 import { analyzeUpload, attachBlock } from "./agent/attach";
 import {
   FOLDER_KEEP,
@@ -149,34 +156,6 @@ function methodNotAllowed(): Response {
   return Response.json({ ok: false, error: "方法不允许" }, { status: 405 });
 }
 
-/**
- * 把平台层的配额报错翻成人话。
- *
- * DO 免费层的「写入行数」是硬顶（10 万行/天），而且超了之后整个 DO 连**读**都会失败 ——
- * 这是平台行为，代码拦不住。但至少别把一行英文原文糊到面板上：
- * 那看起来像是我把什么东西弄坏了，实际上只是今天用完了，明早就回来。
- * 每天 00:00 UTC 重置，也就是北京时间早上 8 点。
- */
-function explain(e: unknown): string {
-  const msg = (e as Error)?.message || String(e);
-  if (/rows written in Durable Objects free tier/i.test(msg)) {
-    // 别写成「读得到、只是记不下」—— 超限之后连读也会一起失败，那样说是在给自己找借口
-    return "今天的记忆额度用完了（Cloudflare 免费层每天 10 万行写入，北京时间早上 8 点重置）。这会儿我整个人都动不了，连翻记忆都不行 —— 不是坏了，明早就回来。";
-  }
-  if (/rows read in Durable Objects free tier/i.test(msg)) {
-    return "今天的读取额度用完了（Cloudflare 免费层每天 500 万行，北京时间早上 8 点重置）。明早就恢复。";
-  }
-  // 没认出来的错误不把原文直通用户：R2/DO 的报错里带着 key、内部状态，
-  // 那是给排查看的日志不是给用户看的话 —— 原文进日志，用户只拿一句人话
-  console.error(e);
-  return "服务器开小差了，请稍后再试";
-}
-
-/** 统一的失败响应：错误文案先过一遍 explain，别让平台原文直接露给用户 */
-function fail(e: unknown): Response {
-  return Response.json({ ok: false, error: explain(e) }, { status: 500 });
-}
-
 /** 从 /agents/<类名>/<实例名> 里取出实例名；不是这个形状就返回 null（不拦） */
 function agentNameInPath(pathname: string): string | null {
   const seg = pathname.split("/").filter(Boolean);
@@ -256,7 +235,7 @@ async function handleLogin(req: Request, env: Env): Promise<Response> {
 
   let pw: unknown;
   try {
-    ({ pw } = (await req.json()) as { pw?: unknown });
+    ({ pw } = (await readJsonObject(req)) as { pw?: unknown });
   } catch {
     return Response.json({ ok: false, error: "请求格式错误" }, { status: 400 });
   }
@@ -306,7 +285,7 @@ async function handleCardLogin(req: Request, env: Env): Promise<Response> {
   }
   let body: { name?: unknown; password?: unknown };
   try {
-    body = (await req.json()) as typeof body;
+    body = (await readJsonObject(req)) as typeof body;
   } catch {
     return Response.json({ ok: false, error: "请求格式错误" }, { status: 400 });
   }
@@ -342,7 +321,7 @@ async function handleCardLogin(req: Request, env: Env): Promise<Response> {
 async function cardAllows(
   req: Request,
   env: Env,
-  perm: "permNotes" | "permFiles" | "permPublic",
+  perm: GuestCardPerm,
 ): Promise<boolean> {
   const token = authToken(req);
   const info = await verifyTokenInfo(env, token);
@@ -466,7 +445,7 @@ async function fileScopeFor(req: Request, env: Env): Promise<string[] | null> {
  */
 async function handleAttach(req: Request, env: Env): Promise<Response> {
   try {
-    const { key, name, native } = (await req.json()) as {
+    const { key, name, native } = (await readJsonObject(req)) as {
       key?: unknown;
       name?: unknown;
       native?: unknown;
@@ -506,7 +485,7 @@ async function handleAttach(req: Request, env: Env): Promise<Response> {
  */
 async function handleTts(req: Request, env: Env): Promise<Response> {
   try {
-    const { text, voice } = (await req.json()) as {
+    const { text, voice } = (await readJsonObject(req)) as {
       text?: unknown;
       voice?: unknown;
     };
@@ -702,7 +681,7 @@ function sourceHash(key: string): string {
  */
 async function handleThemeImport(req: Request, env: Env): Promise<Response> {
   try {
-    const body = (await req.json()) as Record<string, unknown>;
+    const body = (await readJsonObject(req)) as Record<string, unknown>;
     const key = typeof body.key === "string" ? body.key : "";
     if (!key)
       return Response.json(
@@ -833,7 +812,7 @@ async function handleThemeSetsList(env: Env): Promise<Response> {
  */
 async function handleThemeSetSave(req: Request, env: Env): Promise<Response> {
   try {
-    const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await readJsonObject(req)) as Record<string, unknown>;
     const name = typeof body.name === "string" ? body.name.trim() : "";
     if (!name)
       return Response.json(
@@ -871,7 +850,7 @@ async function handleThemeSetSave(req: Request, env: Env): Promise<Response> {
 /** 换回某份存档：读回包体、解包、装上去 —— 和装备主题包同一条路 */
 async function handleThemeSetApply(req: Request, env: Env): Promise<Response> {
   try {
-    const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await readJsonObject(req)) as Record<string, unknown>;
     const id = typeof body.id === "string" ? body.id : "";
     if (!id)
       return Response.json({ ok: false, error: "缺少存档 id" }, { status: 400 });
@@ -902,7 +881,7 @@ async function handleThemeSetApply(req: Request, env: Env): Promise<Response> {
 /** 删一份存档：连它在云盘里的包体一并清走（那份底只属于这份档） */
 async function handleThemeSetDelete(req: Request, env: Env): Promise<Response> {
   try {
-    const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await readJsonObject(req)) as Record<string, unknown>;
     const id = typeof body.id === "string" ? body.id : "";
     if (!id)
       return Response.json({ ok: false, error: "缺少存档 id" }, { status: 400 });
@@ -1017,7 +996,7 @@ async function handleMkdir(req: Request, env: Env): Promise<Response> {
       return Response.json({ ok: false, error: "云盘未配置" }, { status: 500 });
     const scope = await fileScopeFor(req, env);
     if (scope === null) return forbidden();
-    const { path } = (await req.json()) as { path?: unknown };
+    const { path } = (await readJsonObject(req)) as { path?: unknown };
     const base = safeKeyPath(String(path ?? ""));
     assertInScope(base, scope);
     const key = `${base}/${FOLDER_KEEP}`;
@@ -1070,7 +1049,7 @@ async function handleMove(req: Request, env: Env): Promise<Response> {
       return Response.json({ ok: false, error: "云盘未配置" }, { status: 500 });
     const scope = await fileScopeFor(req, env);
     if (scope === null) return forbidden();
-    const { from, to } = (await req.json()) as { from?: unknown; to?: unknown };
+    const { from, to } = (await readJsonObject(req)) as { from?: unknown; to?: unknown };
     let src = "";
     let dst = "";
     try {
@@ -1167,7 +1146,7 @@ async function handleDelete(req: Request, env: Env): Promise<Response> {
       return Response.json({ ok: false, error: "云盘未配置" }, { status: 500 });
     const scope = await fileScopeFor(req, env);
     if (scope === null) return forbidden();
-    const body = (await req.json()) as { key?: unknown; folder?: unknown };
+    const body = (await readJsonObject(req)) as { key?: unknown; folder?: unknown };
     if (typeof body.folder === "string" && body.folder.trim()) {
       const base = safeKeyPath(body.folder);
       assertInScope(base, scope);
@@ -1221,6 +1200,15 @@ async function handleDelete(req: Request, env: Env): Promise<Response> {
 function agentStub(env: Env, name = OWNER_AGENT) {
   return env.COWORK_AGENT.get(env.COWORK_AGENT.idFromName(name));
 }
+
+/** 列表类接口都收 ?limit=：越界只当没看见（默认 50、封顶 200），界面上少几行不致命 */
+function mailLimit(url: URL): number {
+  const n = Number(url.searchParams.get("limit"));
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.trunc(n), 200) : 50;
+}
+
+/** 「喂一封」这一口的体积闸，按字符数算（DO 那边还有一道按字节的） */
+export const EML_FEED_MAX = 4 * 1024 * 1024;
 
 /**
  * 滑动续期：这次请求带的票剩余寿命不足半程，就在响应上顺手挂一张满寿命的新票。
@@ -1337,6 +1325,11 @@ async function handleApi(
     p === "/api/posts" &&
     m === "DELETE" &&
     !!(await verifyTokenInfo(env, authToken(req)))?.card;
+  // 网页矩阵的管理面：这一档是整面一起给的（页面、连线、外观、外站认定表、
+  // 打包/装备），不做子权限分化，所以闸也只有一道 —— 持卡 + 这一档开了 permMatrix。
+  // 矩阵页的公开读那条路不在这里（走 serveMatrixPage），本来对外公开，不动它。
+  const permMatrix =
+    p.startsWith("/api/matrix/") && (await cardAllows(req, env, "permMatrix"));
   if (
     role !== "admin" &&
     !(p.startsWith("/api/files/") && m === "GET") &&
@@ -1345,6 +1338,7 @@ async function handleApi(
     !permFileMgr &&
     !wallPost &&
     !wallUnpost &&
+    !permMatrix &&
     !USER_ROUTES.has(p) &&
     !USER_WRITE_ROUTES.has(`${m} ${p}`)
   )
@@ -1372,11 +1366,14 @@ async function handleApi(
     });
   }
 
-  // 网页矩阵的管理面（页面增删改、正文读写）：主包只做「管理员」这道闸
-  // （上面的非管理员拦截已经放行到这里的一定是 admin），真正的活交给矩阵模块 ——
-  // 配置与正文都归它管。
+  // 网页矩阵的管理面（页面增删改、正文读写）：能走到这里的有两种人 ——
+  // 管理员，和档位发了「权限矩阵」长期权益的持卡来客（上面那道闸放的就是他们）。
+  // 身份一律从会话派生，不再写死 admin：写死就等于让来客拿管理员的名义记账。
   if (p.startsWith("/api/matrix/"))
-    return handleMatrixApi(req, env, p, { role: "admin" });
+    return handleMatrixApi(req, env, p, {
+      ...(await matrixViewerOf(req, env)),
+      matrix: role === "admin" || permMatrix,
+    });
 
   if (p === "/api/upload" && m === "POST") return handleUpload(req, env);
   // 附件分析：先把文件传上来（/api/upload），再拿 key 来换一段模型能读的话。
@@ -1451,7 +1448,7 @@ async function handleApi(
   if (p === "/api/visitor-log" && m === "GET")
     return readState(agent.visitorEvents());
   if (p === "/api/guest-intro" && m === "POST") {
-    const body = (await req.json().catch(() => ({}))) as {
+    const body = (await readJsonObject(req)) as {
       nickname?: string;
       origin?: string;
     };
@@ -1480,7 +1477,7 @@ async function handleApi(
     // 权益在这里再核一遍：门禁那张表按路径放行读墙，wallPost 的核验会被
     // USER_ROUTES 一项短路 —— 档位收回了公开权益的持卡来客，不该还能往墙上贴
     if (!(await cardAllows(req, env, "permPublic"))) return forbidden();
-    const body = (await req.json().catch(() => ({}))) as { content?: unknown };
+    const body = (await readJsonObject(req)) as { content?: unknown };
     try {
       const card = await agentStub(env).cardInfo(info.card);
       return writeState(
@@ -1504,7 +1501,7 @@ async function handleApi(
     // 摘帖必须有卡：无卡票连「自己贴的」都没有，而 removePublicPost 在
     // byCardId 缺省时删任意 id —— 把 undefined 递进去等于全权删除
     if (info.role !== "admin" && !info.card) return forbidden();
-    const body = (await req.json().catch(() => ({}))) as { id?: unknown };
+    const body = (await readJsonObject(req)) as { id?: unknown };
     if (typeof body.id !== "string" || !body.id)
       return Response.json({ ok: false, error: "缺少 id" }, { status: 400 });
     const done = await agentStub(env).removePost(
@@ -1555,7 +1552,7 @@ async function handleApi(
     return readState(Promise.resolve(agent.guestTypes()));
   if (p === "/api/guest-types" && m === "POST") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       if (
         typeof body.name !== "string" ||
         !body.name.trim() ||
@@ -1592,6 +1589,10 @@ async function handleApi(
               typeof body.permPublic === "boolean"
                 ? body.permPublic
                 : undefined,
+            permMatrix:
+              typeof body.permMatrix === "boolean"
+                ? body.permMatrix
+                : undefined,
           }),
         ),
       );
@@ -1601,7 +1602,7 @@ async function handleApi(
   }
   if (p === "/api/guest-types" && m === "PATCH") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       const id = typeof body.id === "string" ? body.id : "";
       if (!id)
         return Response.json({ ok: false, error: "缺少 id" }, { status: 400 });
@@ -1630,6 +1631,10 @@ async function handleApi(
             permPublic:
               typeof body.permPublic === "boolean"
                 ? body.permPublic
+                : undefined,
+            permMatrix:
+              typeof body.permMatrix === "boolean"
+                ? body.permMatrix
                 : undefined,
             active: typeof body.active === "boolean" ? body.active : undefined,
           }),
@@ -1716,7 +1721,7 @@ async function handleApi(
   // 它自动生效）—— 「从厂商开始 → 拉列表 → 点一个 → 保存」一步到位。
   if (p === "/api/model-configs/providers" && m === "POST") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       for (const f of ["name", "format", "baseUrl", "keySecret"]) {
         if (typeof body[f] !== "string" || !(body[f] as string).trim())
           return Response.json(
@@ -1750,7 +1755,7 @@ async function handleApi(
   }
   if (p === "/api/model-configs/providers" && m === "PATCH") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       const id = typeof body.id === "string" ? body.id : "";
       if (!id)
         return Response.json({ ok: false, error: "缺少 id" }, { status: 400 });
@@ -1780,7 +1785,7 @@ async function handleApi(
   }
   if (p === "/api/model-configs/entries" && m === "POST") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       const providerId =
         typeof body.providerId === "string" ? body.providerId : "";
       const model = typeof body.model === "string" ? body.model.trim() : "";
@@ -1809,7 +1814,7 @@ async function handleApi(
   }
   if (p === "/api/model-configs/entries" && m === "PATCH") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       const id = typeof body.id === "string" ? body.id : "";
       if (!id)
         return Response.json({ ok: false, error: "缺少 id" }, { status: 400 });
@@ -1842,7 +1847,7 @@ async function handleApi(
   // 前端永远摸不到 key，也就没有借面板把 key 发去别处的口子。
   if (p === "/api/model-configs/list-models" && m === "POST") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       const format = typeof body.format === "string" ? body.format.trim() : "";
       const baseUrl =
         typeof body.baseUrl === "string" ? body.baseUrl.trim() : "";
@@ -1933,7 +1938,7 @@ async function handleApi(
   }
   if (p === "/api/tts-configs" && m === "POST") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       for (const f of ["name", "protocol", "keySecret"]) {
         if (typeof body[f] !== "string" || !(body[f] as string).trim())
           return Response.json(
@@ -1964,7 +1969,7 @@ async function handleApi(
   }
   if (p === "/api/tts-configs" && m === "PATCH") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       const id = typeof body.id === "string" ? body.id : "";
       if (!id)
         return Response.json({ ok: false, error: "缺少 id" }, { status: 400 });
@@ -2013,7 +2018,7 @@ async function handleApi(
   }
   if (p === "/api/draw-configs" && m === "PATCH") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       const tier = typeof body.tier === "string" ? body.tier : "";
       if (!tier)
         return Response.json(
@@ -2051,7 +2056,7 @@ async function handleApi(
   }
   if (p === "/api/search-configs" && m === "PATCH") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       return writeState(
         Promise.resolve(
           agent.patchSearchConfig({
@@ -2066,13 +2071,120 @@ async function handleApi(
     }
   }
 
+  // ── 邮件通道（mail_config）：SMTP 服务器 + 每日额度，只有管理员能碰 ──
+  // 同 search/tts/draw 几套目录：表里只存 secret 的**变量名**，口令本体永不入库、
+  // 永不回显（GET 出来的 keyAvailable 只说那个变量在这台机器上配没配）。
+  if (p === "/api/mail/config" && m === "GET")
+    return readState(agent.mailConfigGet());
+  if (p === "/api/mail/config" && m === "POST") {
+    try {
+      // 坏 body 在 readJsonObject 就 400，压根走不到写入那一步
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
+      // 白名单在 parseMailConfigInput 里收口：password 一类的字段进不了 patch
+      const patch = parseMailConfigInput(body);
+      return writeState(Promise.resolve(agent.mailConfigSave(patch)));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+  if (p === "/api/mail/test" && m === "POST") {
+    try {
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
+      // body 里的 to 只是「换个收件地址试一封」；没给就用配置里那个
+      const to = body.to;
+      if (to !== undefined && to !== null && typeof to !== "string")
+        return Response.json(
+          { ok: false, error: "to 得是一段文本" },
+          { status: 400 },
+        );
+      // 这一条不回 {ok:true,data}：契约就是 {ok:true} / {ok:false,error}，
+      // 失败那句是服务器给的原话，不吞成成功
+      return Response.json(
+        await agent.mailTestSend(typeof to === "string" ? to : undefined),
+      );
+    } catch (e) {
+      return fail(e);
+    }
+  }
+  // 人亲自动笔寄一封（信箱页）。空主题/空正文不在这里 400 —— 那是 DO 给出的
+  // 领域答案（不占额度、不拨号），界面拿到那句原话显示就行；HTTP 边上只挡形状错的。
+  if (p === "/api/mail/send" && m === "POST") {
+    try {
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
+      for (const k of ["to", "subject", "text"] as const) {
+        const v = body[k];
+        if (v !== undefined && v !== null && typeof v !== "string")
+          return Response.json(
+            { ok: false, error: `${k} 得是一段文本` },
+            { status: 400 },
+          );
+      }
+      return Response.json(
+        await agent.mailComposeSend({
+          to: typeof body.to === "string" ? body.to : undefined,
+          subject: typeof body.subject === "string" ? body.subject : "",
+          text: typeof body.text === "string" ? body.text : "",
+        }),
+      );
+    } catch (e) {
+      return fail(e);
+    }
+  }
+
+  // ── 信箱：发件流水与收件（都只读主屋那一本账，见 cowork 的 mailOutbox/mailInbox）──
+  // outbox 回的是 {rows}，不是裸数组：契约（mailboxTypes.ts）这么定的，界面按它读；
+  // 少裹这一层，面板不会报错，只会一直显示「0 封」—— 那是最难发现的一类假空。
+  if (p === "/api/mail/outbox" && m === "GET")
+    return readState(agent.mailOutbox(mailLimit(url)).then((rows) => ({ rows })));
+  if (p === "/api/mail/inbox" && m === "GET")
+    return readState(agent.mailInbox(mailLimit(url)));
+  if (p === "/api/mail/inbox/read" && m === "GET")
+    return readState(agent.mailInboxRead(url.searchParams.get("id") || ""));
+  if (p === "/api/mail/inbox/open" && m === "POST") {
+    try {
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
+      const id = body.id;
+      if (typeof id !== "string" || !id)
+        return Response.json({ ok: false, error: "id 得是一个字符串" }, { status: 400 });
+      if (typeof body.read !== "boolean")
+        return Response.json({ ok: false, error: "read 得是 true / false" }, { status: 400 });
+      // 行不在就回 null：不替一次没改到任何东西的操作造一个「成功」
+      return Response.json(await agent.mailInboxOpen(id, body.read));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+  // 喂一封原始报文进来（管理员专供）：收件通道接上之前，这是唯一能把整条
+  // 解析→入库→读正文测穿的路；接上之后它仍然是「这封信为什么没进收件箱」的复现口。
+  // 走的是与 email() 投递同一个 mailIngest，不另开一套逻辑。
+  if (p === "/api/mail/inbox/feed" && m === "POST") {
+    try {
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
+      const raw = body.raw;
+      if (typeof raw !== "string")
+        return Response.json(
+          { ok: false, error: "raw 得是一段文本（整封原始报文）" },
+          { status: 400 },
+        );
+      if (raw.length > EML_FEED_MAX)
+        return Response.json(
+          { ok: false, error: `这一段太大了，超过 ${EML_FEED_MAX} 字符不收` },
+          { status: 400 },
+        );
+      // 固定投主屋：这本账只在主屋记，场屋那间连表都是空的
+      return Response.json(await agentStub(env).mailIngest(raw));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+
   // ── 全局美术主题（theme_config）：皮肤/名字头像/弹页/主题包，只有管理员能碰 ──
   // 读是免鉴权的（fetch 入口 GET /api/theme / /api/theme-asset/），走到这里的
   // 只有写。表归主人那间，所以写也点名主人房（agentStub 默认就它），
   // 不跟请求者自己那间走 —— 主题是全屋一份的，不是每人一份。
   if (p === "/api/theme" && m === "PATCH") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       return writeState(agentStub(env).patchTheme(body as ThemeConfigPatch));
     } catch (e) {
       return fail(e);
@@ -2126,7 +2238,7 @@ async function handleApi(
   }
   if (p === "/api/sessions" && m === "POST") {
     try {
-      const { title, visibility } = (await req.json()) as {
+      const { title, visibility } = (await readJsonObject(req)) as {
         title?: string;
         visibility?: string;
       };
@@ -2142,12 +2254,13 @@ async function handleApi(
   }
   if (p === "/api/sessions/switch" && m === "POST") {
     try {
-      const { id } = (await req.json()) as { id?: string };
+      const { id } = (await readJsonObject(req)) as { id?: string };
       if (!id)
         return Response.json({ ok: false, error: "缺少 id" }, { status: 400 });
-      return writeState(agent.switchSession(id));
+      const session = await agent.switchSession(id);
+      return Response.json({ ok: true, data: session });
     } catch (e) {
-      return fail(e);
+      return sessionConflictResponse(e) ?? fail(e);
     }
   }
   // 多端最后状态对齐：记下「他最后看的是哪间屋、哪一场」。
@@ -2156,7 +2269,7 @@ async function handleApi(
   // 写在 state（非 PATCHABLE），前端只经这条专用门改，不让它自己挑屋。
   if (p === "/api/active-room" && m === "POST") {
     try {
-      const { room, session, at } = (await req.json()) as {
+      const { room, session, at } = (await readJsonObject(req)) as {
         room?: unknown;
         session?: unknown;
         at?: unknown;
@@ -2175,7 +2288,7 @@ async function handleApi(
   }
   if (p === "/api/sessions/rename" && m === "POST") {
     try {
-      const { id, title } = (await req.json()) as {
+      const { id, title } = (await readJsonObject(req)) as {
         id?: string;
         title?: string;
       };
@@ -2191,7 +2304,7 @@ async function handleApi(
   }
   if (p === "/api/sessions/visibility" && m === "POST") {
     try {
-      const { id, visibility } = (await req.json()) as {
+      const { id, visibility } = (await readJsonObject(req)) as {
         id?: string;
         visibility?: string;
       };
@@ -2211,7 +2324,7 @@ async function handleApi(
   }
   if (p === "/api/sessions/archive" && m === "POST") {
     try {
-      const { id, archived } = (await req.json()) as {
+      const { id, archived } = (await readJsonObject(req)) as {
         id?: string;
         archived?: boolean;
       };
@@ -2226,7 +2339,7 @@ async function handleApi(
   }
   if (p === "/api/sessions/pin" && m === "POST") {
     try {
-      const { id, pinned } = (await req.json()) as {
+      const { id, pinned } = (await readJsonObject(req)) as {
         id?: string;
         pinned?: boolean;
       };
@@ -2239,7 +2352,7 @@ async function handleApi(
   }
   if (p === "/api/sessions/delete" && m === "POST") {
     try {
-      const { id } = (await req.json()) as { id?: string };
+      const { id } = (await readJsonObject(req)) as { id?: string };
       if (!id)
         return Response.json({ ok: false, error: "缺少 id" }, { status: 400 });
       return writeState(agent.deleteSession(id));
@@ -2253,7 +2366,7 @@ async function handleApi(
     return readState(Promise.resolve(agent.listReminders()));
   if (p === "/api/reminders/cancel" && m === "POST") {
     try {
-      const { id } = (await req.json()) as { id?: string };
+      const { id } = (await readJsonObject(req)) as { id?: string };
       if (!id)
         return Response.json({ ok: false, error: "缺少 id" }, { status: 400 });
       return writeState(Promise.resolve(agent.cancelReminder(id)));
@@ -2295,7 +2408,7 @@ async function handleApi(
   }
   if (p === "/api/notes/save" && m === "POST") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       const id = typeof body.id === "string" ? body.id : undefined;
       // by 固定成 user：这条路只有管理员走得通（admin-only），
       // 我动笔那条路在工具里，那边自己写 assistant
@@ -2319,7 +2432,7 @@ async function handleApi(
   }
   if (p === "/api/notes/delete" && m === "POST") {
     try {
-      const { id, room } = (await req.json()) as {
+      const { id, room } = (await readJsonObject(req)) as {
         id?: string;
         room?: unknown;
       };
@@ -2336,7 +2449,7 @@ async function handleApi(
   // 单开一条窄路由，而不是塞进 POST /api/config —— 后者一放，人格提示词、任务清单也跟着开了。
   if (p === "/api/notes/focus" && m === "POST") {
     try {
-      const { id, room } = (await req.json()) as {
+      const { id, room } = (await readJsonObject(req)) as {
         id?: string;
         room?: unknown;
       };
@@ -2366,7 +2479,7 @@ async function handleApi(
   }
   if (p === "/api/notes/restore" && m === "POST") {
     try {
-      const { id, seq, room } = (await req.json()) as {
+      const { id, seq, room } = (await readJsonObject(req)) as {
         id?: string;
         seq?: number;
         room?: unknown;
@@ -2403,7 +2516,7 @@ async function handleApi(
   }
   if (p === "/api/session-plan" && m === "POST") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       return writeState(
         Promise.resolve(
           agentStub(env, targetRoom(body.room)).saveSessionPlan({
@@ -2454,7 +2567,7 @@ async function handleApi(
   if (p === "/api/config" && m === "GET") return readState(agent.getConfig());
   if (p === "/api/config" && m === "POST") {
     try {
-      const { patch } = (await req.json()) as {
+      const { patch } = (await readJsonObject(req)) as {
         patch?: Partial<Record<string, unknown>>;
       };
       return writeState(agent.patchConfig(patch || {}));
@@ -2470,7 +2583,7 @@ async function handleApi(
   // 人格提示词、任务清单、自我认知就一起开了，那不是「调强度」是「接管」。
   if (p === "/api/think" && m === "POST") {
     try {
-      const { mode, room } = (await req.json()) as {
+      const { mode, room } = (await readJsonObject(req)) as {
         mode?: unknown;
         room?: unknown;
       };
@@ -2495,7 +2608,7 @@ async function handleApi(
   // 不给来客：他那一间没有 ask 工具，也就不该有卡片可答。
   if (p === "/api/ask/answer" && m === "POST") {
     try {
-      const { id, answer, room } = (await req.json()) as {
+      const { id, answer, room } = (await readJsonObject(req)) as {
         id?: string;
         answer?: string;
         room?: string;
@@ -2505,7 +2618,7 @@ async function handleApi(
       const target = room ? agentStub(env, targetRoom(room)) : agent;
       const r = await target.answerAsk(id, answer ?? "");
       // 挂起已经不在（超时放行过、或这间屋重启过）：答案喂不进那次工具调用了。
-      // 不能假装成功 —— 前端收到 409 会把这句话退回当普通消息发出去
+      // 不能假装成功 —— 前端收到 409 保留答案，由用户核对后决定是否发送
       if (!r.delivered)
         return Response.json(
           { ok: false, error: "这张提问已经过期了（超时或已重开）" },
@@ -2543,7 +2656,7 @@ async function handleApi(
   // 人工作答「这两条不是一回事」：疑问销掉，两条都留着
   if (p === "/api/memory/coexist" && m === "POST") {
     try {
-      const { id } = (await req.json()) as { id?: string };
+      const { id } = (await readJsonObject(req)) as { id?: string };
       if (!id)
         return Response.json({ ok: false, error: "缺少 id" }, { status: 400 });
       return readState(Promise.resolve(agent.settleMemoryConflict(id)));
@@ -2554,7 +2667,7 @@ async function handleApi(
   // 复核确认：记下「我刚核对过它」（可同时改「会不会变」的标记）
   if (p === "/api/memory/confirm" && m === "POST") {
     try {
-      const { id, volatility } = (await req.json()) as {
+      const { id, volatility } = (await readJsonObject(req)) as {
         id?: string;
         volatility?: string;
       };
@@ -2570,7 +2683,7 @@ async function handleApi(
   // 改「会不会变」：会变的那些才会进复核清单
   if (p === "/api/memory/volatility" && m === "POST") {
     try {
-      const { id, volatility } = (await req.json()) as {
+      const { id, volatility } = (await readJsonObject(req)) as {
         id?: string;
         volatility?: string;
       };
@@ -2586,7 +2699,7 @@ async function handleApi(
   // 公开 / 收回一条记忆：点头的事只能由人来做，所以只开面板这一条路
   if (p === "/api/memory/visibility" && m === "POST") {
     try {
-      const { id, visibility } = (await req.json()) as {
+      const { id, visibility } = (await readJsonObject(req)) as {
         id?: string;
         visibility?: string;
       };
@@ -2608,7 +2721,7 @@ async function handleApi(
   // 只开面板这一条路（不在 USER_ROUTES），来客改不了量级。
   if (p === "/api/memory/sensitivity" && m === "POST") {
     try {
-      const { id, sensitivity } = (await req.json()) as {
+      const { id, sensitivity } = (await readJsonObject(req)) as {
         id?: string;
         sensitivity?: string;
       };
@@ -2637,7 +2750,7 @@ async function handleApi(
     );
   if (p === "/api/memory/tags" && m === "POST") {
     try {
-      const { tag, maxLevel } = (await req.json()) as {
+      const { tag, maxLevel } = (await readJsonObject(req)) as {
         tag?: string;
         maxLevel?: string;
       };
@@ -2666,7 +2779,7 @@ async function handleApi(
   // 作废 / 撤销作废：一条记忆被新说法取代，旧的不删，标掉
   if (p === "/api/memory/supersede" && m === "POST") {
     try {
-      const { id, restore } = (await req.json()) as {
+      const { id, restore } = (await readJsonObject(req)) as {
         id?: string;
         restore?: boolean;
       };
@@ -2681,7 +2794,7 @@ async function handleApi(
   }
   if (p === "/api/memory" && m === "POST") {
     try {
-      const body = (await req.json()) as Record<string, unknown>;
+      const body = (await readJsonObject(req)) as Record<string, unknown>;
       const content = String(body.content || "").slice(0, 500);
       const shelf = typeof body.shelf === "string" ? body.shelf : undefined;
       const tags = Array.isArray(body.tags)
@@ -2722,7 +2835,7 @@ async function handleApi(
   }
   if (p === "/api/memory/delete" && m === "POST") {
     try {
-      const { id } = (await req.json()) as { id?: string };
+      const { id } = (await readJsonObject(req)) as { id?: string };
       if (!id)
         return Response.json({ ok: false, error: "缺少 id" }, { status: 400 });
       return readState(agent.removeMemory(id));
@@ -2757,7 +2870,7 @@ async function handleApi(
   // 手动让她现在就看一眼。她说「这一场没有新的」，也不是失败，如实回一句
   if (p === "/api/session-memory/recap" && m === "POST") {
     try {
-      const { id } = (await req.json()) as { id?: string };
+      const { id } = (await readJsonObject(req)) as { id?: string };
       if (!id)
         return Response.json({ ok: false, error: "缺少 id" }, { status: 400 });
       const ran = await agent.recapNow(id);
@@ -2788,7 +2901,7 @@ async function handleApi(
     );
   if (p === "/api/vote" && m === "POST") {
     try {
-      const { messageId, value, room } = (await req.json()) as {
+      const { messageId, value, room } = (await readJsonObject(req)) as {
         messageId?: string;
         value?: unknown;
         room?: string;
@@ -2824,7 +2937,7 @@ async function handleApi(
   }
   if (p === "/api/comment" && m === "POST") {
     try {
-      const { messageId, content, room } = (await req.json()) as {
+      const { messageId, content, room } = (await readJsonObject(req)) as {
         messageId?: string;
         content?: string;
         room?: string;
@@ -2851,7 +2964,7 @@ async function handleApi(
   // 标重：给管理员自己的发言打「要重视」的标记，可多条并存，再点一次取消
   if (p === "/api/flag" && m === "POST") {
     try {
-      const { messageId, room } = (await req.json()) as {
+      const { messageId, room } = (await readJsonObject(req)) as {
         messageId?: string;
         room?: string;
       };
@@ -2873,7 +2986,7 @@ async function handleApi(
   // room：正在说话的那间屋 —— 连接可能挂在场屋上，REST 没有连接语义得点名；
   // 老客户端不带 body 也不出错（照旧打断人屋那场）
   if (p === "/api/stop" && m === "POST") {
-    const body = (await req.json().catch(() => ({}))) as { room?: unknown };
+    const body = (await readJsonObject(req)) as { room?: unknown };
     const room = targetRoom(body.room);
     // 谁按的「停」要留痕：轮次被叫停在界面上只剩一个「中断」，
     // 分不清是 Esc、停止按钮，还是哪条路径误触 —— 和 [stream] 那行对上时间就能定性
@@ -2884,7 +2997,7 @@ async function handleApi(
   // room：同 /api/stop —— 连接可能挂在场屋上（矩阵工作台那间就是），REST 要清哪间得点名；
   // 不带 body 照旧清人屋那场，老客户端不受影响
   if (p === "/api/clear" && m === "POST") {
-    const body = (await req.json().catch(() => ({}))) as { room?: unknown };
+    const body = (await readJsonObject(req)) as { room?: unknown };
     await agentStub(env, targetRoom(body.room)).resetActiveSession();
     return Response.json({ ok: true });
   }
@@ -2906,7 +3019,7 @@ async function handleApi(
   // replace=true 时先清空记忆表与配置态，用于把既有 DO 对齐到新的并集种子
   if (p === "/api/seed" && m === "POST") {
     try {
-      const { ops, replace } = (await req.json()) as {
+      const { ops, replace } = (await readJsonObject(req)) as {
         ops?: unknown;
         replace?: unknown;
       };
@@ -2931,183 +3044,220 @@ async function handleApi(
 // ── 入口 ───────────────────────────────────────────────
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
-    const url = new URL(req.url);
-    const p = url.pathname;
-
-    if (p === "/favicon.ico" || p === "/favicon.svg") {
-      return new Response(FAVICON, {
-        headers: {
-          "Content-Type": "image/svg+xml",
-          "Cache-Control": "public, max-age=86400",
-        },
-      });
+  /**
+   * 收信入口：Cloudflare Email Routing 把整封外交到这儿（域名那侧把本 Worker 设成投递目标）。
+   *
+   * 这一头没有任何鉴权 —— 公网任何人都能往这里寄 —— 所以它只做一件事：把原件取出来
+   * 交给主屋。开关、体积上限、指纹去重、落库全在 mailIngest 那侧（fail-closed 在那儿）。
+   * 读不出原件时**不抛**：抛了平台会重投，而读不出的东西投十次还是读不出。
+   * 反过来，主屋一时唤不醒这类暂态要抛回去：悄悄丢一封来信，比多投一次贵得多。
+   */
+  async email(message: unknown, env: Env): Promise<void> {
+    const raw = (message as { raw?: ReadableStream }).raw;
+    if (!raw) {
+      console.warn("[mail] 这封投递里没有 raw 段，跳过");
+      return;
     }
+    let text: string;
+    try {
+      text = await new Response(raw).text();
+    } catch (e) {
+      console.warn("[mail] 原件读不出来", String((e as Error)?.message ?? e));
+      return;
+    }
+    try {
+      const r = await agentStub(env).mailIngest(text);
+      if (!r.ok && !r.duplicate) console.warn("[mail] 这封没收进收件箱", r.error);
+    } catch (e) {
+      console.warn("[mail] 收信入库异常，交回平台重投", String((e as Error)?.message ?? e));
+      throw e;
+    }
+  },
+  fetch(req: Request, env: Env): Promise<Response> {
+    // 兜底：矩阵认领、静态回退这些不在局部 try 里的路径一旦失败，冒出 Worker 就是
+    // Cloudflare 的 1101 纯文本页 —— 前端拿不到 {ok:false}，用户只看到「网站坏了」。
+    async function run(): Promise<Response> {
+      const url = new URL(req.url);
+      const p = url.pathname;
 
-    // 登录 / 登出是唯一无需鉴权的接口
-    if (p === "/api/auth")
-      return req.method === "POST" ? handleLogin(req, env) : methodNotAllowed();
-    if (p === "/api/logout")
-      return Response.json(
-        { ok: true },
-        { headers: { "Set-Cookie": clearCookie(cookieSecure(req)) } },
-      );
+      if (p === "/favicon.ico" || p === "/favicon.svg") {
+        return new Response(FAVICON, {
+          headers: {
+            "Content-Type": "image/svg+xml",
+            "Cache-Control": "public, max-age=86400",
+          },
+        });
+      }
 
-    // ── 身份卡：登卡是免门禁的（卡本身就是钥匙），限速与门禁同一套 ──
-    if (p === "/api/card/login" && req.method === "POST")
-      return handleCardLogin(req, env);
+      // 登录 / 登出是唯一无需鉴权的接口
+      if (p === "/api/auth")
+        return req.method === "POST" ? handleLogin(req, env) : methodNotAllowed();
+      if (p === "/api/logout")
+        return Response.json(
+          { ok: true },
+          { headers: { "Set-Cookie": clearCookie(cookieSecure(req)) } },
+        );
 
-    // /api/cards（管理员看名册）是另一个接口：前缀判断把它排出去，
-    // 不然它会掉进下面这格「来客领卡」的闸里 —— 那格只放 user，
-    // 管理员到此就吃 401 被踢回登录页，名册处理器根本轮不到
-    if (p.startsWith("/api/card") && p !== "/api/cards") {
-      const info = await verifyTokenInfo(env, authToken(req));
-      if (!info || info.role !== "user") return unauthorized();
-      // 领卡（把当前临时会话升级成长期）：当前房绑定到新卡，历史一条不搬
-      if (p === "/api/card" && req.method === "POST") {
-        let body: {
-          name?: unknown;
-          purpose?: unknown;
-          password?: unknown;
-          email?: unknown;
-        };
-        try {
-          body = (await req.json()) as typeof body;
-        } catch {
-          return Response.json(
-            { ok: false, error: "请求格式错误" },
-            { status: 400 },
-          );
+      // ── 身份卡：登卡是免门禁的（卡本身就是钥匙），限速与门禁同一套 ──
+      if (p === "/api/card/login" && req.method === "POST")
+        return handleCardLogin(req, env);
+
+      // /api/cards（管理员看名册）是另一个接口：前缀判断把它排出去，
+      // 不然它会掉进下面这格「来客领卡」的闸里 —— 那格只放 user，
+      // 管理员到此就吃 401 被踢回登录页，名册处理器根本轮不到
+      if (p.startsWith("/api/card") && p !== "/api/cards") {
+        const info = await verifyTokenInfo(env, authToken(req));
+        if (!info || info.role !== "user") return unauthorized();
+        // 领卡（把当前临时会话升级成长期）：当前房绑定到新卡，历史一条不搬
+        if (p === "/api/card" && req.method === "POST") {
+          let body: {
+            name?: unknown;
+            purpose?: unknown;
+            password?: unknown;
+            email?: unknown;
+          };
+          try {
+            body = (await readJsonObject(req)) as typeof body;
+          } catch {
+            return Response.json(
+              { ok: false, error: "请求格式错误" },
+              { status: 400 },
+            );
+          }
+          if (info.card)
+            return Response.json(
+              { ok: false, error: "这张票已经带着卡了" },
+              { status: 409 },
+            );
+          const room = await agentNameForToken(env, "user", authToken(req));
+          try {
+            const card = await agentStub(env).createCard({
+              name: String(body.name ?? ""),
+              purpose: String(body.purpose ?? ""),
+              password: String(body.password ?? ""),
+              email: body.email === undefined ? undefined : String(body.email),
+              typeId: info.type || COMMON_TYPE_ID,
+              room,
+            });
+            const token = await issueToken(
+              env,
+              "user",
+              undefined,
+              card.typeId,
+              card.id,
+            );
+            const agent = await agentNameForToken(env, "user", token);
+            return Response.json(
+              { ok: true, role: "user", agent, card },
+              {
+                headers: {
+                  "Set-Cookie": sessionCookie(token, cookieSecure(req)),
+                },
+              },
+            );
+          } catch (e) {
+            return Response.json(
+              { ok: false, error: (e as Error).message },
+              { status: 400 },
+            );
+          }
         }
-        if (info.card)
-          return Response.json(
-            { ok: false, error: "这张票已经带着卡了" },
-            { status: 409 },
-          );
-        const room = await agentNameForToken(env, "user", authToken(req));
-        try {
-          const card = await agentStub(env).createCard({
-            name: String(body.name ?? ""),
-            purpose: String(body.purpose ?? ""),
-            password: String(body.password ?? ""),
-            email: body.email === undefined ? undefined : String(body.email),
-            typeId: info.type || COMMON_TYPE_ID,
-            room,
-          });
-          const token = await issueToken(
-            env,
-            "user",
-            undefined,
-            card.typeId,
-            card.id,
-          );
+        // 当前卡信息：身份卡弹层用。临时票返回 card:null（前端显示「未领卡」）
+        if (p === "/api/card" && req.method === "GET") {
+          const card = info.card
+            ? await agentStub(env).cardInfo(info.card)
+            : null;
+          return Response.json({ ok: true, card });
+        }
+        // 解卡：长卡退回临时态（同一档位换张无卡票）。房间里的东西还在卡上，
+        // 再登卡就回来 —— 解卡只是这台设备不再持卡
+        if (p === "/api/card/detach" && req.method === "POST") {
+          const token = await issueToken(env, "user", undefined, info.type);
           const agent = await agentNameForToken(env, "user", token);
           return Response.json(
-            { ok: true, role: "user", agent, card },
+            { ok: true, role: "user", agent },
             {
-              headers: {
-                "Set-Cookie": sessionCookie(token, cookieSecure(req)),
-              },
+              headers: { "Set-Cookie": sessionCookie(token, cookieSecure(req)) },
             },
-          );
-        } catch (e) {
-          return Response.json(
-            { ok: false, error: (e as Error).message },
-            { status: 400 },
           );
         }
       }
-      // 当前卡信息：身份卡弹层用。临时票返回 card:null（前端显示「未领卡」）
-      if (p === "/api/card" && req.method === "GET") {
-        const card = info.card
-          ? await agentStub(env).cardInfo(info.card)
-          : null;
-        return Response.json({ ok: true, card });
-      }
-      // 解卡：长卡退回临时态（同一档位换张无卡票）。房间里的东西还在卡上，
-      // 再登卡就回来 —— 解卡只是这台设备不再持卡
-      if (p === "/api/card/detach" && req.method === "POST") {
-        const token = await issueToken(env, "user", undefined, info.type);
-        const agent = await agentNameForToken(env, "user", token);
-        return Response.json(
-          { ok: true, role: "user", agent },
-          {
-            headers: { "Set-Cookie": sessionCookie(token, cookieSecure(req)) },
-          },
-        );
-      }
-    }
 
-    // ── 主题：读全局可见（门口/Gate 未登录也要看得到皮肤），写在 handleApi 里 ──
-    if (p === "/api/theme" && req.method === "GET") return handleThemeGet(env);
-    if (p.startsWith("/api/theme-asset/") && req.method === "GET") {
-      let name = p.slice("/api/theme-asset/".length);
+      // ── 主题：读全局可见（门口/Gate 未登录也要看得到皮肤），写在 handleApi 里 ──
+      if (p === "/api/theme" && req.method === "GET") return handleThemeGet(env);
+      if (p.startsWith("/api/theme-asset/") && req.method === "GET") {
+        let name = p.slice("/api/theme-asset/".length);
+        try {
+          name = decodeURIComponent(name);
+        } catch {
+          // 不是合法编码就按原样查（handleServe 对 key 同款兜底）
+        }
+        return handleThemeAsset(env, name);
+      }
+
+      // 矩阵包推送入口：给「本地/自动化把一个矩阵包直接推上云」留的一条道。
+      // 只有配了 MATRIX_PUSH_TOKEN 才启用；未配（默认）时这里整个不生效，
+      // 推包仍只有工作台那一处。仅认这一条路由，且必须是 POST。
+      // 这里的 admin 上下文不是冒充：这条路上没有会话，认的是那把推送 token 本身。
+      if (
+        p === "/api/matrix/pack" &&
+        req.method === "POST" &&
+        matrixPushAllowed(req, env)
+      )
+        return handleMatrixApi(req, env, p, { role: "admin" });
+
+      if (p.startsWith("/api/")) {
+        const role = await authRole(req, env);
+        if (!role) return unauthorized();
+        try {
+          // 出口统一包一层滑动续期：票进了半程就在这个响应上换新（见 renewIfNeeded）
+          return await renewIfNeeded(
+            req,
+            env,
+            await handleApi(req, env, url, role),
+          );
+        } catch (e) {
+          return fail(e);
+        }
+      }
+
+      // /agents/*：钩子在唤醒 DO 之前执行，返回 Response 即短路拒绝。
+      // 除了验登录，还要核对「进的是哪一间」—— 一个 DO 只有一份对话，
+      // 来客要是能把地址里的名字改成 default，就等于直接进了主人的屋子。
+      const guard = async (r: Request) => {
+        const role = await authRole(r, env);
+        if (!role) return unauthorized();
+        const name = agentNameInPath(new URL(r.url).pathname);
+        const room = await agentNameFor(r, env, role);
+        // 本人的屋，或本人名下的场屋（room--sessionId，一个会话一间完整运行时）：
+        // 前缀派生不可伪造 —— 冒用别人的前缀只能给自己开野场，进不了别人的屋
+        if (name && name !== room && !name.startsWith(room + "--"))
+          return forbidden();
+        return undefined;
+      };
       try {
-        name = decodeURIComponent(name);
-      } catch {
-        // 不是合法编码就按原样查（handleServe 对 key 同款兜底）
-      }
-      return handleThemeAsset(env, name);
-    }
-
-    // 矩阵包推送入口：给「本地/自动化把一个矩阵包直接推上云」留的一条道。
-    // 只有配了 MATRIX_PUSH_TOKEN 才启用；未配（默认）时这里整个不生效，
-    // 推包仍只有工作台那一处。仅认这一条路由，且必须是 POST。
-    if (
-      p === "/api/matrix/pack" &&
-      req.method === "POST" &&
-      matrixPushAllowed(req, env)
-    )
-      return handleMatrixApi(req, env, p, { role: "admin" });
-
-    if (p.startsWith("/api/")) {
-      const role = await authRole(req, env);
-      if (!role) return unauthorized();
-      try {
-        // 出口统一包一层滑动续期：票进了半程就在这个响应上换新（见 renewIfNeeded）
-        return await renewIfNeeded(
-          req,
-          env,
-          await handleApi(req, env, url, role),
-        );
+        const agentResponse = await routeAgentRequest(req, env, {
+          onBeforeConnect: guard,
+          onBeforeRequest: guard,
+        });
+        if (agentResponse) return agentResponse;
       } catch (e) {
+        // 唤醒失败（最常见的是配额用尽）：回一句人话，别让前端一直卡在「连接中」
         return fail(e);
       }
-    }
 
-    // /agents/*：钩子在唤醒 DO 之前执行，返回 Response 即短路拒绝。
-    // 除了验登录，还要核对「进的是哪一间」—— 一个 DO 只有一份对话，
-    // 来客要是能把地址里的名字改成 default，就等于直接进了主人的屋子。
-    const guard = async (r: Request) => {
-      const role = await authRole(r, env);
-      if (!role) return unauthorized();
-      const name = agentNameInPath(new URL(r.url).pathname);
-      const room = await agentNameFor(r, env, role);
-      // 本人的屋，或本人名下的场屋（room--sessionId，一个会话一间完整运行时）：
-      // 前缀派生不可伪造 —— 冒用别人的前缀只能给自己开野场，进不了别人的屋
-      if (name && name !== room && !name.startsWith(room + "--"))
-        return forbidden();
-      return undefined;
-    };
-    try {
-      const agentResponse = await routeAgentRequest(req, env, {
-        onBeforeConnect: guard,
-        onBeforeRequest: guard,
-      });
-      if (agentResponse) return agentResponse;
-    } catch (e) {
-      // 唤醒失败（最常见的是配额用尽）：回一句人话，别让前端一直卡在「连接中」
-      return fail(e);
-    }
+      // 网页矩阵：非保留路径先请矩阵认领 —— 它认领了（认得出这个层级路径、
+      // 或按入口页规则要 302）就回正文，认领不了（返回 null）就落到下面交还应用。
+      // 根 `/` 也走这条：公开访客在此被 302 去入口页，登录用户与管理员则回落接待台。
+      if (!isReservedPath(p)) {
+        const res = await serveMatrixPage(req, env, await matrixViewerOf(req, env), p);
+        if (res) return res;
+      }
 
-    // 网页矩阵：非保留路径先请矩阵认领 —— 它认领了（认得出这个层级路径、
-    // 或按入口页规则要 302）就回正文，认领不了（返回 null）就落到下面交还应用。
-    // 根 `/` 也走这条：公开访客在此被 302 去入口页，登录用户与管理员则回落接待台。
-    if (!isReservedPath(p)) {
-      const res = await serveMatrixPage(req, env, await matrixViewerOf(req, env), p);
-      if (res) return res;
+      return env.ASSETS.fetch(req);
     }
-
-    return env.ASSETS.fetch(req);
+    // 用 .catch 而不是 try/catch：路由里大量 `return handleX(...)` 没 await，
+    // 这类 promise 拒绝会直接交付出 try/catch 的覆盖范围，只有挂在返回值上才收得住。
+    return run().catch(fail);
   },
 };

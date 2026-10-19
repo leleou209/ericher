@@ -429,6 +429,54 @@ export function themeSnapshot(): ThemeConfig {
  * 把主题落到文档上：注入样式表 + 写 <html> 属性。
  * 锁定（locked）时把 data-theme 接管成 base —— 普通用户的纸色选择就翻不动了。
  */
+/**
+ * 主题落盘：主题是低频变更的全站数据，本机存一份，“下次开机先用它把样式套上”，
+ * 省掉启动后等一次 /api/theme（要走 Durable Object）才上皮肤。
+ * 存不下/读不出都不影响进门，扔了就是回到出厂主题。
+ */
+const THEME_CACHE_KEY = "ericher.theme.cache.v1";
+
+function validCachedTheme(value: unknown): value is ThemeConfig {
+  const object = (v: unknown): v is Record<string, unknown> =>
+    v !== null && typeof v === "object" && !Array.isArray(v);
+  const strings = (v: Record<string, unknown>, keys: string[]) => keys.every(k => typeof v[k] === "string");
+  const numbers = (v: Record<string, unknown>, keys: string[]) => keys.every(k => typeof v[k] === "number" && Number.isFinite(v[k]));
+  if (!object(value) || typeof value.locked !== "boolean" ||
+    !strings(value, ["agentName", "agentAvatar", "panelBg", "buttonPattern", "customCss"]) ||
+    !["paper", "dawn", "dark"].includes(String(value.base)) ||
+    !["default", "gentle", "off"].includes(String(value.motion)) ||
+    !["bubble", "card", "minimal"].includes(String(value.messageStyle))) return false;
+  if (value.tint !== null && (!object(value.tint) || !numbers(value.tint, ["h", "s", "l"]))) return false;
+  const backgrounds = value.backgrounds;
+  if (!object(backgrounds) || !BACKGROUND_SCOPES.every(scope => {
+    const bg = backgrounds[scope];
+    return object(bg) && strings(bg, ["src", "position", "size"]) && numbers(bg, ["dim", "blur"]);
+  })) return false;
+  if (!object(value.iconOverrides) || !Object.values(value.iconOverrides).every(v => typeof v === "string")) return false;
+  return Array.isArray(value.popups) && value.popups.every(p => object(p) &&
+    strings(p, ["id", "title", "body", "image"]) && typeof p.enabled === "boolean" &&
+    ["load", "first", "daily", "delay"].includes(String(p.trigger)) && numbers(p, ["delaySeconds"]) &&
+    Array.isArray(p.actions) && p.actions.every(a => object(a) && strings(a, ["label", "to"])));
+}
+
+export function readCachedTheme(): ThemeConfig | null {
+  try {
+    const raw = localStorage.getItem(THEME_CACHE_KEY);
+    const value: unknown = raw ? JSON.parse(raw) : null;
+    return validCachedTheme(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function cacheTheme(theme: ThemeConfig): void {
+  try {
+    localStorage.setItem(THEME_CACHE_KEY, JSON.stringify(theme));
+  } catch {
+    // 隐私模式 / 配额满：不缓存也能用
+  }
+}
+
 export function applyThemeToDocument(theme: ThemeConfig): void {
   currentTheme = theme;
   const root = document.documentElement;

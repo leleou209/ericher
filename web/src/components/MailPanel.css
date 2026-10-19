@@ -1,0 +1,9 @@
+/* 邮件面（组件见 MailPanel.tsx）：整面只有一行配置，样式只补这一处缺口。 */
+
+/* FormDialog.css 把行摘要钉成单行省略号；邮件这一行里「这台机器上还没有 XXX，发不出去」
+   比主机名更要紧，不该被切掉 —— 让它在行内自己折行。 */
+.entity-summary > .mail-summary-wrap {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}

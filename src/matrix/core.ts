@@ -21,6 +21,11 @@ export type MatrixViewer = {
   role: "admin" | "user" | "public";
   type?: string;
   card?: string;
+  /**
+   * 主包核过的「权限矩阵」长期权益：给了就是整面管理权（不拆子权限）。
+   * 只有管理面认这一位；页面访问（allowed）照旧只看 role / type / card。
+   */
+  matrix?: boolean;
 };
 
 /** 矩阵这一块只用到云盘桶；主包的 Env 结构上天然满足 */
@@ -160,7 +165,13 @@ const ASSISTANT_PATH = "/assistant";
 const SEG = "[a-z0-9_-]+";
 const PATH_RE = new RegExp(`^${SEG}(?:/${SEG}){0,2}$`);
 
-let configCache: { cfg: MatrixConfig; at: number } | null = null;
+/**
+ * 配置缓存按桶隔离，且交出去的都是副本：调用方一路都是就地改 cfg
+ * （`cfg.theme = …`、`cfg.pages.splice(…)`），要是把缓存本体交出去，
+ * 一次保存失败就会让未落盘的幻影配置在缓存里活满 TTL —— 公开页照它渲染，
+ * 5 秒后又自己变回去，现场看起来像「云端随机抽风」。
+ */
+const configCache = new WeakMap<object, { cfg: MatrixConfig; at: number }>();
 
 // ── 矩阵包（成熟体直接部署）──────────────────────────────
 //
@@ -238,7 +249,7 @@ function newId(): string {
 
 // ── 配置读写 ────────────────────────────────────────────
 
-function emptyConfig(): MatrixConfig {
+export function emptyConfig(): MatrixConfig {
   return {
     rev: 0,
     pages: [],
@@ -249,9 +260,11 @@ function emptyConfig(): MatrixConfig {
   };
 }
 
-async function loadConfig(env: MatrixEnv): Promise<MatrixConfig> {
-  if (configCache && Date.now() - configCache.at < CONFIG_TTL_MS)
-    return configCache.cfg;
+export async function loadConfig(env: MatrixEnv): Promise<MatrixConfig> {
+  if (!env.MEMORY_BUCKET) return emptyConfig();
+  const cached = configCache.get(env.MEMORY_BUCKET);
+  if (cached && Date.now() - cached.at < CONFIG_TTL_MS)
+    return structuredClone(cached.cfg);
   let cfg = emptyConfig();
   try {
     const obj = await env.MEMORY_BUCKET.get(CONFIG_KEY);
@@ -275,14 +288,17 @@ async function loadConfig(env: MatrixEnv): Promise<MatrixConfig> {
     // 读路径不抛：配置坏了就按空处理，页面请求自然回 miss，不炸整个包
     cfg = emptyConfig();
   }
-  configCache = { cfg, at: Date.now() };
+  configCache.set(env.MEMORY_BUCKET, { cfg: structuredClone(cfg), at: Date.now() });
   return cfg;
 }
 
-async function saveConfig(env: MatrixEnv, cfg: MatrixConfig): Promise<void> {
+export async function saveConfig(
+  env: MatrixEnv,
+  cfg: MatrixConfig,
+): Promise<void> {
   cfg.rev = (cfg.rev || 0) + 1;
   await env.MEMORY_BUCKET.put(CONFIG_KEY, JSON.stringify(cfg));
-  configCache = { cfg, at: Date.now() };
+  configCache.set(env.MEMORY_BUCKET, { cfg: structuredClone(cfg), at: Date.now() });
 }
 
 function bodyKey(id: string): string {
@@ -1909,8 +1925,10 @@ async function equipMatrixPack(
 }
 
 /**
- * 管理面（/api/matrix/*）。viewer 由主包算好传进来 —— 主包那边已经做过
- * 「必须是管理员」这道闸，这里再核一遍（推送入口同样以 admin 身份进来）。
+ * 管理面（/api/matrix/*）。viewer 由主包算好传进来 —— 这里再核一遍：
+ * 管理员，或主包核过「权限矩阵」长期权益的人（matrix 位）。这一档是整面给的，
+ * 过了这道闸之后每一项都按全量执行，没有半开的子权限。
+ * 推送入口那条路没有会话，它带的 role 本身就是 admin。
  */
 export async function handleMatrixApi(
   req: Request,
@@ -1918,8 +1936,12 @@ export async function handleMatrixApi(
   pathname: string,
   viewer: MatrixViewer,
 ): Promise<Response> {
-  if (viewer.role !== "admin")
-    return json({ ok: false, error: "无权访问" }, 403);
+  // 第二道闸：管理员，或主包核过「权限矩阵」这一档的持卡来客。
+  // 只认 user + matrix：过路人（public）无论谁把 matrix 位置起来都不放行 ——
+  // 这道闸防的就是上游漏判，放行面不能靠调用方自觉。
+  const canManage =
+    viewer.role === "admin" || (viewer.role === "user" && viewer.matrix === true);
+  if (!canManage) return json({ ok: false, error: "无权访问" }, 403);
 
   const cfg = await loadConfig(env);
   // 工作台/设置页状态卡用的一次性总览：版本 + 矩阵规模 + 外观开关。

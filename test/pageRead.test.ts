@@ -13,7 +13,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { assertPublicUrl, fetchPageText } from "../src/tools/search";
+import { assertPublicUrl, fetchPageText, searchTools } from "../src/tools/search";
 
 // launchState 在 vi.mock 工厂里被引用，必须用 vi.hoisted 提到提升之前
 const launchState = vi.hoisted(() => ({
@@ -28,6 +28,8 @@ vi.mock("@cloudflare/puppeteer", () => ({
     },
   },
 }));
+
+import type { ToolCtx } from "../src/tools/types";
 
 const SHELL_HTML = "<html><body>空壳</body></html>"; // 短到进不了「直连够用」那一档
 
@@ -273,5 +275,109 @@ describe("风控页识别（验证页长得像正文，危害比取不到还大�
     await expect(
       fetchPageText(envOf(withBrowser), "https://example.com"),
     ).rejects.toThrow(/挡自动化访问/);
+  });
+});
+
+// 实际GBK字节，不使用UTF-8字符串Response假装传统编码。
+describe("直连传统中文编码回归", () => {
+  it("长GB2312新闻正确解码，不因乱码超过200字就认作成功", async () => {
+    const text = "9月CPI和PPI同比涨幅扩大，中文新闻。";
+    const unit = Uint8Array.from("39d4c2435049bacd505049cdacb1c8d5c7b7f9c0a9b4f3a3acd6d0cec4d0c2cec5a1a3".match(/../g)!.map(x => parseInt(x, 16)));
+    const head = new TextEncoder().encode('<html><head><meta charset="gb2312"></head><body><p>');
+    const tail = new TextEncoder().encode('</p></body></html>');
+    const bytes = new Uint8Array(head.length + unit.length * 30 + tail.length);
+    bytes.set(head);
+    for (let i=0;i<30;i++) bytes.set(unit,head.length+i*unit.length);
+    bytes.set(tail, bytes.length-tail.length);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(bytes, { headers: { "content-type": "text/html" } })));
+    const result = await fetchPageText(envOf(), "https://example.com/news.html");
+    expect(result.text).toContain(text.repeat(30));
+    expect(result.text).not.toContain("�");
+    expect(result.rendered).toBe(false);
+  });
+});
+
+const fakeCtx = (format: "tavily" | "brave" = "tavily", keyed = false) => ({
+  env: envOf(keyed ? { TEST_SEARCH_KEY: "fake-test-only" } : {}),
+  searchConfig: async () => ({ format, keySecret: keyed ? "TEST_SEARCH_KEY" : "" }),
+}) as unknown as ToolCtx;
+const execOptions = { toolCallId: "encoding-test", messages: [] };
+const gbkPage = (prefix: string, count=1, suffix="") => {
+  const gb = [0xd6,0xd0,0xce,0xc4,0xd0,0xc2,0xce,0xc5]; // 中文新闻
+  const bytes = [...new TextEncoder().encode(prefix)];
+  for(let i=0;i<count;i++) bytes.push(...gb);
+  bytes.push(...new TextEncoder().encode(suffix));
+  return new Uint8Array(bytes);
+};
+
+describe("搜索和浏览编码联动", () => {
+  it("browse正文、标题、锚点文字统一GBK解码", async () => {
+    const bytes=gbkPage('<html><head><title>',1,'</title></head><body>');
+    const rest=gbkPage('<p>',80,'</p><a href="/next">');
+    const last=gbkPage('',1,'</a></body></html>');
+    const merged=new Uint8Array(bytes.length+rest.length+last.length);
+    merged.set(bytes);merged.set(rest,bytes.length);merged.set(last,bytes.length+rest.length);
+    vi.stubGlobal("fetch",vi.fn(async()=>new Response(merged,{headers:{"content-type":"text/html; charset=GBK"}})));
+    const out=await searchTools(fakeCtx()).browse.execute!({url:"https://example.com/",action:"read",limit:20},execOptions);
+    expect(out).toContain("🌐 中文新闻");
+    expect(out).toContain("中文新闻 → https://example.com/next");
+    expect(out).not.toContain("�");
+  });
+  it("DDG的HTML标题和摘要也按字符集读取", async () => {
+    const bytes=gbkPage('<meta charset="gb2312"><a class="result__a" href="https://example.com/news">',1,'</a><a class="result__snippet">');
+    const tail=gbkPage('',1,'</a>');
+    const all=new Uint8Array(bytes.length+tail.length);all.set(bytes);all.set(tail,bytes.length);
+    const fn=vi.fn(async()=>new Response(all,{headers:{"content-type":"text/html"}}));vi.stubGlobal("fetch",fn);
+    const out=await searchTools(fakeCtx()).search.execute!({query:"中文新闻",depth:"basic",topic:"news",maxResults:5},execOptions);
+    expect(out).toContain("1. 中文新闻");expect(out).not.toContain("�");expect(fn).toHaveBeenCalledTimes(1);
+  });
+  it.each(["tavily","brave"] as const)("%s UTF8 JSON中文摘要保持正常，不走网页GBK解码",async format=>{
+    vi.stubGlobal("fetch",vi.fn(async()=>Response.json(format==="tavily"
+      ? {answer:"中文摘要",results:[{title:"中文新闻",content:"同比上涨0.2%",url:"https://example.com/"}]}
+      : {web:{results:[{title:"中文新闻",description:"同比上涨0.2%",url:"https://example.com/"}]}})));
+    const out=await searchTools(fakeCtx(format,true)).search.execute!({query:"CPI",depth:"basic",topic:"news",maxResults:5},execOptions);
+    expect(out).toContain("中文新闻");expect(out).toContain("同比上涨0.2%");
+  });
+  it("没有字符集且不是UTF8时进入备用通道，不伪造正常长正文",async()=>{
+    const fn=vi.fn(async(input:unknown)=>String(input).startsWith("https://r.jina.ai/")
+      ? new Response("备用通道正确中文")
+      : new Response(gbkPage('<p>',100,'</p>'),{headers:{"content-type":"text/html"}}));vi.stubGlobal("fetch",fn);
+    expect((await fetchPageText(envOf(),"https://example.com")).text).toBe("备用通道正确中文");
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+  it("上游extract正文已损坏时不能当成功，退回原页可靠解码",async()=>{
+    const fn=vi.fn(async(input:unknown)=>String(input).includes("api.tavily.com")
+      ? Response.json({results:[{raw_content:"9�·�CPI��PPIͬ���Ƿ�������".repeat(30)}]})
+      : new Response(gbkPage('<p>',100,'</p>'),{headers:{"content-type":"text/html;charset=gbk"}}));vi.stubGlobal("fetch",fn);
+    const result=await fetchPageText(envOf({TEST_SEARCH_KEY:"fake"}),"https://example.com",{}, {format:"tavily",keySecret:"TEST_SEARCH_KEY"});
+    expect(result.text).toContain("中文新闻");expect(result.text).not.toContain("�");expect(fn).toHaveBeenCalledTimes(2);
+  });
+  it("所有读取方式失败时明确保留编码失败原因",async()=>{
+    vi.stubGlobal("fetch",vi.fn(async(input:unknown)=>String(input).startsWith("https://r.jina.ai/")
+      ? new Response("",{status:404}) : new Response(gbkPage('<p>',100,'</p>'),{headers:{"content-type":"text/html"}})));
+    await expect(fetchPageText(envOf(),"https://example.com")).rejects.toThrow(/直连失败原因.*可靠解码/);
+  });
+});
+
+describe("标准JSON备用通道与损坏摘要", () => {
+  it.each(["tavily","brave"] as const)("%s上游损坏摘要退到免费检索并明确原因",async format=>{
+    const junk="9�·�CPI��PPIͬ���Ƿ�������";
+    vi.stubGlobal("fetch",vi.fn(async(input:unknown)=>String(input).includes("duckduckgo.com")
+      ? new Response('<a class="result__a" href="https://example.com">正确中文新闻</a><a class="result__snippet">正确摘要</a>',{headers:{"content-type":"text/html;charset=utf-8"}})
+      : Response.json(format==="tavily" ? {results:[{title:"news",content:junk,url:"https://example.com"}]} : {web:{results:[{title:"news",description:junk,url:"https://example.com"}]}})));
+    const out=await searchTools(fakeCtx(format,true)).search.execute!({query:"news",depth:"basic",topic:"news",maxResults:5},execOptions);
+    expect(out).toContain("返回文字编码损坏");expect(out).toContain("正确中文新闻");expect(out).not.toContain(junk);
+  });
+  it("DDG不可用时维基UTF8 JSON标题及HTML摘要保持中文",async()=>{
+    vi.stubGlobal("fetch",vi.fn(async(input:unknown)=>String(input).includes("wikipedia.org")
+      ? Response.json({query:{search:[{title:"中文百科",snippet:"<span>中文百科内容</span>"}]}}) : new Response("",{status:503})));
+    const out=await searchTools(fakeCtx()).search.execute!({query:"中文",depth:"basic",topic:"general",maxResults:1},execOptions);
+    expect(out).toContain("维基百科");expect(out).toContain("中文百科内容");
+  });
+  it("无搜索条目时DDG即时问答的UTF8中文仍可读取",async()=>{
+    vi.stubGlobal("fetch",vi.fn(async(input:unknown)=>String(input).startsWith("https://api.duckduckgo.com")
+      ? Response.json({AbstractText:"正确中文即时摘要",AbstractURL:"https://example.com"}) : new Response("",{status:503})));
+    const out=await searchTools(fakeCtx()).search.execute!({query:"中文",depth:"basic",topic:"general",maxResults:1},execOptions);
+    expect(out).toContain("正确中文即时摘要");
   });
 });

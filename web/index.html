@@ -4,19 +4,45 @@
     <meta charset="UTF-8" />
     <link rel="icon" href="/favicon.svg" />
     <link rel="manifest" href="/manifest.json" />
-    <meta
-      name="viewport"
-      content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"
-    />
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
     <meta name="theme-color" content="#ffffff" />
-    <!-- 门禁站点不做收录：搜索结果里的登录页只会引来试探口令的人 -->
     <meta name="robots" content="noindex, nofollow" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <title>ericher</title>
+    <script>
+      // 只恢复纸色，不读取或信任任何本地身份。主题完整校验由应用接手。
+      try {
+        var tone = localStorage.getItem("xm_theme");
+        var cached = JSON.parse(localStorage.getItem("ericher.theme.cache.v1") || "null");
+        if (cached && cached.locked === true) tone = cached.base;
+        if (tone === "system") tone = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "paper";
+        if (["paper", "dawn", "dark"].includes(tone)) document.documentElement.dataset.theme = tone;
+      } catch (_) {}
+    </script>
+    <style>
+      html,body { margin:0; height:100%; background:var(--yuzhe-bg,#fff); color:var(--yuzhe-ink,#1f2329); }
+      #boot { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; padding:24px; font:14px/1.7 system-ui,"Microsoft YaHei",sans-serif; text-align:center; }
+      #boot p { margin:6px 0; }
+      #boot .boot-note { color:var(--yuzhe-ink-dim,#666); font-size:12px; }
+      #boot button { margin-top:12px; padding:8px 16px; border:1px solid #aaa; border-radius:8px; background:transparent; color:inherit; cursor:pointer; }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div id="boot" role="status" aria-live="polite"><div>
+      <p>正在载入接待台…</p><p class="boot-note">网络较慢时请稍候。</p>
+      <button id="boot-retry" type="button" hidden>重新加载页面</button>
+      <noscript><p>请启用 JavaScript 后重新加载。</p></noscript>
+    </div></div></div>
+    <script>
+      (function () {
+        var button = document.getElementById("boot-retry");
+        button.addEventListener("click", function () { location.reload(); });
+        function retry() { if (document.contains(button)) button.hidden = false; }
+        setTimeout(retry, 20000);
+        window.addEventListener("error", function (event) { if (event.target && event.target.tagName === "SCRIPT") retry(); }, true);
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

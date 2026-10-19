@@ -4,10 +4,18 @@ import { agentDisplay, useTheme } from "../lib/theme";
 import { ThemeBackdrop } from "./ThemeBackdrop";
 import "./Gate.css";
 
+import { createSessionCheck, sessionFailure } from "../lib/sessionCheck";
+
+const checkSession = createSessionCheck(signal => api.me(signal));
 type GateState = "checking" | "locked" | "open";
 
 export function useGate(): {
   gate: GateState;
+  checkError: string;
+  retryCheck: () => void;
+  /** 身份检查一直问不出结果（服务端 5xx、网关挂了）时的一条路：直接走门禁码/身份卡。
+   *  留在「正在恢复会话」里等，等于把知道口令的人也挡在门外 —— 门禁本身就是登录入口。 */
+  enterGate: () => void;
   role: Role;
   /** 该连哪个 DO 实例。管理员是 default，来客每人一间自己的（见后端 auth.ts） */
   agent: string;
@@ -19,22 +27,34 @@ export function useGate(): {
   const [gate, setGate] = useState<GateState>("checking");
   const [role, setRole] = useState<Role>("user");
   const [agent, setAgent] = useState("");
+  const [checkError, setCheckError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const retryCheck = useCallback(() => {
+    setCheckError("");
+    setGate("checking");
+    setAttempt(previous => previous + 1);
+  }, []);
+
+  const enterGate = useCallback(() => setGate("locked"), []);
 
   useEffect(() => {
     let alive = true;
-    api
-      .me()
-      .then((r) => {
-        if (!alive) return;
-        setRole(r.role);
-        setAgent(r.agent);
-        setGate("open");
-      })
-      .catch(() => alive && setGate("locked"));
-    return () => {
-      alive = false;
-    };
-  }, []);
+    checkSession().then(identity => {
+      if (!alive) return;
+      setRole(identity.role);
+      setAgent(identity.agent);
+      setCheckError("");
+      setGate("open");
+    }).catch(error => {
+      if (!alive) return;
+      if (sessionFailure(error) === "locked") setGate("locked");
+      else {
+        setGate("checking");
+        setCheckError("暂时无法确认登录状态，请检查网络后重试；这不代表你已退出登录。");
+      }
+    });
+    return () => { alive = false; };
+  }, [attempt]);
 
   // token 有 30 天，总会过期。过期之后每一个请求都回 401，
   // 但界面还开着 —— 人只会看到「哪儿都点不动」。这里接住那个信号，把人请回门口。
@@ -59,7 +79,7 @@ export function useGate(): {
 
   const lock = useCallback(() => setGate("locked"), []);
 
-  return { gate, role, agent, unlock, unlockCard, lock };
+  return { gate, role, agent, unlock, unlockCard, lock, checkError, retryCheck, enterGate };
 }
 
 export function Gate({

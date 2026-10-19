@@ -32,7 +32,7 @@ import type { FeedbackSummary, MsgComment, TurnError } from "../lib/types";
 import { agentDisplay, useTheme } from "../lib/theme";
 import { Icon, type IconName } from "./Icons";
 import { zoomIn } from "./Lightbox";
-import { toolMeta } from "./Panels";
+import { toolMeta } from "./PanelsShared";
 
 /** 他说话前自报的那枚小签：主题给了头像就把头像别上，名字也随主题叫 */
 function AgentLabel() {

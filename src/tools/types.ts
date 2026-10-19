@@ -8,6 +8,7 @@ import type { SearchConfig } from "../agent/searchConfigs";
 import type { RecallHit, SessionMeta } from "../agent/sessionStore";
 import type { ChatState, MemEntry, SqlTag } from "../agent/state";
 import type { MemoryStats } from "../agent/memory";
+import type { MailInRow, MailOutRow } from "../mail/mailboxTypes";
 
 export interface ToolCtx {
   env: Env;
@@ -49,6 +50,29 @@ export interface ToolCtx {
   writeSelfDemand(content: string): Promise<number>;
   /** 向所有连接广播一条非聊天提示；无连接时静默 */
   notify(text: string): void;
+  /**
+   * 寄一封邮件（走管理员配好的 SMTP 账号）。
+   * 失败不抛，回一句能看的原因：额度、开关、发件人验证都在后端判，工具只转达。
+   */
+  sendMail(job: {
+    to?: string;
+    subject: string;
+    text: string;
+  }): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** 发件箱：最近寄出去的每一封，成与败都在（账本只有主屋那一本） */
+  mailOutbox(limit?: number): Promise<MailOutRow[]>;
+  /** 收件箱：行 + 未读数 + 这台机器开没开收信（三件事界面与工具都要分得清） */
+  mailInbox(limit?: number): Promise<{
+    rows: MailInRow[];
+    unread: number;
+    enabled: boolean;
+  }>;
+  /** 读某一封的正文；拿不到原件时 text 是当时存下的摘要，note 会说明 */
+  mailInboxRead(id: string): Promise<{
+    row: MailInRow | null;
+    text: string;
+    note: string;
+  }>;
   /** 把记忆送进 Vectorize（经 queue 重试，失败不阻塞对话） */
   enqueueVector(entry: {
     id: string;

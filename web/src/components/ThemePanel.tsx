@@ -13,14 +13,61 @@
 //
 // 素材一律存纯引用（`asset:<文件名>` / https 外链），渲染时才 resolveAsset ——
 // 唯一的例外是 panelBg，它本身就是一段原样注入的 CSS，得带 url(...)（见下方注释）。
+//
+// 管理形态分两半：「一项一项、有名字、可增可删」的三处记录（自定义主题存档、图标覆盖、
+// 触发式弹页）走列表 + 详情弹页 —— 行只读，点行开弹页，按下保存才提交。
+// 六个壁纸落点、功能块底色与按钮花纹同样走行 + 弹页，但它们是**固定枚举不是列表**：
+// 只有那几行，没有「新增/删除」；压暗与模糊两根滑杆常驻在行上 —— 就地预览是它们的
+// 本体，收进弹页就断了「改一下就看到效果」那条线。基调滑杆与自定义 CSS 同理留在原地。
+// 派生规则（行摘要、来源判别、位置/尺寸归一）见 ../lib/appearanceForm.ts。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { type R2File, type ThemeKey } from "../lib/types";
 import {
+  archiveMissingFields,
+  backgroundDraftOf,
+  backgroundRowSummary,
+  backgroundSizeChoices,
+  backgroundWithDraft,
+  blankPopupDraft,
+  buttonPatternSummary,
+  firstUnusedIconName,
+  iconMissingFields,
+  iconOverrideEdited,
+  iconOverridePatchOf,
+  iconOverrideRemoved,
+  iconOverrideSummary,
+  MAX_ACTION_LABEL,
+  MAX_ACTION_TO,
+  MAX_BG_POSITION,
+  MAX_POPUP_ACTIONS,
+  MAX_POPUP_BODY,
+  MAX_POPUP_TITLE,
+  MAX_SET_NAME,
+  nextPopupId,
+  normalizeBackgroundSize,
+  panelBgSummary,
+  panelStylePatchOf,
+  popupDraftOf,
+  popupListEdited,
+  popupListRemoved,
+  popupListToggled,
+  popupMissingFields,
+  popupOf,
+  popupRowTitle,
+  popupSummary,
+  themeSetSummary,
+  TRIGGER_LABELS,
+  type BackgroundFormDraft,
+  type PopupActionDraft,
+  type PopupFormDraft,
+} from "../lib/appearanceForm";
+import {
   BACKGROUND_SCOPES,
   SCOPE_LABELS,
   defaultTheme,
+  emptyBackground,
   resolveAsset,
   tintPalette,
   useTheme,
@@ -32,12 +79,27 @@ import {
   type ThemeMode,
   type ThemeMotion,
   type ThemePopup,
-  type ThemePopupAction,
   type ThemeSet,
   type ThemeTint,
 } from "../lib/theme";
+import {
+  EntityAddButton,
+  EntityNote,
+  EntityRow,
+  FormDialog,
+  FormRow,
+  FormSection,
+  useDraft,
+} from "./FormDialog";
 import { Icon, type IconName } from "./Icons";
 import "./ThemePanel.css";
+import "./AppearanceDialogs.css";
+
+/** 弹页认的「新增」标记；其余非空值是这一条的 id（编辑），空串 = 弹页关着 */
+const NEW_MARK = "__new";
+
+/** 功能块底色与按钮花纹：后端把它们当同一域，弹页按「正在改哪一格」开 */
+type PanelField = "panelBg" | "buttonPattern";
 
 /** 图标覆盖的候选名：Icons.tsx 里 ICONS 的全套字面量（漏改会被类型系统抓） */
 const ICON_NAMES: IconName[] = [
@@ -131,12 +193,6 @@ function artCustomized(t: ThemeConfig): boolean {
   );
 }
 
-/** 存档大小给人看：KB 起步，超过 1MB 走 MB */
-function humanBytes(n: number): string {
-  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}MB`;
-  return `${Math.max(1, Math.round(n / 1024))}KB`;
-}
-
 /** 三级调色器的起点（≈ 晨曦的蓝），一动滑杆就落成 draft.tint */
 const DEFAULT_TINT: ThemeTint = { h: 214, s: 50, l: 24 };
 
@@ -189,13 +245,6 @@ const MESSAGE_OPTIONS: {
   { key: "card", name: "卡片", desc: "方角 + 描边 + 投影，像一张张便签" },
   { key: "minimal", name: "极简", desc: "去掉泡底和尾巴，纯文字排开" },
 ];
-
-const TRIGGER_LABELS: Record<PopupTrigger, string> = {
-  load: "每次进站",
-  first: "仅首次",
-  daily: "每天一次",
-  delay: "进站后延时",
-};
 
 /** 预览砖：把 resolveAsset(src) 当背景图铺一小块，人一眼看到这层铺出来什么样 */
 function PreviewBrick({
@@ -628,15 +677,44 @@ export function AppearancePanel({
 
   // 自定义主题存档：一份带名字的整包配置，存在云端
   const [sets, setSets] = useState<ThemeSet[]>([]);
-  const [setName, setSetName] = useState("");
+
+  // 三处记录型列表各自一个弹页：开窗拍草稿，按下保存才提交。
+  // hook 一律留在函数体最上面 —— 放到条件分支或早退之后，React 会报
+  // "Rendered more hooks than during the previous render"，整页停在半开的状态不动。
+  const setForm = useDraft<{ name: string }>({ name: "" });
+  const [setDialog, setSetDialog] = useState(false);
+  const [setDialogErr, setSetDialogErr] = useState("");
+  const [savingSet, setSavingSet] = useState(false);
+
+  const iconForm = useDraft<{ name: string; ref: string }>({ name: "", ref: "" });
+  /** 正在编辑的图标名；NEW_MARK = 新增，空串 = 弹页关着 */
+  const [iconDialog, setIconDialog] = useState("");
+  const [iconErr, setIconErr] = useState("");
+
+  const popupForm = useDraft<PopupFormDraft>(blankPopupDraft(""));
+  /** 正在编辑的弹页 id；NEW_MARK = 新增，空串 = 弹页关着 */
+  const [popupDialog, setPopupDialog] = useState("");
+  const [popupErr, setPopupErr] = useState("");
+
+  // 壁纸落点与功能块底色/花纹是固定枚举：弹页只记「正在编辑哪一格」，没有新增这条路
+  const bgForm = useDraft<BackgroundFormDraft>({
+    src: "",
+    position: "",
+    size: "",
+  });
+  /** 正在编辑的落点；空串 = 弹页关着 */
+  const [bgDialog, setBgDialog] = useState<BackgroundScope | "">("");
+  const [bgErr, setBgErr] = useState("");
+
+  const panelForm = useDraft<{ value: string }>({ value: "" });
+  /** 正在编辑的是哪一格（这两格是一域两格）；空串 = 弹页关着 */
+  const [panelDialog, setPanelDialog] = useState<PanelField | "">("");
+  const [panelErr, setPanelErr] = useState("");
 
   const onTheme = page === "appearance-theme";
   const onColor = page === "appearance-color";
   const onFace = page === "appearance-face";
   const onMotion = page === "appearance-motion";
-
-  const [iconName, setIconName] = useState<IconName>("home");
-  const [iconRef, setIconRef] = useState("");
 
   // 云盘选图器开着时，把「选完这张图往哪落」的回调存在这 —— 谁开的谁接货
   const [drivePick, setDrivePick] = useState<((ref: string) => void) | null>(
@@ -732,13 +810,20 @@ export function AppearancePanel({
   /**
    * 按主题域保存：只发这一域的字段，成功后用回执回填该域、刷新全局主题。
    * 只回填 keys 指定的域 —— 别的卡上没保存的编辑还得留在手上。
+   *
+   * 返回空串 = 成了，非空 = 后端那句话（HTTP 200 里的 ok:false 也由 lib/http 抛成错误）。
+   * 卡上的保存按钮不看返回值；弹页要看 —— 没成就留在窗里说清楚，不关窗、不做乐观更新。
    */
   const save = async (
     patch: ThemeConfigPatch,
     keys: (keyof ThemeConfig)[],
     label: string,
-  ) => {
-    if (busy) return;
+  ): Promise<string> => {
+    if (busy) {
+      const msg = `手上正在「${busy}」，先等它跑完`;
+      setErr(msg);
+      return msg;
+    }
     setBusy(`保存${label}`);
     setErr("");
     setSaved("");
@@ -755,8 +840,11 @@ export function AppearancePanel({
       });
       setSaved(`${label}已保存`);
       reload();
+      return "";
     } catch (e) {
-      setErr((e as Error).message);
+      const msg = (e as Error).message;
+      setErr(msg);
+      return msg;
     } finally {
       setBusy("");
     }
@@ -788,9 +876,51 @@ export function AppearancePanel({
       },
     }));
 
-  const pickBg = async (scope: BackgroundScope, file: File) => {
+  const patchBackground = (p: Partial<BackgroundFormDraft>) =>
+    bgForm.setDraft((prev) => ({ ...prev, ...p }));
+
+  const openEditBackground = (scope: BackgroundScope) => {
+    bgForm.reset(backgroundDraftOf(draft.backgrounds[scope]));
+    setBgErr("");
+    setBgDialog(scope);
+  };
+
+  /** 挑图器还开着时先别拆弹页：Esc 会同时打到这两层，让人把这张图先挑完 */
+  const closeBackgroundDialog = () => {
+    if (drivePick) return;
+    setBgDialog("");
+    setBgErr("");
+  };
+
+  const pickBackgroundImage = async (file: File) => {
     const ref = await uploadFile(file);
-    if (ref) setBgSrc(scope, ref);
+    if (ref) patchBackground({ src: ref });
+  };
+
+  /**
+   * 弹页按下保存 = 整组提交（后端对背景只有这一把刀，没做单格保存）。
+   * 先落进草稿再发：行上的预览当场跟着这张新图走，压暗/模糊还是行上那份 ——
+   * 这套「编辑住在草稿、按下保存才发出去」与改造前摊开输入条时是同一条线，
+   * 所以提交失败时草稿留着待改（不是假装已经存上：成了才由 save 用回执回填这一域）。
+   */
+  const saveBackgroundDialog = async () => {
+    const scope = bgDialog;
+    if (!scope) return;
+    const next = backgroundWithDraft(draft.backgrounds[scope], bgForm.draft);
+    setBgSrc(scope, next.src);
+    setBg(scope, { position: next.position, size: next.size });
+    const failed = await save(
+      { backgrounds: { ...draft.backgrounds, [scope]: next } },
+      ["backgrounds"],
+      "背景",
+    );
+    // 后端说不对：话留在弹页里说，不关窗、不乐观更新
+    if (failed) {
+      setBgErr(failed);
+      return;
+    }
+    setBgDialog("");
+    setBgErr("");
   };
 
   // ── 功能块背景 / 按钮花纹 ─────────────────────────────────
@@ -802,106 +932,215 @@ export function AppearancePanel({
   //   buttonPattern —— buildThemeCss 会先过 resolveAsset 再拼进 `url(...)`，所以存纯
   //                   引用（asset:/https）；多包一层 url() 会被 resolveAsset 判成脏值丢掉。
 
-  const pickPanelBg = async (file: File) => {
-    const ref = await uploadFile(file);
-    if (ref) update((d) => ({ ...d, panelBg: `url("${resolveAsset(ref)}")` }));
+  /** 同一张上传/云盘图，落进这两格时拼法不同 —— 差别就是上面那段 */
+  const panelValueOf = (which: PanelField, ref: string): string =>
+    which === "panelBg" ? `url("${resolveAsset(ref)}")` : ref;
+
+  const patchPanelField = (p: Partial<{ value: string }>) =>
+    panelForm.setDraft((prev) => ({ ...prev, ...p }));
+
+  const openEditPanelField = (which: PanelField) => {
+    panelForm.reset({
+      value: which === "panelBg" ? draft.panelBg : draft.buttonPattern,
+    });
+    setPanelErr("");
+    setPanelDialog(which);
   };
 
-  const pickPattern = async (file: File) => {
+  const closePanelDialog = () => {
+    if (drivePick) return;
+    setPanelDialog("");
+    setPanelErr("");
+  };
+
+  const pickPanelImage = async (file: File) => {
     const ref = await uploadFile(file);
-    if (ref) update((d) => ({ ...d, buttonPattern: ref }));
+    if (ref && panelDialog)
+      patchPanelField({ value: panelValueOf(panelDialog, ref) });
+  };
+
+  /** 云盘挑回来的也是 asset: 引用，拼法与上传同一套（所以走 panelValueOf） */
+  const pickPanelDrive = () => {
+    const which = panelDialog;
+    if (!which) return;
+    pickFromDrive((ref) => patchPanelField({ value: panelValueOf(which, ref) }));
+  };
+
+  /** 两格是一域：提交时把另一格现在的值一起发，改完才由回执回填这一域 */
+  const savePanelDialog = async () => {
+    const which = panelDialog;
+    if (!which) return;
+    const value = panelForm.draft.value;
+    const next =
+      which === "panelBg"
+        ? { panelBg: value, buttonPattern: draft.buttonPattern }
+        : { panelBg: draft.panelBg, buttonPattern: value };
+    update((d) => ({ ...d, ...next }));
+    const failed = await save(
+      panelStylePatchOf(next),
+      ["panelBg", "buttonPattern"],
+      "功能块与按钮",
+    );
+    if (failed) {
+      setPanelErr(failed);
+      return;
+    }
+    setPanelDialog("");
+    setPanelErr("");
   };
 
   // ── 图标覆盖 ────────────────────────────────────────────
+  //
+  // 一项 = 「这个图标换成这张图」。行只读、点行开弹页，按下保存才提交；
+  // 提交口径还是原来那一刀：整份覆盖表 + 后端增量语义（删掉的键显式发 null 才清得掉，
+  // 空对象等于什么都不动）—— 折算都写在 iconOverridePatchOf 里，那条规则单独有测试。
 
-  const addIcon = () => {
-    const ref = iconRef.trim();
-    if (!ref) return;
-    update((d) => ({
-      ...d,
-      iconOverrides: { ...d.iconOverrides, [iconName]: ref },
-    }));
-    setIconRef("");
+  const submitIcons = (next: Record<string, string>) =>
+    save(
+      { iconOverrides: iconOverridePatchOf(next, theme.iconOverrides) },
+      ["iconOverrides"],
+      "图标覆盖",
+    );
+
+  const patchIcon = (p: Partial<{ name: string; ref: string }>) =>
+    iconForm.setDraft((prev) => ({ ...prev, ...p }));
+
+  const openAddIcon = () => {
+    iconForm.reset({
+      name: firstUnusedIconName(ICON_NAMES, draft.iconOverrides),
+      ref: "",
+    });
+    setIconErr("");
+    setIconDialog(NEW_MARK);
   };
 
-  const removeIcon = (name: string) =>
-    update((d) => {
-      const next = { ...d.iconOverrides };
-      delete next[name];
-      return { ...d, iconOverrides: next };
-    });
+  const openEditIcon = (name: string) => {
+    iconForm.reset({ name, ref: draft.iconOverrides[name] ?? "" });
+    setIconErr("");
+    setIconDialog(name);
+  };
 
-  // ── 弹页 ────────────────────────────────────────────────
+  /** 挑图器还开着时先别拆弹页：Esc 会同时打到这两层，让人把这张图先挑完 */
+  const closeIconDialog = () => {
+    if (drivePick) return;
+    setIconDialog("");
+    setIconErr("");
+  };
 
-  const setPopup = (idx: number, patch: Partial<ThemePopup>) =>
-    update((d) => ({
-      ...d,
-      popups: d.popups.map((p, i) => (i === idx ? { ...p, ...patch } : p)),
-    }));
-
-  const addPopup = () =>
-    update((d) => {
-      let n = 1;
-      while (d.popups.some((p) => p.id === `popup-${n}`)) n++;
-      return {
-        ...d,
-        popups: [
-          ...d.popups,
-          {
-            id: `popup-${n}`,
-            enabled: true,
-            title: "",
-            body: "",
-            image: "",
-            trigger: "load" as PopupTrigger,
-            delaySeconds: 0,
-            actions: [],
-          },
-        ],
-      };
-    });
-
-  const removePopup = (idx: number) =>
-    update((d) => ({ ...d, popups: d.popups.filter((_, i) => i !== idx) }));
-
-  const setPopupAction = (
-    idx: number,
-    ai: number,
-    patch: Partial<ThemePopupAction>,
-  ) =>
-    update((d) => ({
-      ...d,
-      popups: d.popups.map((p, i) =>
-        i === idx
-          ? {
-              ...p,
-              actions: p.actions.map((a, j) => (j === ai ? { ...a, ...patch } : a)),
-            }
-          : p,
+  const saveIconDialog = async () => {
+    const missing = iconMissingFields(iconForm.draft);
+    if (missing.length) {
+      setIconErr(missing.map((m) => m.message).join("；"));
+      return;
+    }
+    const failed = await submitIcons(
+      iconOverrideEdited(
+        draft.iconOverrides,
+        iconDialog === NEW_MARK ? "" : iconDialog,
+        iconForm.draft,
       ),
-    }));
+    );
+    // 后端说不对（地址脏、超出条数…）：留在弹页里讲，不关窗、列表也不改
+    if (failed) {
+      setIconErr(failed);
+      return;
+    }
+    setIconDialog("");
+    setIconErr("");
+  };
 
-  const addPopupAction = (idx: number) =>
-    update((d) => ({
-      ...d,
-      popups: d.popups.map((p, i) =>
-        i === idx ? { ...p, actions: [...p.actions, { label: "", to: "" }] } : p,
-      ),
-    }));
+  const deleteIcon = (name: string) => {
+    void submitIcons(iconOverrideRemoved(draft.iconOverrides, name));
+  };
 
-  const removePopupAction = (idx: number, ai: number) =>
-    update((d) => ({
-      ...d,
-      popups: d.popups.map((p, i) =>
-        i === idx
-          ? { ...p, actions: p.actions.filter((_, j) => j !== ai) }
-          : p,
-      ),
-    }));
-
-  const pickPopupImage = async (idx: number, file: File) => {
+  const pickIconImage = async (file: File) => {
     const ref = await uploadFile(file);
-    if (ref) setPopup(idx, { image: ref });
+    if (ref) patchIcon({ ref });
+  };
+
+  // ── 触发式弹页 ──────────────────────────────────────────
+  //
+  // 一条告示 = 一行。后端对 popups 只有「整组替换」这一把刀，所以启停、删除、编辑
+  // 都是就地算出新的整组再发出去：成功才用回执回填列表（save 里那步），失败不关窗。
+
+  const submitPopups = (next: ThemePopup[]) =>
+    save({ popups: next }, ["popups"], "弹页");
+
+  const patchPopup = (p: Partial<PopupFormDraft>) =>
+    popupForm.setDraft((prev) => ({ ...prev, ...p }));
+
+  const openAddPopup = () => {
+    popupForm.reset(
+      blankPopupDraft(nextPopupId(draft.popups.map((p) => p.id))),
+    );
+    setPopupErr("");
+    setPopupDialog(NEW_MARK);
+  };
+
+  const openEditPopup = (p: ThemePopup) => {
+    popupForm.reset(popupDraftOf(p));
+    setPopupErr("");
+    setPopupDialog(p.id);
+  };
+
+  const closePopupDialog = () => {
+    if (drivePick) return;
+    setPopupDialog("");
+    setPopupErr("");
+  };
+
+  const savePopupDialog = async () => {
+    const missing = popupMissingFields(popupForm.draft);
+    if (missing.length) {
+      setPopupErr(missing.map((m) => m.message).join("；"));
+      return;
+    }
+    const failed = await submitPopups(
+      popupListEdited(
+        draft.popups,
+        popupDialog === NEW_MARK ? "" : popupDialog,
+        popupOf(popupForm.draft),
+      ),
+    );
+    if (failed) {
+      setPopupErr(failed);
+      return;
+    }
+    setPopupDialog("");
+    setPopupErr("");
+  };
+
+  const togglePopup = (id: string) => {
+    void submitPopups(popupListToggled(draft.popups, id));
+  };
+
+  const deletePopup = (id: string) => {
+    void submitPopups(popupListRemoved(draft.popups, id));
+  };
+
+  const addPopupAction = () => {
+    if (popupForm.draft.actions.length >= MAX_POPUP_ACTIONS) return;
+    popupForm.setDraft((prev) => ({
+      ...prev,
+      actions: [...prev.actions, { label: "", to: "" }],
+    }));
+  };
+
+  const removePopupAction = (ai: number) =>
+    popupForm.setDraft((prev) => ({
+      ...prev,
+      actions: prev.actions.filter((_, j) => j !== ai),
+    }));
+
+  const setPopupAction = (ai: number, patch: Partial<PopupActionDraft>) =>
+    popupForm.setDraft((prev) => ({
+      ...prev,
+      actions: prev.actions.map((a, j) => (j === ai ? { ...a, ...patch } : a)),
+    }));
+
+  const pickPopupImage = async (file: File) => {
+    const ref = await uploadFile(file);
+    if (ref) patchPopup({ image: ref });
   };
 
   // ── 主题包 ──────────────────────────────────────────────
@@ -966,23 +1205,42 @@ export function AppearancePanel({
       .catch(() => {});
   }, [isAdmin]);
 
-  /** 把当前整份配置存成一份带名字的档 */
-  const saveAsSet = async () => {
-    if (busy) return;
-    const name = setName.trim();
-    if (!name) return;
-    setBusy("存档主题");
-    setErr("");
-    setSaved("");
+  /**
+   * 把当前整份配置存成一份带名字的档：开窗只收一个名字，按下保存才提交。
+   * 存档没有「编辑」这条路 —— 后端只有存 / 换装 / 删三个动作，没有改名接口，
+   * 所以行上的名字是只读的，想换个名字就重存一份、删掉旧的。
+   */
+  const openAddSet = () => {
+    setForm.reset({ name: "" });
+    setSetDialogErr("");
+    setSetDialog(true);
+  };
+
+  const closeSetDialog = () => {
+    setSetDialog(false);
+    setSetDialogErr("");
+  };
+
+  const submitSet = async () => {
+    if (savingSet) return;
+    const missing = archiveMissingFields(setForm.draft);
+    if (missing.length) {
+      setSetDialogErr(missing.map((m) => m.message).join("；"));
+      return;
+    }
+    setSavingSet(true);
+    setSetDialogErr("");
     try {
-      const r = await api.themeSaveSet(name);
+      const r = await api.themeSaveSet(setForm.draft.name.trim());
+      // 回执带的就是新清单：列表显示落库后的真值，不往 sets 里塞一份猜测
       setSets(r.sets);
-      setSetName("");
       setSaved(`已把当前配置存成「${r.set.name}」`);
+      setSetDialog(false);
     } catch (e) {
-      setErr((e as Error).message);
+      // 存不下来（名字超限、云端写入失败…）留在弹页里说，不关窗
+      setSetDialogErr((e as Error).message);
     } finally {
-      setBusy("");
+      setSavingSet(false);
     }
   };
 
@@ -1140,27 +1398,29 @@ export function AppearancePanel({
               <p className="tp-note">管理员把纸色收在主题基调上了，这里翻不动。</p>
             )}
 
+            {/* 自定义主题存档：行只读（名字 / 存的时间 / 多大一份），
+                新增走弹页、按下保存才提交；换装与删除是动作，留在行上常驻。
+                这里没有「编辑这一行」：后端只有存 / 换装 / 删三个动作，没有改名接口。 */}
             <div className="tp-field">
               <div className="form-label">自定义主题</div>
+              {isAdmin && (
+                <EntityAddButton label="存为自定义主题" onClick={openAddSet} />
+              )}
               {sets.length === 0 ? (
-                <p className="empty-sm">
+                <EntityNote>
                   {isAdmin
-                    ? "还没存过自定义主题 —— 下面给现在这套配置起个名字就存一份"
+                    ? "还没存过自定义主题 —— 点上面「存为自定义主题」，给现在这套配置起个名字就存一份"
                     : "还没有自定义主题"}
-                </p>
+                </EntityNote>
               ) : (
-                <ul className="tp-sets">
+                <div className="entity-list">
                   {sets.map((s) => (
-                    <li key={s.id} className="tp-set">
-                      <div className="tp-set-main">
-                        <span className="tp-set-name">{s.name}</span>
-                        <span className="tp-set-meta">
-                          {new Date(s.created).toLocaleString("zh-CN")} ·{" "}
-                          {humanBytes(s.bytes)}
-                        </span>
-                      </div>
-                      {isAdmin && (
-                        <div className="tp-set-actions">
+                    <EntityRow
+                      key={s.id}
+                      title={s.name}
+                      summary={themeSetSummary(s)}
+                      right={
+                        isAdmin ? (
                           <button
                             className="btn btn-sm btn-primary"
                             disabled={!!busy}
@@ -1168,47 +1428,22 @@ export function AppearancePanel({
                           >
                             换装
                           </button>
-                          <button
-                            className="btn btn-sm"
-                            disabled={!!busy}
-                            onClick={() => void removeSet(s)}
-                          >
-                            删掉
-                          </button>
-                        </div>
-                      )}
-                    </li>
+                        ) : undefined
+                      }
+                      onDelete={
+                        isAdmin ? () => void removeSet(s) : undefined
+                      }
+                    />
                   ))}
-                </ul>
-              )}
-            </div>
-
-            {isAdmin && (
-              <div className="tp-field">
-                <div className="form-label">把现在这套配置存档</div>
-                <div className="inline-form">
-                  <input
-                    className="field"
-                    placeholder="给这套配置起个名字（如「青花瓷」）"
-                    maxLength={60}
-                    value={setName}
-                    disabled={!canEdit}
-                    onChange={(e) => setSetName(e.target.value)}
-                  />
-                  <button
-                    className="btn btn-primary"
-                    disabled={!canEdit || !setName.trim()}
-                    onClick={() => void saveAsSet()}
-                  >
-                    {busy === "存档主题" ? "存档中…" : "存为自定义主题"}
-                  </button>
                 </div>
-                <p className="tp-note">
+              )}
+              {isAdmin && (
+                <EntityNote>
                   存档会把当前整份配置连同素材打成一份包留在云端，随时能换回来；
                   换装与删除都会先问一句。
-                </p>
-              </div>
-            )}
+                </EntityNote>
+              )}
+            </div>
           </div>
 
           <div className="settings-card">
@@ -1457,105 +1692,82 @@ export function AppearancePanel({
           <h3 className="card-title">背景</h3>
           <p className="card-desc">
             六个落点各自可铺图（静态图或 gif/webp 动图都行），没铺的落点退回全局桌面那张。
+            换图、位置与尺寸点行进弹页填，按下保存才提交；压暗与模糊留在行上就地调。
           </p>
         </div>
-        {BACKGROUND_SCOPES.map((scope) => {
-          const bg = draft.backgrounds[scope];
-          return (
-            <div className="tp-scope" key={scope}>
-              <div className="tp-scope-head">
-                <span className="tp-scope-name">{SCOPE_LABELS[scope]}</span>
-                <span className="tp-scope-src">
-                  {bg.src ? resolveAsset(bg.src) || bg.src : "未铺图（走全局桌面）"}
-                </span>
-              </div>
-              <div className="tp-scope-body">
-                <PreviewBrick
-                  src={bg.src}
-                  dim={bg.dim}
-                  blur={bg.blur}
-                  position={bg.position}
-                  size={bg.size}
-                />
-                <div className="tp-scope-fields">
-                  <ImageField
-                    value={bg.src}
-                    onChange={(v) => setBgSrc(scope, v)}
-                    onFile={(f) => pickBg(scope, f)}
-                    onDrive={() => pickFromDrive((ref) => setBgSrc(scope, ref))}
-                    disabled={!canEdit}
-                    busy={busy.startsWith("上传")}
-                    placeholder="https:// 外链图片地址"
-                    uploadLabel="上传图/动图"
-                  />
-                  <div className="tp-sliders">
-                    <label className="tp-slider">
-                      <span>压暗</span>
-                      <input
-                        type="range"
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        value={bg.dim}
-                        disabled={!canEdit}
-                        onChange={(e) =>
-                          setBg(scope, { dim: Number(e.target.value) })
-                        }
-                      />
-                      <b>{Math.round(bg.dim * 100)}%</b>
-                    </label>
-                    <label className="tp-slider">
-                      <span>模糊</span>
-                      <input
-                        type="range"
-                        min={0}
-                        max={40}
-                        step={1}
-                        value={bg.blur}
-                        disabled={!canEdit}
-                        onChange={(e) =>
-                          setBg(scope, { blur: Number(e.target.value) })
-                        }
-                      />
-                      <b>{bg.blur}px</b>
-                    </label>
-                  </div>
-                  <div className="inline-form">
-                    <input
-                      className="field"
-                      placeholder="位置（如 center、top）"
-                      maxLength={40}
-                      value={bg.position}
-                      disabled={!canEdit}
-                      onChange={(e) =>
-                        setBg(scope, { position: e.target.value })
-                      }
+        {/* 六格是固定枚举不是列表：只有这六行，没有「新增」入口，也没有删除按钮 ——
+            想把某一格退回全局那张，进弹页把图清掉再保存。 */}
+        <div className="entity-list">
+          {BACKGROUND_SCOPES.map((scope) => {
+            // 固定枚举不跟着数据缺漏掉行：万一某格在回执里缺了，按「没铺」这一格摆出来
+            const bg = draft.backgrounds[scope] ?? emptyBackground();
+            const editing = bgDialog === scope;
+            // 弹页里换了图，行上的预览当场跟着这张走（压暗/模糊仍是行上那份）
+            const view = editing
+              ? {
+                  ...bg,
+                  src: bgForm.draft.src,
+                  position: bgForm.draft.position,
+                  size: bgForm.draft.size,
+                }
+              : bg;
+            return (
+              <EntityRow
+                key={scope}
+                title={SCOPE_LABELS[scope]}
+                summary={backgroundRowSummary(scope, view)}
+                editing={editing}
+                onEdit={isAdmin ? () => openEditBackground(scope) : undefined}
+                right={
+                  <div className="appearance-bg-controls">
+                    <PreviewBrick
+                      className="appearance-bg-preview"
+                      src={view.src}
+                      dim={bg.dim}
+                      blur={bg.blur}
+                      position={view.position}
+                      size={view.size}
                     />
-                    <select
-                      className="field"
-                      value={bg.size}
-                      disabled={!canEdit}
-                      onChange={(e) => setBg(scope, { size: e.target.value })}
-                    >
-                      <option value="cover">cover 铺满</option>
-                      <option value="contain">contain 全景</option>
-                      <option value="auto">auto 原图</option>
-                    </select>
-                    {isAdmin && (
-                      <button
-                        className="btn btn-sm"
-                        disabled={!canEdit || !bg.src}
-                        onClick={() => setBgSrc(scope, "")}
-                      >
-                        清除这位
-                      </button>
-                    )}
+                    {/* 压暗与模糊常驻在行上：这两根滑杆就是就地预览的本体，
+                        收进弹页就看不见效果了 */}
+                    <div className="tp-sliders appearance-bg-sliders">
+                      <label className="tp-slider">
+                        <span>压暗</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          value={bg.dim}
+                          disabled={!canEdit}
+                          onChange={(e) =>
+                            setBg(scope, { dim: Number(e.target.value) })
+                          }
+                        />
+                        <b>{Math.round(bg.dim * 100)}%</b>
+                      </label>
+                      <label className="tp-slider">
+                        <span>模糊</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={40}
+                          step={1}
+                          value={bg.blur}
+                          disabled={!canEdit}
+                          onChange={(e) =>
+                            setBg(scope, { blur: Number(e.target.value) })
+                          }
+                        />
+                        <b>{bg.blur}px</b>
+                      </label>
+                    </div>
                   </div>
-                </div>
-              </div>
-            </div>
-          );
-        })}
+                }
+              />
+            );
+          })}
+        </div>
         {isAdmin && (
           <div className="row-actions">
             <button
@@ -1569,6 +1781,12 @@ export function AppearancePanel({
             </button>
           </div>
         )}
+        {isAdmin && (
+          <EntityNote>
+            弹页里按下保存就是把整组六格发出去；行上这两根滑杆只是就地预览，
+            调完还得按「保存背景」才落到服务器 —— 后端对背景只认整组提交，一次生效六格。
+          </EntityNote>
+        )}
       </div>
       )}
 
@@ -1579,91 +1797,52 @@ export function AppearancePanel({
           <h3 className="card-title">功能块背景与按钮花纹</h3>
           <p className="card-desc">
             两个都是一段 CSS background：功能块背景铺在面板/卡片上，按钮花纹是平铺在按钮底色上的花纹图。
+            点行进弹页改，按下保存才提交。
           </p>
         </div>
-        <div className="tp-field">
-          <div className="form-label">功能块背景 panelBg</div>
-          <ImageField
-            value={draft.panelBg}
-            onChange={(v) => update((d) => ({ ...d, panelBg: v }))}
-            onFile={pickPanelBg}
-            onDrive={() =>
-              pickFromDrive((ref) =>
-                update((d) => ({ ...d, panelBg: `url("${resolveAsset(ref)}")` })),
-              )
+        {/* 两格是固定的，不是可以增删的列表：各一行，行上只留效果小样，值进弹页改 */}
+        <div className="entity-list">
+          <EntityRow
+            title="功能块背景 panelBg"
+            summary={panelBgSummary(draft.panelBg)}
+            editing={panelDialog === "panelBg"}
+            onEdit={isAdmin ? () => openEditPanelField("panelBg") : undefined}
+            right={
+              <div
+                className="tp-swatch appearance-row-swatch"
+                style={
+                  draft.panelBg.trim()
+                    ? { background: draft.panelBg.trim() }
+                    : undefined
+                }
+              />
             }
-            disabled={!canEdit}
-            busy={busy.startsWith("上传")}
-            placeholder='一段 CSS background 值：url("/api/theme-asset/x.png")、#f7f4ec、linear-gradient(...)'
-            uploadLabel="上传图片"
           />
-          <div className="tp-swatch-row">
-            <div
-              className="tp-swatch"
-              style={draft.panelBg.trim() ? { background: draft.panelBg.trim() } : undefined}
-            >
-              {!draft.panelBg.trim() && <span>出厂底色</span>}
-            </div>
-            <p className="tp-note">
-              这里存的是完整 CSS 值（图片上传后自动填成 url(...)）——
-              它会被原样注入 --theme-panel-bg，不是素材引用。
-            </p>
-          </div>
-        </div>
-        <div className="tp-field">
-          <div className="form-label">按钮花纹 buttonPattern</div>
-          <ImageField
-            value={draft.buttonPattern}
-            onChange={(v) => update((d) => ({ ...d, buttonPattern: v }))}
-            onFile={pickPattern}
-            onDrive={() =>
-              pickFromDrive((ref) =>
-                update((d) => ({ ...d, buttonPattern: ref })),
-              )
+          <EntityRow
+            title="按钮花纹 buttonPattern"
+            summary={buttonPatternSummary(draft.buttonPattern)}
+            editing={panelDialog === "buttonPattern"}
+            onEdit={
+              isAdmin ? () => openEditPanelField("buttonPattern") : undefined
             }
-            disabled={!canEdit}
-            busy={busy.startsWith("上传")}
-            placeholder="asset: 引用或 https 图片地址（上传会自动填）"
-            uploadLabel="上传花纹"
+            right={
+              <div
+                className="tp-swatch tp-swatch-tile appearance-row-swatch"
+                style={
+                  resolveAsset(draft.buttonPattern)
+                    ? {
+                        backgroundImage: `url(${resolveAsset(draft.buttonPattern)})`,
+                      }
+                    : undefined
+                }
+              />
+            }
           />
-          <div className="tp-swatch-row">
-            <div
-              className="tp-swatch tp-swatch-tile"
-              style={
-                resolveAsset(draft.buttonPattern)
-                  ? {
-                      backgroundImage: `url(${resolveAsset(draft.buttonPattern)})`,
-                    }
-                  : undefined
-              }
-            >
-              {!resolveAsset(draft.buttonPattern) && <span>无花纹</span>}
-            </div>
-            <p className="tp-note">
-              存纯引用（asset:/https）—— 注入时才拼进 url(...) 并按 140px 平铺；
-              这里别手写 url(...)，那会被当成脏值丢掉。
-            </p>
-          </div>
         </div>
         {isAdmin && (
-          <div className="row-actions">
-            <button
-              className="btn btn-primary"
-              disabled={!canEdit || !dirty}
-              onClick={() =>
-                void save(
-                  {
-                    panelBg: draft.panelBg,
-                    buttonPattern: draft.buttonPattern || null,
-                  },
-                  ["panelBg", "buttonPattern"],
-                  "功能块与按钮",
-                )
-              }
-            >
-              {busy === "保存功能块与按钮" ? "保存中…" : "保存"}
-            </button>
-          </div>
+          <EntityNote>
+            两格属于同一域：弹页里按下保存，是把两格现在这份一起发给服务器，成了才由回执回填。
+          </EntityNote>
         )}
       </div>
       )}
@@ -1678,106 +1857,41 @@ export function AppearancePanel({
           </p>
         </div>
         {isAdmin && (
-          <div className="inline-form">
-            <select
-              className="field"
-              value={iconName}
-              disabled={!canEdit}
-              onChange={(e) => setIconName(e.target.value as IconName)}
-            >
-              {ICON_NAMES.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
-            <input
-              className="field"
-              placeholder="https:// 图片地址"
-              value={iconRef}
-              disabled={!canEdit}
-              onChange={(e) => setIconRef(e.target.value)}
-            />
-            <label className="upload tp-upload">
-              <input
-                type="file"
-                accept="image/*"
-                hidden
-                disabled={!canEdit || !!busy}
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  e.target.value = "";
-                  if (f)
-                    void uploadFile(f).then((ref) => {
-                      if (ref) setIconRef(ref);
-                    });
-                }}
-              />
-              {busy.startsWith("上传") ? "上传中…" : "上传图片"}
-            </label>
-            <button
-              type="button"
-              className="btn btn-sm tp-drive-btn"
-              disabled={!canEdit || !!busy}
-              onClick={() => pickFromDrive((ref) => setIconRef(ref))}
-            >
-              云盘选图
-            </button>
-            <button
-              className="btn btn-primary btn-sm"
-              disabled={!canEdit || !iconRef.trim()}
-              onClick={addIcon}
-            >
-              加上
-            </button>
-          </div>
+          <EntityAddButton label="新增图标覆盖" onClick={openAddIcon} />
         )}
         {Object.keys(draft.iconOverrides).length > 0 ? (
-          <ul className="tp-icon-list">
+          <div className="entity-list">
             {Object.entries(draft.iconOverrides).map(([name, ref]) => (
-              <li key={name}>
-                <span className="tp-icon-thumb">
-                  {resolveAsset(ref) ? (
-                    <img src={resolveAsset(ref)} alt={name} />
-                  ) : (
-                    <Icon name="image" size={15} />
-                  )}
-                </span>
-                <code className="tp-icon-name">{name}</code>
-                <span className="tp-icon-src">{resolveAsset(ref) || ref}</span>
-                {isAdmin && (
-                  <button
-                    className="btn btn-sm"
-                    disabled={!canEdit}
-                    onClick={() => removeIcon(name)}
-                  >
-                    删掉
-                  </button>
-                )}
-              </li>
+              <EntityRow
+                key={name}
+                title={name}
+                summary={
+                  <span className="appearance-icon-summary">
+                    <span className="tp-icon-thumb">
+                      {resolveAsset(ref) ? (
+                        <img src={resolveAsset(ref)} alt="" />
+                      ) : (
+                        <Icon name="image" size={15} />
+                      )}
+                    </span>
+                    <span className="appearance-icon-text">
+                      {iconOverrideSummary(ref)}
+                    </span>
+                  </span>
+                }
+                editing={iconDialog === name}
+                onEdit={isAdmin ? () => openEditIcon(name) : undefined}
+                onDelete={isAdmin ? () => deleteIcon(name) : undefined}
+                deleteConfirm={`删掉「${name}」这个图标覆盖？删掉就保存到服务器，界面立刻退回原来的线稿。`}
+              />
             ))}
-          </ul>
-        ) : (
-          <p className="empty-sm">还没有覆盖任何图标</p>
-        )}
-        {isAdmin && (
-          <div className="row-actions">
-            <button
-              className="btn btn-primary"
-              disabled={!canEdit || !dirty}
-              onClick={() => {
-                // 已在服务器上的条目如果从列表里删了，要显式发 null 才会被清掉
-                const overrides: Record<string, string | null> = {};
-                for (const [k, v] of Object.entries(draft.iconOverrides))
-                  overrides[k] = v;
-                for (const k of Object.keys(theme.iconOverrides))
-                  if (!(k in draft.iconOverrides)) overrides[k] = null;
-                void save({ iconOverrides: overrides }, ["iconOverrides"], "图标覆盖");
-              }}
-            >
-              {busy === "保存图标覆盖" ? "保存中…" : "保存"}
-            </button>
           </div>
+        ) : (
+          <EntityNote>
+            {isAdmin
+              ? "还没有覆盖任何图标 —— 点上面「新增图标覆盖」，挑一个图标、给它一张图"
+              : "还没有覆盖任何图标"}
+          </EntityNote>
         )}
       </div>
       )}
@@ -1944,164 +2058,55 @@ export function AppearancePanel({
             进站时弹给客人看的告示/活动页，按触发方式出场；保存时整组替换。
           </p>
         </div>
-        {draft.popups.length === 0 && (
-          <p className="empty-sm">还没有弹页，点下面「加一条」开一条</p>
-        )}
-        {draft.popups.map((p, i) => (
-          <div className="tp-popup" key={p.id}>
-            <div className="tp-popup-head">
-              <label className="check-line">
-                <input
-                  type="checkbox"
-                  checked={p.enabled}
-                  disabled={!canEdit}
-                  onChange={(e) => setPopup(i, { enabled: e.target.checked })}
-                />
-                启用
-              </label>
-              <code className="tp-id">{p.id}</code>
-              {isAdmin && (
-                <button
-                  className="btn btn-sm"
-                  disabled={!canEdit}
-                  onClick={() => removePopup(i)}
-                >
-                  删掉
-                </button>
-              )}
-            </div>
-            <input
-              className="field"
-              placeholder="标题"
-              maxLength={200}
-              value={p.title}
-              disabled={!canEdit}
-              onChange={(e) => setPopup(i, { title: e.target.value })}
-            />
-            <textarea
-              className="field tp-textarea"
-              placeholder="正文（可多行）"
-              maxLength={5000}
-              value={p.body}
-              disabled={!canEdit}
-              onChange={(e) => setPopup(i, { body: e.target.value })}
-            />
-            <div className="inline-form">
-              <select
-                className="field"
-                value={p.trigger}
-                disabled={!canEdit}
-                onChange={(e) =>
-                  setPopup(i, { trigger: e.target.value as PopupTrigger })
+        {/* 一条告示 = 一行：行上只写「什么时候弹、有没有图、几个按钮」，
+            点行开弹页填内容，按下保存才提交（后端对 popups 只有整组替换这一把刀）。
+            启停是动作，留在行上常驻 —— 巡检一排弹页时不该为此开三次窗。 */}
+        {isAdmin && <EntityAddButton label="加一条告示" onClick={openAddPopup} />}
+        {draft.popups.length === 0 ? (
+          <EntityNote>
+            {isAdmin
+              ? "还没有弹页 —— 点上面「加一条告示」：写标题正文、挑什么时候弹、给一两个按钮"
+              : "还没有弹页"}
+          </EntityNote>
+        ) : (
+          <div className="entity-list">
+            {draft.popups.map((p) => (
+              <EntityRow
+                key={p.id}
+                title={popupRowTitle(p.title)}
+                summary={popupSummary(p)}
+                disabled={!p.enabled}
+                editing={popupDialog === p.id}
+                onEdit={isAdmin ? () => openEditPopup(p) : undefined}
+                onDelete={isAdmin ? () => deletePopup(p.id) : undefined}
+                deleteConfirm={`删掉「${popupRowTitle(
+                  p.title,
+                )}」这条告示？删掉就保存到服务器，来客那边不再弹它。`}
+                right={
+                  isAdmin ? (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      disabled={!!busy}
+                      title={
+                        p.enabled
+                          ? "先停一停：来客那边不再弹它"
+                          : "让它按触发条件出场"
+                      }
+                      onClick={() => togglePopup(p.id)}
+                    >
+                      {p.enabled ? "停用" : "启用"}
+                    </button>
+                  ) : undefined
                 }
-              >
-                {(Object.keys(TRIGGER_LABELS) as PopupTrigger[]).map((t) => (
-                  <option key={t} value={t}>
-                    {TRIGGER_LABELS[t]}
-                  </option>
-                ))}
-              </select>
-              {p.trigger === "delay" && (
-                <input
-                  className="field tp-num"
-                  type="number"
-                  min={0}
-                  max={3600}
-                  value={p.delaySeconds}
-                  disabled={!canEdit}
-                  onChange={(e) =>
-                    setPopup(i, {
-                      delaySeconds: Math.min(
-                        3600,
-                        Math.max(0, Number(e.target.value) || 0),
-                      ),
-                    })
-                  }
-                />
-              )}
-              {p.trigger === "delay" && (
-                <span className="tp-note">秒后弹出（0~3600）</span>
-              )}
-            </div>
-            <ImageField
-              value={p.image}
-              onChange={(v) => setPopup(i, { image: v })}
-              onFile={(f) => pickPopupImage(i, f)}
-              onDrive={() => pickFromDrive((ref) => setPopup(i, { image: ref }))}
-              disabled={!canEdit}
-              busy={busy.startsWith("上传")}
-              placeholder="插图：https 外链（可留空）"
-              uploadLabel="上传插图"
-            />
-            <div className="tp-actions">
-              <div className="tp-actions-head">
-                <span className="tp-note">
-                  动作按钮（最多 2 个）：访客点一下就跳过去
-                </span>
-                {isAdmin && p.actions.length < 2 && (
-                  <button
-                    className="btn btn-sm"
-                    disabled={!canEdit}
-                    onClick={() => addPopupAction(i)}
-                  >
-                    加按钮
-                  </button>
-                )}
-              </div>
-              {p.actions.map((a, ai) => (
-                <div className="tp-action-row" key={ai}>
-                  <input
-                    className="field tp-action-label"
-                    placeholder="按钮文字"
-                    maxLength={20}
-                    value={a.label}
-                    disabled={!canEdit}
-                    onChange={(e) =>
-                      setPopupAction(i, ai, { label: e.target.value })
-                    }
-                  />
-                  <input
-                    className="field tp-action-to"
-                    placeholder="去向：/show 或 https://…"
-                    maxLength={400}
-                    value={a.to}
-                    disabled={!canEdit}
-                    onChange={(e) => setPopupAction(i, ai, { to: e.target.value })}
-                  />
-                  <button
-                    className="btn btn-sm"
-                    disabled={!canEdit}
-                    onClick={() => removePopupAction(i, ai)}
-                  >
-                    删
-                  </button>
-                </div>
-              ))}
-              {p.actions.length > 0 && (
-                <span className="tp-note">
-                  去向只认 / 开头的站内路径或 http(s) 链接，其它会被忽略。
-                </span>
-              )}
-            </div>
+              />
+            ))}
           </div>
-        ))}
+        )}
         {isAdmin && (
-          <div className="row-actions">
-            <button
-              className="btn"
-              disabled={!canEdit}
-              onClick={addPopup}
-            >
-              加一条
-            </button>
-            <button
-              className="btn btn-primary"
-              disabled={!canEdit || !dirty}
-              onClick={() => void save({ popups: draft.popups }, ["popups"], "弹页")}
-            >
-              {busy === "保存弹页" ? "保存中…" : "保存弹页"}
-            </button>
-          </div>
+          <EntityNote>
+            加、改、启停、删除都是当场提交：整组发给服务器，成了才回填列表，
+            没成就把话留在弹页里说，不会悄悄少一条。
+          </EntityNote>
         )}
       </div>
       )}
@@ -2146,6 +2151,414 @@ export function AppearancePanel({
           文件夹；导出下载为 ericher-theme.zip。
         </p>
       </div>
+      )}
+
+      {/* ══ 详情弹页：存档 / 图标覆盖 / 触发式弹页 ══════════════
+          列表行只读，新增与编辑共用同一份表单（空草稿即新增），按下保存才提交：
+          没成就不关窗，后端那句话原样摆在弹页里（HTTP 200 里的 ok:false 也算失败，
+          这一条由 lib/http.ts 保证）。就地预览的那些编辑器不在这儿 —— 见文件头。 */}
+
+      {/* ══ 详情弹页：壁纸落点 / 功能块与花纹 / 存档 / 图标覆盖 / 触发式弹页 ══
+          列表行只读，按下保存才提交：没成就不关窗，后端那句话原样摆在弹页里
+          （HTTP 200 里的 ok:false 也算失败，这一条由 lib/http.ts 保证）。
+          固定枚举的那几格（六个落点、底色与花纹）没有新增态，草稿就是那一格现在的值；
+          就地预览的滑杆与自定义 CSS 不在这儿 —— 见文件头。 */}
+
+      {bgDialog && (
+        <FormDialog
+          wide
+          title={`编辑「${SCOPE_LABELS[bgDialog]}」那张壁纸`}
+          subtitle="换图与铺法在这儿填，按下保存就把六格现在这份一起提交；压暗与模糊在列表行上调，这里不重复给。"
+          busy={busy === "保存背景" || busy.startsWith("上传")}
+          error={bgErr}
+          dirty={bgForm.dirty(bgForm.draft)}
+          onClose={closeBackgroundDialog}
+          onSave={() => void saveBackgroundDialog()}
+        >
+          <FormSection title="图片来源">
+            <FormRow
+              label="图片"
+              hint="上传、从云盘选，或直接填 asset: / https 地址；清掉就是这一格退回全局那张"
+              wide
+            >
+              <ImageField
+                value={bgForm.draft.src}
+                onChange={(v) => patchBackground({ src: v })}
+                onFile={pickBackgroundImage}
+                onDrive={() =>
+                  pickFromDrive((ref) => patchBackground({ src: ref }))
+                }
+                // 弹页里上传也要等这一域的保存跑完：两处抢着写 busy，后跑完的会把
+                // 前一个的「保存中…」标记抹掉，按钮看着又能按了
+                disabled={!!busy}
+                busy={busy.startsWith("上传")}
+                placeholder="https:// 外链图片地址"
+                uploadLabel="上传图/动图"
+              />
+            </FormRow>
+            {/* 预览砖跟着草稿走：换完图当场看到铺出来什么样，不用先保存 */}
+            <div className="appearance-dialog-preview">
+              <PreviewBrick
+                src={bgForm.draft.src}
+                dim={draft.backgrounds[bgDialog]?.dim ?? 0}
+                blur={draft.backgrounds[bgDialog]?.blur ?? 0}
+                position={bgForm.draft.position}
+                size={bgForm.draft.size}
+              />
+              <p className="tp-note">
+                这块按行上当前的压暗与模糊显示 —— 保存前就能看出来那张合不合适。
+              </p>
+            </div>
+          </FormSection>
+
+          <FormSection title="怎么铺">
+            <FormRow label="位置" hint="background-position，如 center、top、50% 30%">
+              <input
+                className="field"
+                placeholder="位置（如 center、top）"
+                maxLength={MAX_BG_POSITION}
+                value={bgForm.draft.position}
+                onChange={(e) => patchBackground({ position: e.target.value })}
+              />
+            </FormRow>
+            <FormRow label="尺寸" hint="background-size：三档之外的写法（如 100% 100%）也会列在这里">
+              <select
+                className="field"
+                aria-label="尺寸"
+                value={normalizeBackgroundSize(bgForm.draft.size)}
+                onChange={(e) => patchBackground({ size: e.target.value })}
+              >
+                {backgroundSizeChoices(bgForm.draft.size).map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </FormRow>
+            <EntityNote>
+              六个落点是固定的六格（全局桌面、会话、笔记本、设置、门口、登录），
+              没有新增也没有删除；位置与尺寸留空按 center / cover 铺。
+            </EntityNote>
+          </FormSection>
+        </FormDialog>
+      )}
+
+      {panelDialog && (
+        <FormDialog
+          wide
+          title={
+            panelDialog === "panelBg"
+              ? "编辑功能块背景 panelBg"
+              : "编辑按钮花纹 buttonPattern"
+          }
+          subtitle={
+            panelDialog === "panelBg"
+              ? "铺在面板/卡片上的那一层：整段 CSS background 值，原样注入 --theme-panel-bg。"
+              : "平铺在按钮底色上的花纹图：只存纯引用，注入时才拼进 url(...)。"
+          }
+          busy={busy === "保存功能块与按钮" || busy.startsWith("上传")}
+          error={panelErr}
+          dirty={panelForm.dirty(panelForm.draft)}
+          onClose={closePanelDialog}
+          onSave={() => void savePanelDialog()}
+        >
+          <FormSection
+            title={panelDialog === "panelBg" ? "底色" : "花纹图"}
+          >
+            <FormRow label="值" hint="上传或从云盘选都会自动填进这一格" wide>
+              <ImageField
+                value={panelForm.draft.value}
+                onChange={(v) => patchPanelField({ value: v })}
+                onFile={pickPanelImage}
+                onDrive={pickPanelDrive}
+                disabled={!!busy}
+                busy={busy.startsWith("上传")}
+                placeholder={
+                  panelDialog === "panelBg"
+                    ? '一段 CSS background 值：url("/api/theme-asset/x.png")、#f7f4ec、linear-gradient(...)'
+                    : "asset: 引用或 https 图片地址（上传会自动填）"
+                }
+                uploadLabel={panelDialog === "panelBg" ? "上传图片" : "上传花纹"}
+              />
+            </FormRow>
+            <div className="tp-swatch-row">
+              {panelDialog === "panelBg" ? (
+                <div
+                  className="tp-swatch"
+                  style={
+                    panelForm.draft.value.trim()
+                      ? { background: panelForm.draft.value.trim() }
+                      : undefined
+                  }
+                >
+                  {!panelForm.draft.value.trim() && <span>出厂底色</span>}
+                </div>
+              ) : (
+                <div
+                  className="tp-swatch tp-swatch-tile"
+                  style={
+                    resolveAsset(panelForm.draft.value)
+                      ? {
+                          backgroundImage: `url(${resolveAsset(panelForm.draft.value)})`,
+                        }
+                      : undefined
+                  }
+                >
+                  {!resolveAsset(panelForm.draft.value) && <span>无花纹</span>}
+                </div>
+              )}
+              <p className="tp-note">
+                {panelDialog === "panelBg"
+                  ? "这里存的是完整 CSS 值（图片上传后自动填成 url(...)）—— 它会被原样注入 --theme-panel-bg，不是素材引用。"
+                  : "存纯引用（asset:/https）—— 注入时才拼进 url(...) 并按 140px 平铺；这里别手写 url(...)，那会被当成脏值丢掉。"}
+              </p>
+            </div>
+            <EntityNote>
+              按下保存把这两格一起提交（后端认的是这一整域），没成功就把话留在弹页里说。
+            </EntityNote>
+          </FormSection>
+        </FormDialog>
+      )}
+
+      {setDialog && (
+        <FormDialog
+          title="存为自定义主题"
+          subtitle="给现在这套配置起个名字，打成一份自包含的包留在云端 —— 素材后来被换被删，翻出旧档照样装得上。"
+          saveLabel="存档"
+          busy={savingSet}
+          error={setDialogErr}
+          dirty={setForm.dirty(setForm.draft)}
+          onClose={closeSetDialog}
+          onSave={() => void submitSet()}
+        >
+          <FormSection title="名字">
+            <FormRow label="存档名字" hint="必填，最多 60 字">
+              <input
+                className="field"
+                placeholder="给这套配置起个名字（如「青花瓷」）"
+                maxLength={MAX_SET_NAME}
+                value={setForm.draft.name}
+                onChange={(e) => setForm.setDraft({ name: e.target.value })}
+              />
+            </FormRow>
+            <EntityNote>
+              存的是服务器上已经保存的那份配置 —— 卡上还没按「保存」的改动不在里面，
+              先把手上的存完再来存档。
+            </EntityNote>
+          </FormSection>
+        </FormDialog>
+      )}
+
+      {iconDialog && (
+        <FormDialog
+          wide
+          title={
+            iconDialog === NEW_MARK
+              ? "新增图标覆盖"
+              : `编辑「${iconDialog}」这个图标`
+          }
+          subtitle="用一张图替掉界面里的线稿图标；没覆盖的照旧走原字形。"
+          busy={busy === "保存图标覆盖"}
+          error={iconErr}
+          dirty={iconForm.dirty(iconForm.draft)}
+          onClose={closeIconDialog}
+          onSave={() => void saveIconDialog()}
+        >
+          <FormSection title="换哪个图标">
+            <FormRow
+              label="图标"
+              hint="名字就是图标在代码里的字形名；改了名等于换了一条覆盖"
+            >
+              <select
+                className="field"
+                aria-label="图标名"
+                value={iconForm.draft.name}
+                onChange={(e) => patchIcon({ name: e.target.value })}
+              >
+                {!iconForm.draft.name && <option value="">挑一个图标…</option>}
+                {ICON_NAMES.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                    {draft.iconOverrides[n] && n !== iconDialog
+                      ? "（已经覆盖过，保存会换掉它的图）"
+                      : ""}
+                  </option>
+                ))}
+              </select>
+            </FormRow>
+          </FormSection>
+
+          <FormSection title="换成哪张图">
+            <FormRow
+              label="图片"
+              hint="上传、从云盘选，或直接填 asset: / https 地址"
+              wide
+            >
+              <ImageField
+                value={iconForm.draft.ref}
+                onChange={(v) => patchIcon({ ref: v })}
+                onFile={pickIconImage}
+                onDrive={() => pickFromDrive((ref) => patchIcon({ ref }))}
+                // 弹页里上传也要等这一域的保存跑完：两处抢着写 busy，后跑完的会把
+                // 前一个的「保存中…」标记抹掉，按钮看着又能按了
+                disabled={!!busy}
+                busy={busy.startsWith("上传")}
+                placeholder="https:// 图片地址"
+              />
+            </FormRow>
+            {/* 预览砖跟着草稿走：填完地址当场就看到替上去长什么样，不用先保存 */}
+            <div className="appearance-dialog-preview">
+              <PreviewBrick src={iconForm.draft.ref} size="contain" />
+              <p className="tp-note">
+                替上去就是这个样子 —— 线稿图标是方的一格，横长条的图会被压小。
+              </p>
+            </div>
+            <EntityNote>
+              图标覆盖最多 100 条（后端给的额度）；删掉这一条会显式通知服务器清掉，
+              不是把名字从列表里抹了就完事。
+            </EntityNote>
+          </FormSection>
+        </FormDialog>
+      )}
+
+      {popupDialog && (
+        <FormDialog
+          wide
+          title={
+            popupDialog === NEW_MARK
+              ? "加一条告示"
+              : `编辑「${popupRowTitle(popupForm.draft.title)}」`
+          }
+          subtitle={`编号 ${popupForm.draft.id} —— 进站时弹给客人看的告示/活动页。`}
+          busy={busy === "保存弹页"}
+          error={popupErr}
+          dirty={popupForm.dirty(popupForm.draft)}
+          onClose={closePopupDialog}
+          onSave={() => void savePopupDialog()}
+        >
+          <FormSection title="弹什么">
+            <FormRow label="标题">
+              <input
+                className="field"
+                placeholder="标题"
+                maxLength={MAX_POPUP_TITLE}
+                value={popupForm.draft.title}
+                onChange={(e) => patchPopup({ title: e.target.value })}
+              />
+            </FormRow>
+            <FormRow label="正文" hint="可以空着 —— 只有一句标题的告示也弹得出去" wide>
+              <textarea
+                className="field tp-textarea"
+                placeholder="正文（可多行）"
+                maxLength={MAX_POPUP_BODY}
+                value={popupForm.draft.body}
+                onChange={(e) => patchPopup({ body: e.target.value })}
+              />
+            </FormRow>
+          </FormSection>
+
+          <FormSection title="什么时候弹">
+            <FormRow label="触发方式" hint="同场到点的几条会排队一条条来，不叠罗汉">
+              <select
+                className="field"
+                aria-label="触发方式"
+                value={popupForm.draft.trigger}
+                onChange={(e) =>
+                  patchPopup({ trigger: e.target.value as PopupTrigger })
+                }
+              >
+                {(Object.keys(TRIGGER_LABELS) as PopupTrigger[]).map((t) => (
+                  <option key={t} value={t}>
+                    {TRIGGER_LABELS[t]}
+                  </option>
+                ))}
+              </select>
+            </FormRow>
+            {popupForm.draft.trigger === "delay" && (
+              <FormRow label="延时" hint="进站后过这么多秒才弹（0~3600）">
+                <input
+                  className="field tp-num"
+                  type="number"
+                  min={0}
+                  max={3600}
+                  value={popupForm.draft.delaySeconds}
+                  onChange={(e) =>
+                    patchPopup({ delaySeconds: e.target.value })
+                  }
+                />
+              </FormRow>
+            )}
+            <EntityNote>
+              启停不在这儿改 —— 列表行上那枚按钮常驻，巡检一排告示时不必开窗。
+              {popupForm.draft.trigger === "delay"
+                ? " 留空或填不像数字的都按 0 秒算。"
+                : ""}
+            </EntityNote>
+          </FormSection>
+
+          <FormSection title="插图">
+            <FormRow label="插图" hint="可空；上传或从云盘选都行" wide>
+              <ImageField
+                value={popupForm.draft.image}
+                onChange={(v) => patchPopup({ image: v })}
+                onFile={pickPopupImage}
+                onDrive={() => pickFromDrive((ref) => patchPopup({ image: ref }))}
+                disabled={!!busy}
+                busy={busy.startsWith("上传")}
+                placeholder="插图：https 外链（可留空）"
+                uploadLabel="上传插图"
+              />
+            </FormRow>
+            <div className="appearance-dialog-preview">
+              <PreviewBrick src={popupForm.draft.image} />
+              <p className="tp-note">
+                插图铺在正文上面，来客看到的就是这一块 —— 没配图就只出文字。
+              </p>
+            </div>
+          </FormSection>
+
+          <FormSection title="动作按钮">
+            {popupForm.draft.actions.map((a, ai) => (
+              <FormRow
+                key={ai}
+                label={`按钮 ${ai + 1}`}
+                hint="访客点一下就跳过去"
+              >
+                <div className="appearance-action-row">
+                  <input
+                    className="field tp-action-label"
+                    placeholder="按钮文字"
+                    maxLength={MAX_ACTION_LABEL}
+                    value={a.label}
+                    onChange={(e) => setPopupAction(ai, { label: e.target.value })}
+                  />
+                  <input
+                    className="field tp-action-to"
+                    placeholder="去向：/show 或 https://…"
+                    maxLength={MAX_ACTION_TO}
+                    value={a.to}
+                    onChange={(e) => setPopupAction(ai, { to: e.target.value })}
+                  />
+                  <button
+                    className="btn btn-sm"
+                    type="button"
+                    onClick={() => removePopupAction(ai)}
+                  >
+                    删
+                  </button>
+                </div>
+              </FormRow>
+            ))}
+            {popupForm.draft.actions.length < MAX_POPUP_ACTIONS && (
+              <EntityAddButton label="加按钮" onClick={addPopupAction} />
+            )}
+            <EntityNote>
+              最多 {MAX_POPUP_ACTIONS} 个。文字与去向都得填：只填一半的按钮会被当场拦下来
+              —— 后端把那半条整条丢掉，与其存了看不见，不如先说清楚。去向只认 /
+              开头的站内路径或 http(s) 链接。
+            </EntityNote>
+          </FormSection>
+        </FormDialog>
       )}
 
       {drivePick && (

@@ -19,6 +19,7 @@ import { memoryTools, guestMemoryTools } from "./memory";
 import { noteTools } from "./note";
 import { planTools } from "./plan";
 import { recallTools } from "./recall";
+import { mailTools } from "./mail";
 import { remindTools } from "./remind";
 import { searchTools } from "./search";
 import { sessionTools } from "./session";
@@ -138,6 +139,9 @@ export function buildTools(ctx: ToolCtx): ToolSet {
     // 笔记本只给他这一间：本子上是他自己的草稿，来客那间连「有这本子」都不该知道
     ...noteTools(ctx),
     ...remindTools(ctx),
+    // 发信只在这间屋有：邮件是离开这个系统的出口，发出去收不回。
+    // 来客那间碰它，等于拿管理员的邮箱身份对外说话
+    ...mailTools(ctx),
     ...adminTools(ctx),
     ...feedbackTools(ctx),
     // 网页矩阵：建页/改页/连通路/换外观

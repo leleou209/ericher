@@ -15,7 +15,10 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  cardPermFallback,
+  COMMON_TYPE_ID,
   createGuestType,
+  defaultCommonGuestTypeInfo,
   disabledGuestTypeInfo,
   findGuestTypeByPassword,
   getGuestType,
@@ -45,6 +48,7 @@ function fakeDb() {
     perm_notes: number;
     perm_files: number;
     perm_public: number;
+    perm_matrix: number;
     active: number;
     created: string;
   }> = [];
@@ -70,6 +74,7 @@ function fakeDb() {
         pn,
         pf,
         pp,
+        pmx,
         active,
         created,
       ] = values as [
@@ -78,6 +83,7 @@ function fakeDb() {
         string,
         string,
         string,
+        number,
         number,
         number,
         number,
@@ -102,6 +108,7 @@ function fakeDb() {
         perm_notes: Number(pn),
         perm_files: Number(pf),
         perm_public: Number(pp),
+        perm_matrix: Number(pmx),
         active: Number(active),
         created,
       });
@@ -109,12 +116,14 @@ function fakeDb() {
     }
 
     if (sql.startsWith("update guest_types set")) {
-      const [name, password, note, tools, ps, pd, pm, pn, pf, pp, active, id] =
+      if (values.some(v => typeof v === "boolean")) throw new Error("SQL boolean binding is not allowed");
+      const [name, password, note, tools, ps, pd, pm, pn, pf, pp, pmx, active, id] =
         values as [
           string,
           string,
           string,
           string,
+          number,
           number,
           number,
           number,
@@ -137,6 +146,7 @@ function fakeDb() {
         perm_notes: Number(pn),
         perm_files: Number(pf),
         perm_public: Number(pp),
+        perm_matrix: Number(pmx),
         active: Number(active),
       });
       return [] as T[];
@@ -304,6 +314,8 @@ describe("内置通用档", () => {
     expect(common.permNotes).toBe(true);
     expect(common.permFiles).toBe(true);
     expect(common.permPublic).toBe(true);
+    // 唯独矩阵权种成关：这一档的门禁口令是对外发的前台口令，白送整面网页不成
+    expect(common.permMatrix).toBe(false);
     // 表里那格口令是空的：进门验的是 env 里的前台口令，不走这张表
     expect(common.password).toBe("");
     // 名册第一行（created 钉在最早）
@@ -353,6 +365,157 @@ describe("内置通用档", () => {
       ...ENV_PW,
     });
     expect(t.name).toBe("合作方");
+  });
+});
+
+/**
+ * 长期权益第四档：网页矩阵的全量管理权（permMatrix）。
+ *
+ * 这一档给出去就是整面网页（页面、连线、外观、外站认定表、打包/装备），
+ * 一次误操作能覆盖现网所有页面 —— 所以它的底线是「默认关 + 认不出就算关」：
+ * 建档不带就是关、内置通用档种入就是关、老库补列前的 null 也算关、
+ * PATCH 没提这一格就一律不动它（既不顺手开、也不顺手关）。
+ */
+describe("矩阵权（permMatrix）默认关、按件改", () => {
+  it("建一档不带这个字段就是关；显式给 true 才开", async () => {
+    const { db } = fakeDb();
+    const off = await createGuestType(db, {
+      name: "新档",
+      password: "p1",
+      ...ENV_PW,
+    });
+    expect(off.permMatrix).toBe(false);
+    expect(getGuestType(db, off.id)!.permMatrix).toBe(false);
+    const on = await createGuestType(db, {
+      name: "协作档",
+      password: "p2",
+      permMatrix: true,
+      ...ENV_PW,
+    });
+    expect(on.permMatrix).toBe(true);
+    expect(getGuestType(db, on.id)!.permMatrix).toBe(true);
+  });
+
+  it("PATCH 开→关→读回：每一趟都落库，不是只在返回值里改了", async () => {
+    const { db } = fakeDb();
+    const t = await createGuestType(db, {
+      name: "矩阵档",
+      password: "p1",
+      ...ENV_PW,
+    });
+    const on = await updateGuestType(db, t.id, {
+      permMatrix: true,
+      ...ENV_PW,
+    });
+    expect(on?.permMatrix).toBe(true);
+    expect(getGuestType(db, t.id)!.permMatrix).toBe(true);
+    const off = await updateGuestType(db, t.id, {
+      permMatrix: false,
+      ...ENV_PW,
+    });
+    expect(off?.permMatrix).toBe(false);
+    expect(getGuestType(db, t.id)!.permMatrix).toBe(false);
+  });
+
+  it("PATCH 没提这一格就不动它：开着改别的仍开着，关着改别的仍关着", async () => {
+    const { db } = fakeDb();
+    const t = await createGuestType(db, {
+      name: "手滑测试",
+      password: "p1",
+      ...ENV_PW,
+    });
+    await updateGuestType(db, t.id, { permMatrix: true, ...ENV_PW });
+    const keptOn = await updateGuestType(db, t.id, {
+      name: "改了名",
+      permNotes: true,
+      ...ENV_PW,
+    });
+    expect(keptOn?.name).toBe("改了名");
+    expect(keptOn?.permNotes).toBe(true);
+    expect(keptOn?.permMatrix).toBe(true);
+    expect(getGuestType(db, t.id)!.permMatrix).toBe(true);
+    // 反过来：关着的也不会被「只改名字」顺手打开
+    await updateGuestType(db, t.id, { permMatrix: false, ...ENV_PW });
+    const keptOff = await updateGuestType(db, t.id, {
+      note: "只加一句说明",
+      ...ENV_PW,
+    });
+    expect(keptOff?.note).toBe("只加一句说明");
+    expect(keptOff?.permMatrix).toBe(false);
+  });
+
+  it("其它三项长期权益改不动它：四格各管各的", async () => {
+    const { db } = fakeDb();
+    const t = await createGuestType(db, {
+      name: "分面测试",
+      password: "p1",
+      ...ENV_PW,
+    });
+    await updateGuestType(db, t.id, {
+      permNotes: true,
+      permFiles: true,
+      permPublic: true,
+      ...ENV_PW,
+    });
+    const back = getGuestType(db, t.id)!;
+    expect(back).toMatchObject({
+      permNotes: true,
+      permFiles: true,
+      permPublic: true,
+      permMatrix: false,
+    });
+  });
+
+  it("库里读不出这一列的值（老库/写坏）：一律按没有矩阵权算", async () => {
+    const { db, rows } = fakeDb();
+    const t = await createGuestType(db, {
+      name: "补列前",
+      password: "p1",
+      permMatrix: true,
+      ...ENV_PW,
+    });
+    // 模拟「这一格读上来是 null」：补列前的存量行、或值被写坏了
+    for (const bad of [null, undefined, "1", 2, "true"]) {
+      rows.find((r) => r.id === t.id)!.perm_matrix = bad as unknown as number;
+      expect(getGuestType(db, t.id)!.permMatrix).toBe(false);
+    }
+    rows.find((r) => r.id === t.id)!.perm_matrix = 1;
+    expect(getGuestType(db, t.id)!.permMatrix).toBe(true);
+  });
+
+  it("两份兜底快照都不带矩阵权：核实失败不等于把整面网页交出去", () => {
+    expect(defaultCommonGuestTypeInfo().permMatrix).toBe(false);
+    // 全开兜底那份照旧是工具全开 —— 只把矩阵权这一格钉在关
+    expect(defaultCommonGuestTypeInfo().tools).toEqual([
+      ...GUEST_TOGGLABLE_TOOLS,
+    ]);
+    expect(disabledGuestTypeInfo("x").permMatrix).toBe(false);
+  });
+});
+
+/**
+ * DO 隔着间回答「这张卡有没有这项权益」时，名册上查不到那一档的兜底口径
+ * （cowork.ts 的 cardPerm 走的就是这一把尺子）。
+ */
+describe("查无此档的兜底口径", () => {
+  it("内置通用档的老三项：行读不出来仍按全开 —— 那是门口最后一把钥匙", () => {
+    for (const perm of ["permNotes", "permFiles", "permPublic"] as const)
+      expect(cardPermFallback(COMMON_TYPE_ID, perm)).toBe(true);
+  });
+
+  it("矩阵权：任何档都不从兜底里拿到，包括内置通用档", () => {
+    expect(cardPermFallback(COMMON_TYPE_ID, "permMatrix")).toBe(false);
+    expect(cardPermFallback("t-vip", "permMatrix")).toBe(false);
+  });
+
+  it("别的档：四项全按没有算 —— 核实失败不能当成「没有约定」放行", () => {
+    for (const perm of [
+      "permNotes",
+      "permFiles",
+      "permPublic",
+      "permMatrix",
+    ] as const)
+      expect(cardPermFallback("t-gone", perm)).toBe(false);
   });
 });
 
@@ -546,6 +709,7 @@ describe("门口验密码", () => {
       permNotes: false,
       permFiles: false,
       permPublic: false,
+      permMatrix: false,
     });
     expect(JSON.stringify(info)).not.toContain("hz");
   });
@@ -647,6 +811,7 @@ describe("按档位过滤工具", () => {
         permNotes: false,
         permFiles: false,
         permPublic: false,
+        permMatrix: false,
       }),
     );
     expect(names).not.toContain("search");
@@ -666,6 +831,8 @@ describe("按档位过滤工具", () => {
     expect(stub.permNotes).toBe(false);
     expect(stub.permFiles).toBe(false);
     expect(stub.permPublic).toBe(false);
+    // 矩阵权是整面网页：兜底这份绝不能替管理员把它发出去
+    expect(stub.permMatrix).toBe(false);
     // 经工具注册层：对外工具组一个不留，留痕的还在
     const names = namesOf(toolCtx(stub));
     expect(names).not.toContain("search");
@@ -684,6 +851,7 @@ describe("按档位过滤工具", () => {
         permNotes: false,
         permFiles: false,
         permPublic: false,
+        permMatrix: false,
       }),
     );
     expect(names).not.toContain("search");
@@ -702,6 +870,7 @@ describe("按档位过滤工具", () => {
           permNotes: false,
           permFiles: false,
           permPublic: false,
+          permMatrix: false,
         },
         false,
       ),

@@ -27,7 +27,8 @@ const appendSessionMessage = vi.mocked(sessionStore.appendSessionMessage);
 const touchSession = vi.mocked(sessionStore.touchSession);
 
 interface Harness {
-  speak: (sessionId: string, line: string) => Promise<void>;
+  /** 返回值就是「他此刻在不在跟前」那条判据：邮件副本按它决定寄不寄 */
+  speak: (sessionId: string, line: string) => Promise<string>;
   persisted: unknown[][];
   notices: string[];
 }
@@ -53,7 +54,7 @@ function harness(activeSession: string): Harness {
     notices.push(s);
   });
   const proto = CoworkAgent.prototype as unknown as {
-    speak: (this: unknown, sessionId: string, line: string) => Promise<void>;
+    speak: (this: unknown, sessionId: string, line: string) => Promise<string>;
   };
   return {
     speak: (sessionId, line) => proto.speak.call(self, sessionId, line),
@@ -74,7 +75,7 @@ describe("speak：提醒落在哪儿", () => {
   it("那场正开着 → 进当前对话流，并广播 notice", async () => {
     getSession.mockReturnValue({ id: "s1" } as never);
     const h = harness("s1");
-    await h.speak("s1", "到点了");
+    expect(await h.speak("s1", "到点了")).toBe("live");
     expect(h.persisted).toHaveLength(1);
     expect(appendSessionMessage).not.toHaveBeenCalled();
     expect(h.notices).toEqual(["到点了"]);
@@ -83,7 +84,8 @@ describe("speak：提醒落在哪儿", () => {
   it("那场还在、只是没开 → 只写进它的历史，不打断当前场", async () => {
     getSession.mockReturnValue({ id: "s1" } as never);
     const h = harness("s2");
-    await h.speak("s1", "到点了");
+    // 他在界面前但在别一场：这句话只进了历史 —— 对邮件副本来说这算「没当场听到」
+    expect(await h.speak("s1", "到点了")).toBe("history");
     expect(appendSessionMessage).toHaveBeenCalledTimes(1);
     expect(touchSession).toHaveBeenCalledTimes(1);
     expect(h.persisted).toHaveLength(0);

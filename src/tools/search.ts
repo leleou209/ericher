@@ -13,6 +13,7 @@
 // （它能执行 JS，覆盖前端渲染的站）。
 
 import { tool } from "ai";
+import { assertReadableWebText, decodeWebResponse } from "../shared/webText";
 import puppeteer from "@cloudflare/puppeteer";
 import { z } from "zod";
 import type { SearchConfig } from "../agent/searchConfigs";
@@ -352,9 +353,9 @@ async function braveSearch(
   return (d.web?.results || [])
     .filter((x) => x.url)
     .map((x) => ({
-      title: x.title || x.url!,
+      title: assertReadableWebText(x.title || x.url!),
       url: x.url!,
-      content: x.description || "",
+      content: assertReadableWebText(x.description || ""),
     }));
 }
 
@@ -366,7 +367,7 @@ async function jinaRead(target: string): Promise<string> {
       signal: AbortSignal.timeout(OUTBOUND_TIMEOUT_MS),
     });
     if (!r.ok) return "";
-    return (await r.text()).trim();
+    return (await decodeWebResponse(r)).trim();
   } catch {
     return "";
   }
@@ -405,7 +406,7 @@ async function directFetch(target: string): Promise<string> {
     headers: { "User-Agent": UA, Accept: "text/html,*/*" },
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.text();
+  return decodeWebResponse(r);
 }
 
 const clipped = (s: string) =>
@@ -477,9 +478,9 @@ function parseDdg(html: string, limit: number): FreeHit[] {
         seg,
       );
     out.push({
-      title: textOf(m[2]) || url,
+      title: assertReadableWebText(textOf(m[2]) || url),
       url,
-      content: sn ? textOf(sn[2]) : "",
+      content: sn ? assertReadableWebText(textOf(sn[2])) : "",
     });
   }
   return out;
@@ -526,7 +527,7 @@ async function ddgSearch(
         lastErr = `DuckDuckGo ${r.status}`;
         continue;
       }
-      const hits = parseDdg(await r.text(), limit);
+      const hits = parseDdg(await decodeWebResponse(r), limit);
       if (hits.length) return hits;
       lastErr = "结果页里没解析出条目";
     } catch (e) {
@@ -565,7 +566,7 @@ async function ddgInstant(query: string): Promise<string> {
     const rel = (d.RelatedTopics || []).filter((t) => t.Text).slice(0, 5);
     if (rel.length)
       parts.push("相关：\n" + rel.map((t) => `· ${t.Text}`).join("\n"));
-    return parts.join("\n\n").trim();
+    return assertReadableWebText(parts.join("\n\n").trim());
   } catch {
     return "";
   }
@@ -593,9 +594,9 @@ async function wikiSearch(query: string, limit: number): Promise<FreeHit[]> {
       for (const it of d.query?.search || []) {
         if (!it.title) continue;
         out.push({
-          title: it.title,
+          title: assertReadableWebText(it.title),
           url: `https://${host}/wiki/${encodeURIComponent(it.title.replace(/\s+/g, "_"))}`,
-          content: it.snippet ? textOf(it.snippet) : "",
+          content: it.snippet ? assertReadableWebText(textOf(it.snippet)) : "",
         });
         if (out.length >= limit) return out;
       }
@@ -724,6 +725,11 @@ async function runSearch(
         key,
       )) as TavilySearchResponse;
       const results = data.results || [];
+      if (data.answer) assertReadableWebText(data.answer);
+      for (const result of results) {
+        assertReadableWebText(result.title || "");
+        assertReadableWebText(result.content || "");
+      }
       if (results.length) {
         const lines = results.map((r, i) => {
           const when = r.published_date
@@ -742,11 +748,12 @@ async function runSearch(
         );
       }
       fallbackWhy = "（备注：Tavily 通了但一条结果都没给，本次走免费通道）";
-    } catch {
+    } catch (e) {
       // 配额用尽 / 网络问题：退到免费通道，别让一次搜索失败打断整轮对话 ——
       // 但要说清退了，不让人对着结果猜
-      fallbackWhy =
-        "（备注：Tavily 调用失败（多半是配额或鉴权），本次走免费通道）";
+      fallbackWhy = (e as Error).message?.includes("编码损坏")
+        ? "（备注：Tavily 返回文字编码损坏，本次走免费通道）"
+        : "（备注：Tavily 调用失败（多半是配额或鉴权），本次走免费通道）";
     }
   }
   if (key && cfg.format === "brave") {
@@ -764,8 +771,10 @@ async function runSearch(
         );
       }
       fallbackWhy = "（备注：Brave 通了但一条结果都没给，本次走免费通道）";
-    } catch {
-      fallbackWhy = "（备注：Brave 调用失败，本次走免费通道）";
+    } catch (e) {
+      fallbackWhy = (e as Error).message?.includes("编码损坏")
+        ? "（备注：Brave 返回文字编码损坏，本次走免费通道）"
+        : "（备注：Brave 调用失败，本次走免费通道）";
     }
   }
   const free = await freeSearch({ ...a, maxResults });
@@ -892,7 +901,7 @@ async function browserRead(
       logBrowser(target, `报错 ${res.status()}`, ms);
       return null;
     }
-    const text = extractMain(await page.content()).trim();
+    const text = assertReadableWebText(extractMain(await page.content()).trim());
     if (!text) {
       logBrowser(target, "空壳", ms);
       return null;
@@ -958,18 +967,20 @@ export async function fetchPageText(
         key,
       )) as TavilyExtractResponse;
       const ok = data.results?.[0]?.raw_content;
-      if (ok) return { url: target, text: ok, rendered: false };
+      if (ok) return { url: target, text: assertReadableWebText(ok), rendered: false };
     } catch {
       // 抽不出来（配额 / 超时 / 该站不让抽）就退到直连，别让一次失败变成整次失败
     }
   }
 
+  let directError = "";
   try {
-    const text = extractMain(await directFetch(target));
+    const text = assertReadableWebText(extractMain(await directFetch(target)));
     if (text.length >= 200) return { url: target, text, rendered: false };
   } catch (e) {
     const msg = (e as Error).message;
     if (msg.startsWith("拒绝") || msg.startsWith("只允许")) throw e;
+    directError = msg;
   }
   const rendered = await browserRead(env, target);
   if (rendered)
@@ -978,10 +989,11 @@ export async function fetchPageText(
   const renderedText = await jinaRead(target);
   if (renderedText && !looksLikeChallenge(renderedText))
     return { url: target, text: renderedText, rendered: true };
+  const why = directError ? `；直连失败原因：${directError}` : "";
   throw new Error(
-    env.BROWSER
+    (env.BROWSER
       ? `直连、浏览器、Jina 都没能拿到正文（${target}）；这个站很可能在挡自动化访问`
-      : `直连拿不到正文，Jina 也没渲染出来（${target}）；这个部署没接 Browser Run binding`,
+      : `直连拿不到正文，Jina 也没渲染出来（${target}）；这个部署没接 Browser Run binding`) + why,
   );
 }
 
@@ -1065,17 +1077,19 @@ export function searchTools(ctx: ToolCtx) {
         );
         const target = url.toString();
 
-        let html = "";
+        let body = "";
+        let links: ReturnType<typeof extractLinks> = [];
+        let title = "";
         let directErr = "";
         try {
-          html = await directFetch(target);
+          const html = await directFetch(target);
+          body = assertReadableWebText(extractMain(html));
+          title = assertReadableWebText(extractTitle(html));
+          links = extractLinks(html, url, a.limit).map(link => ({ ...link, text: assertReadableWebText(link.text) }));
         } catch (e) {
           directErr = (e as Error).message;
+          body = ""; links = []; title = "";
         }
-
-        const body = html ? extractMain(html) : "";
-        const links = html ? extractLinks(html, url, a.limit) : [];
-        const title = html ? extractTitle(html) : "";
 
         // 直连拿不到正文（前端渲染 / 反爬）：退到 Jina，拿到的只有正文，没有链接
         if (body.length < 200) {

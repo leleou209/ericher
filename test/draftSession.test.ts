@@ -73,7 +73,7 @@ function makeDb() {
           : rows;
       return filtered as never;
     }
-    if (q.startsWith("select seq, message from session_messages"))
+    if (q.startsWith("select seq, message from session_messages") || q.startsWith("select message from session_messages"))
       return [] as never;
     if (q.startsWith("insert into session_messages")) return [] as never;
     throw new Error("假库不认得这条语句：" + q);
@@ -318,5 +318,50 @@ describe("场屋：屋名定场", () => {
       home: "guest-0123456789abcdef--s-hack",
     });
     expect(db.sessionRows.has("s-hack")).toBe(false);
+  });
+});
+
+
+describe("旧历史导航不能中断正在运行的任务", () => {
+  function runningFixture() {
+    const f = harness({ activeSession: "s-current", messages: [userMsg("仍在运行")] });
+    f.db.sessionRows.set("s-current", { id: "s-current", title: "运行中" });
+    f.db.sessionRows.set("s-other", { id: "s-other", title: "另一场" });
+    f.self.settleTurn = vi.fn();
+    f.self.clearConversation = vi.fn(async () => {});
+    return f;
+  }
+  it.each(["stream", "ingress"])("%s 运行时拒绝替换旧历史，保留消息和场指向", async kind => {
+    const { self, call } = runningFixture();
+    if (kind === "stream") self._activeStreamId = "in-flight";
+    else self.chatIngress = { running: true };
+    const messages = self.messages;
+    await expect(call<Promise<unknown>>("switchSession", "s-other")).rejects.toThrow("仍在运行");
+    expect(self.messages).toBe(messages);
+    expect(self.state.activeSession).toBe("s-current");
+    expect(self.settleTurn).not.toHaveBeenCalled();
+    expect(self.clearConversation).not.toHaveBeenCalled();
+  });
+  it("运行中仍可留在同一场或创建独立场屋", async () => {
+    const { self, call } = runningFixture();
+    self._activeStreamId = "in-flight";
+    expect(await call<Promise<{ id: string }>>("switchSession", "s-current")).toMatchObject({ id: "s-current" });
+    expect(await call<Promise<{ home: string }>>("createSession")).toMatchObject({ home: expect.stringContaining("default--") });
+    expect(self.state.activeSession).toBe("s-current");
+    expect(self.settleTurn).not.toHaveBeenCalled();
+    expect(self.clearConversation).not.toHaveBeenCalled();
+  });
+  it("固定场屋始终返回自己的场，即使旧任务仍运行", async () => {
+    const { self, db, call } = harness({ name: "default--s-fixed" });
+    self._activeStreamId = "in-flight";
+    db.sessionRows.set("s-fixed", { id: "s-fixed", title: "固定场" });
+    expect(await call<Promise<{ id: string }>>("switchSession", "s-other")).toMatchObject({ id: "s-fixed" });
+  });
+  it("没有运行任务时可正常切换旧历史", async () => {
+    const { self, call } = runningFixture();
+    self.persistMessages = vi.fn(async () => {});
+    expect(await call<Promise<{ id: string }>>("switchSession", "s-other")).toMatchObject({ id: "s-other" });
+    expect(self.state.activeSession).toBe("s-other");
+    expect(self.clearConversation).toHaveBeenCalledOnce();
   });
 });

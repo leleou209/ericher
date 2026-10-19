@@ -8,6 +8,14 @@ import {
 } from "react";
 import { api } from "../lib/api";
 import { useDragPos } from "../lib/dragPos";
+import {
+  ConfigurationSave,
+  downloadPack,
+  MatrixOperationLock,
+  MatrixReloadGuard,
+  PackOperation,
+  type PackDownloadIo,
+} from "../lib/matrixGuards";
 import { Icon } from "./Icons";
 import {
   DiffView,
@@ -210,6 +218,18 @@ function tally(list: MatrixTreeNode[]): number {
  */
 type TabKey = "list" | "graph" | "preview" | "look" | "sites" | "pack";
 
+/** 导出这一步落到真浏览器上的三件事：造临时 URL、挂个 a 点一下、回收 URL */
+const packDownload: PackDownloadIo = {
+  createObjectURL: (blob) => URL.createObjectURL(blob),
+  revokeObjectURL: (url) => URL.revokeObjectURL(url),
+  open: (url, filename) => {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+  },
+};
+
 export function MatrixPanel({
   onBare,
 }: {
@@ -318,6 +338,11 @@ export function MatrixPanel({
   const fab = useDragPos("matrix:workbench:fab");
   /** 装备矩阵包用的文件选择器：按钮点它，选完就走 equipPack */
   const packInput = useRef<HTMLInputElement>(null);
+  /** 一次挂载一套：刷新票据、配置保存与打包共用的锁、两条执行器 */
+  const reloadGuard = useRef(new MatrixReloadGuard());
+  const operationLock = useRef(new MatrixOperationLock());
+  const saver = useRef(new ConfigurationSave());
+  const packRunner = useRef(new PackOperation());
 
   // 导航一收，舞台就该独占整幅：把顶栏也交给外壳收掉。这一条不只管预览 ——
   // 列表、图谱、外观、外站同理（少一条顶栏，就多一整条内容的高度）。
@@ -327,7 +352,19 @@ export function MatrixPanel({
     onBare?.(railClosed && !narrow);
   }, [onBare, railClosed, narrow]);
 
+  // 卸载后这界面已经不在了：任何晚返回都不该再来写它，排队中的重复提交也一并作废
+  useEffect(
+    () => () => {
+      reloadGuard.current.invalidate();
+      saver.current.invalidate();
+      packRunner.current.invalidate();
+    },
+    [],
+  );
+
   const reload = useCallback(async () => {
+    // 取票：慢回来的那一次只要已经不是最新，就不许再碰界面
+    const ticket = reloadGuard.current.next();
     setErr("");
     try {
       // 页面与通路一起取：房间视图要拿两者拼门，全景图要拿两者画边
@@ -336,13 +373,14 @@ export function MatrixPanel({
         api.matrixLinks(),
         api.matrixSites(),
       ]);
+      if (!reloadGuard.current.current(ticket)) return;
       setPages(r.pages);
       setLinks(l.links);
       setNavOn(r.nav?.on ?? true);
       if (r.theme) setTheme(r.theme);
       setSites(s.sites);
     } catch (e) {
-      setErr((e as Error).message);
+      if (reloadGuard.current.current(ticket)) setErr((e as Error).message);
     }
   }, []);
 
@@ -352,10 +390,17 @@ export function MatrixPanel({
     void reload().finally(() => {
       if (alive) setLoading(false);
     });
-    api.guestTypes().then(setGuestTypes).catch(() => {});
+    api
+      .guestTypes()
+      .then((types) => {
+        if (alive) setGuestTypes(types);
+      })
+      .catch(() => {});
     api
       .files()
-      .then((r) => setFiles(r.files))
+      .then((r) => {
+        if (alive) setFiles(r.files);
+      })
       .catch(() => {});
     return () => {
       alive = false;
@@ -452,103 +497,148 @@ export function MatrixPanel({
     await commit();
   };
 
-  /** 真正落盘：把草稿打包成一份 FormData 交给保存接口 */
-  const commit = async () => {
-    if (!draft) return;
-    setBusy(true);
-    setMsg("");
-    try {
-      const meta = {
-        id: draft.id,
-        path: draft.path,
-        title: draft.title,
-        kind: draft.kind,
-        access: draft.access,
-        types: draft.types,
-        sandbox: draft.sandbox,
-        entry: draft.entry,
-        external: draft.external,
-        css: draft.css,
-      };
-      const form = new FormData();
-      form.append("meta", JSON.stringify(meta));
-      // 只有网页才谈得上正文：门卫/助手/功能块不往包里塞
-      if (draft.kind === "page" && !draft.external) {
-        if (draft.source === "paste" && draft.text) form.append("text", draft.text);
-        else if (draft.source === "upload" && draft.file)
-          form.append("file", draft.file);
-        else if (draft.source === "drive" && draft.driveKey)
-          form.append("key", draft.driveKey);
+  /** busy/msg 只有一份：所有写操作抢同一把锁，抢不到就当这一次没发生（同步判定，不等重渲染） */
+  const runExclusive = useCallback(
+    async (operation: () => Promise<void>) => {
+      const release = operationLock.current.acquire();
+      if (!release) return;
+      try {
+        await operation();
+      } finally {
+        release();
       }
-      await api.matrixSave(form);
-      setDraft(null);
-      setPending(null);
-      await reload();
-      setMsg("已保存");
-    } catch (e) {
-      setMsg((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+    },
+    [],
+  );
+
+  /** 真正落盘：把草稿打包成一份 FormData 交给保存接口 */
+  const commit = () =>
+    runExclusive(async () => {
+      if (!draft) return;
+      setBusy(true);
+      setMsg("");
+      try {
+        const meta = {
+          id: draft.id,
+          path: draft.path,
+          title: draft.title,
+          kind: draft.kind,
+          access: draft.access,
+          types: draft.types,
+          sandbox: draft.sandbox,
+          entry: draft.entry,
+          external: draft.external,
+          css: draft.css,
+        };
+        const form = new FormData();
+        form.append("meta", JSON.stringify(meta));
+        // 只有网页才谈得上正文：门卫/助手/功能块不往包里塞
+        if (draft.kind === "page" && !draft.external) {
+          if (draft.source === "paste" && draft.text)
+            form.append("text", draft.text);
+          else if (draft.source === "upload" && draft.file)
+            form.append("file", draft.file);
+          else if (draft.source === "drive" && draft.driveKey)
+            form.append("key", draft.driveKey);
+        }
+        await api.matrixSave(form);
+        setDraft(null);
+        setPending(null);
+        await reload();
+        setMsg("已保存");
+      } catch (e) {
+        setMsg((e as Error).message);
+      } finally {
+        setBusy(false);
+      }
+    });
 
   const remove = async (p: MatrixPage) => {
     if (!window.confirm(`删除页面 /${p.path}？正文会一并移除，不可恢复。`)) return;
-    setBusy(true);
-    setMsg("");
-    try {
-      await api.matrixDelete(p.id);
-      if (draft?.id === p.id) setDraft(null);
-      await reload();
-    } catch (e) {
-      setMsg((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    await runExclusive(async () => {
+      setBusy(true);
+      setMsg("");
+      try {
+        await api.matrixDelete(p.id);
+        if (draft?.id === p.id) setDraft(null);
+        await reload();
+      } catch (e) {
+        setMsg((e as Error).message);
+      } finally {
+        setBusy(false);
+      }
+    });
   };
+
+  /** 配置保存与包操作抢同一把锁；动手前先作废在途刷新，存完再作废一次 */
+  const saveConfiguration = useCallback(
+    async <T,>(
+      request: () => Promise<T>,
+      apply: (value: T) => void,
+      success: string,
+    ) => {
+      const release = operationLock.current.acquire();
+      if (!release) return;
+      reloadGuard.current.beginSave();
+      try {
+        await saver.current.run(
+          request,
+          { busy: setBusy, message: setMsg, apply },
+          success,
+        );
+      } finally {
+        reloadGuard.current.endSave();
+        release();
+      }
+    },
+    [],
+  );
 
   /** 存外站认定表：整份覆盖，后端会归一化域名、去重 */
-  const saveSites = async () => {
-    setBusy(true);
-    setMsg("");
-    try {
-      const r = await api.matrixSaveSites(sites);
-      setSites(r.sites);
-      setMsg("外站认定已保存");
-    } catch (e) {
-      setMsg((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const saveSites = () =>
+    saveConfiguration(
+      () => api.matrixSaveSites(sites),
+      (r) => setSites(r.sites),
+      "外站认定已保存",
+    );
 
   /** 存注入物的外观：主色与按钮形态整份覆盖 */
-  const saveTheme = async () => {
-    setBusy(true);
-    setMsg("");
-    try {
-      const r = await api.matrixTheme(theme);
-      setTheme(r.theme);
-      setMsg("外观已保存");
-    } catch (e) {
-      setMsg((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const saveTheme = () =>
+    saveConfiguration(
+      () => api.matrixTheme(theme),
+      (r) => setTheme(r.theme),
+      "外观已保存",
+    );
+
+  /** 悬浮菜单开关：服务端点头了才改界面，失败就留着原来的样子 */
+  const saveNav = (next: boolean) =>
+    saveConfiguration(
+      () => api.matrixNav(next),
+      () => setNavOn(next),
+      next ? "悬浮菜单已开" : "悬浮菜单已关",
+    );
+
+  /** 打包这一路与配置保存共用一把锁：装备期间没人能来改 busy/msg */
+  const executePack = useCallback(
+    async (operation: (current: () => boolean) => Promise<void>) => {
+      const release = operationLock.current.acquire();
+      if (!release) return;
+      try {
+        await packRunner.current.run({ setBusy, setMsg }, operation);
+      } finally {
+        release();
+      }
+    },
+    [],
+  );
 
   /** 导出矩阵包：整套（页面正文 + 连线 + 外观 + 外站认定）压成一个 zip 下载 */
   const exportPack = async () => {
-    setBusy(true);
-    setMsg("");
-    try {
+    await executePack(async (current) => {
       const { blob, missing } = await api.matrixPackExport();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `matrix-${Date.now()}.zip`;
-      a.click();
-      URL.revokeObjectURL(url);
+      // zip 到手时这界面可能已经作废了这一次导出，别把下载硬塞给人家
+      if (!current()) return;
+      downloadPack(blob, `matrix-${Date.now()}.zip`, packDownload);
       // 有页没带上正文就如实说：这种包是装不回来的，别让它看着像成功
       setMsg(
         missing.length
@@ -557,11 +647,7 @@ export function MatrixPanel({
               .join("、")}${missing.length > 3 ? " 等" : ""}）—— 这个包装不回这些页`
           : "矩阵包已导出",
       );
-    } catch (e) {
-      setMsg((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   /**
@@ -575,38 +661,30 @@ export function MatrixPanel({
       )
     )
       return;
-    setBusy(true);
-    setMsg("");
-    try {
+    await executePack(async (current) => {
       const r = await api.matrixPackEquip(file);
+      if (!current()) return;
       await reload();
+      if (!current()) return;
       setMsg(
         `已装备：${r.pages} 页 / ${r.links} 条连线 / ${r.sites} 条外站认定` +
           (r.droppedLinks ? `（丢了 ${r.droppedLinks} 条指向包外的连线）` : "") +
           (r.droppedSites ? `（丢了 ${r.droppedSites} 条超限的外站认定）` : "") +
           (r.snapshot ? "，装前那一版已留底" : ""),
       );
-    } catch (e) {
-      setMsg((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   /** 回滚：把上一次装备前的留底再装回去 */
   const rollbackPack = async () => {
     if (!window.confirm("把上一次装备前的留底装回去？（同样整体替换）")) return;
-    setBusy(true);
-    setMsg("");
-    try {
+    await executePack(async (current) => {
       const r = await api.matrixPackRollback();
+      if (!current()) return;
       await reload();
+      if (!current()) return;
       setMsg(`已回滚到上一版：${r.pages} 页 / ${r.links} 条连线`);
-    } catch (e) {
-      setMsg((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   /**
@@ -616,53 +694,56 @@ export function MatrixPanel({
    * 新函数会让边反复重建。
    */
   const quickLink = useCallback(
-    async (from: string, to: string) => {
-      setBusy(true);
-      setMsg("");
-      try {
-        await api.matrixLink({ from, to });
-        await reload();
-      } catch (e) {
-        setMsg((e as Error).message);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [reload],
+    (from: string, to: string) =>
+      runExclusive(async () => {
+        setBusy(true);
+        setMsg("");
+        try {
+          await api.matrixLink({ from, to });
+          await reload();
+        } catch (e) {
+          setMsg((e as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }),
+    [reload, runExclusive],
   );
 
   /** 全景图上断开一条通路 */
   const quickUnlink = useCallback(
-    async (from: string, to: string) => {
-      setBusy(true);
-      setMsg("");
-      try {
-        await api.matrixUnlink(from, to);
-        await reload();
-      } catch (e) {
-        setMsg((e as Error).message);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [reload],
+    (from: string, to: string) =>
+      runExclusive(async () => {
+        setBusy(true);
+        setMsg("");
+        try {
+          await api.matrixUnlink(from, to);
+          await reload();
+        } catch (e) {
+          setMsg((e as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }),
+    [reload, runExclusive],
   );
 
   /** 房间里现开一扇门：从站着的这间通到选中的那一页，落点由侧表当场挑 */
   const roomLink = useCallback(
-    async (from: string, to: string, label: string, place: LinkPlace) => {
-      setBusy(true);
-      setMsg("");
-      try {
-        await api.matrixLink({ from, to, label, place });
-        await reload();
-      } catch (e) {
-        setMsg((e as Error).message);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [reload],
+    (from: string, to: string, label: string, place: LinkPlace) =>
+      runExclusive(async () => {
+        setBusy(true);
+        setMsg("");
+        try {
+          await api.matrixLink({ from, to, label, place });
+          await reload();
+        } catch (e) {
+          setMsg((e as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }),
+    [reload, runExclusive],
   );
 
   /**
@@ -670,25 +751,26 @@ export function MatrixPanel({
    * 漏了这两样会被静默重置成兜底栏、「order 0」。
    */
   const roomRename = useCallback(
-    async (l: MatrixLink, label: string) => {
-      setBusy(true);
-      setMsg("");
-      try {
-        await api.matrixLink({
-          from: l.from,
-          to: l.to,
-          label,
-          place: l.place,
-          order: l.order,
-        });
-        await reload();
-      } catch (e) {
-        setMsg((e as Error).message);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [reload],
+    (l: MatrixLink, label: string) =>
+      runExclusive(async () => {
+        setBusy(true);
+        setMsg("");
+        try {
+          await api.matrixLink({
+            from: l.from,
+            to: l.to,
+            label,
+            place: l.place,
+            order: l.order,
+          });
+          await reload();
+        } catch (e) {
+          setMsg((e as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }),
+    [reload, runExclusive],
   );
 
   /**
@@ -696,25 +778,26 @@ export function MatrixPanel({
    * 同样得把 label 与 order 一起回传，否则会被覆盖掉。
    */
   const roomPlace = useCallback(
-    async (l: MatrixLink, place: LinkPlace) => {
-      setBusy(true);
-      setMsg("");
-      try {
-        await api.matrixLink({
-          from: l.from,
-          to: l.to,
-          label: l.label,
-          place,
-          order: l.order,
-        });
-        await reload();
-      } catch (e) {
-        setMsg((e as Error).message);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [reload],
+    (l: MatrixLink, place: LinkPlace) =>
+      runExclusive(async () => {
+        setBusy(true);
+        setMsg("");
+        try {
+          await api.matrixLink({
+            from: l.from,
+            to: l.to,
+            label: l.label,
+            place,
+            order: l.order,
+          });
+          await reload();
+        } catch (e) {
+          setMsg((e as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }),
+    [reload, runExclusive],
   );
 
   /**
@@ -722,62 +805,65 @@ export function MatrixPanel({
    * 后端按 (from,to) 整条覆盖，label 与 order 不回传会被静默重置，所以一并带上。
    */
   const roomMove = useCallback(
-    async (from: string, to: string, x: number, y: number) => {
+    (from: string, to: string, x: number, y: number) => {
       const l = links.find((k) => k.from === from && k.to === to);
       if (!l) return;
-      setBusy(true);
-      setMsg("");
-      try {
-        await api.matrixLink({
-          from,
-          to,
-          label: l.label,
-          place: { kind: "point", x, y },
-          order: l.order,
-        });
-        await reload();
-      } catch (e) {
-        setMsg((e as Error).message);
-      } finally {
-        setBusy(false);
-      }
+      return runExclusive(async () => {
+        setBusy(true);
+        setMsg("");
+        try {
+          await api.matrixLink({
+            from,
+            to,
+            label: l.label,
+            place: { kind: "point", x, y },
+            order: l.order,
+          });
+          await reload();
+        } catch (e) {
+          setMsg((e as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      });
     },
-    [links, reload],
+    [links, reload, runExclusive],
   );
 
   /** 新开一间房，并顺手从站着的这间开一扇门过去 —— 建完就推门进去 */
   const roomCreate = useCallback(
-    async (d: { path: string; title: string; access: MatrixAccess }) => {
-      setBusy(true);
-      setMsg("");
-      try {
-        const form = new FormData();
-        form.append(
-          "meta",
-          JSON.stringify({
-            path: d.path,
-            title: d.title,
-            access: d.access,
-            types: [],
-            sandbox: false,
-            entry: false,
-            external: "",
-          }),
-        );
-        form.append("text", blankPage(d.title || d.path));
-        const r = await api.matrixSave(form);
-        const id = r.page?.id;
-        const from = roomId;
-        if (id && from && from !== id) await api.matrixLink({ from, to: id });
-        await reload();
-        if (id) walk(id);
-      } catch (e) {
-        setMsg((e as Error).message);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [reload, walk, roomId],
+    (d: { path: string; title: string; access: MatrixAccess }) =>
+      runExclusive(async () => {
+        setBusy(true);
+        setMsg("");
+        try {
+          const form = new FormData();
+          form.append(
+            "meta",
+            JSON.stringify({
+              path: d.path,
+              title: d.title,
+              access: d.access,
+              types: [],
+              sandbox: false,
+              entry: false,
+              external: "",
+            }),
+          );
+          form.append("text", blankPage(d.title || d.path));
+          const r = await api.matrixSave(form);
+          const id = r.page?.id;
+          const from = roomId;
+          if (id && from && from !== id) await api.matrixLink({ from, to: id });
+          await reload();
+          if (id) walk(id);
+        } catch (e) {
+          setMsg((e as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }),
+    [reload, walk, roomId, runExclusive],
   );
 
   /** 递归铺一层：文件夹为路标（可折叠），页面才是可编辑的实体 */
@@ -1434,22 +1520,7 @@ export function MatrixPanel({
                         className={`chip${navOn ? " on" : ""}`}
                         disabled={busy}
                         title="在每页左上角挂一个半透明浮窗，列出当前身份能去的页面"
-                        onClick={() => {
-                          const next = !navOn;
-                          setNavOn(next);
-                          setBusy(true);
-                          setMsg("");
-                          api
-                            .matrixNav(next)
-                            .then(() =>
-                              setMsg(next ? "悬浮菜单已开" : "悬浮菜单已关"),
-                            )
-                            .catch((e: unknown) => {
-                              setNavOn(!next); // 没存上就把开关拨回去，别骗人
-                              setMsg((e as Error).message);
-                            })
-                            .finally(() => setBusy(false));
-                        }}
+                        onClick={() => void saveNav(!navOn)}
                       >
                         悬浮菜单{navOn ? "：开" : "：关"}
                       </button>

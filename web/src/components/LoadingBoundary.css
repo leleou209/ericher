@@ -1,0 +1,3 @@
+.deferred-status { padding: 20px; color: var(--yuzhe-ink-dim, #666); text-align: center; }
+.deferred-status p, .gate[role="status"] p, .gate[role="alert"] p { margin: 6px 0; }
+.deferred-status .btn { margin-top: 8px; }

@@ -60,6 +60,11 @@ export interface GuestTypeRow {
   permFiles: boolean;
   /** 公开内容与公开文件（往公共区放东西） */
   permPublic: boolean;
+  /**
+   * 网页矩阵的全量管理权：给了就是整面（页面、连线、外观、外站认定表、打包/装备）。
+   * 刻意不再拆子权限 —— 这一档的口径是「一次决定」，发放靠谨慎，不靠分级。
+   */
+  permMatrix: boolean;
   active: boolean;
   created: string;
 }
@@ -85,6 +90,8 @@ interface TypeRow {
   perm_notes: number | boolean;
   perm_files: number | boolean;
   perm_public: number | boolean;
+  // 老库里可能压根没有这一列（补列前就读），null 得当「没有这项权益」
+  perm_matrix: number | boolean | null;
   active: number | boolean;
   created: string;
 }
@@ -102,6 +109,7 @@ export interface GuestTypeInput {
   permNotes?: boolean;
   permFiles?: boolean;
   permPublic?: boolean;
+  permMatrix?: boolean;
 }
 
 /** 改一档的入参：字段缺省（undefined）不动。改密码同样要过查重 */
@@ -116,11 +124,15 @@ export interface GuestTypePatch {
   permNotes?: boolean;
   permFiles?: boolean;
   permPublic?: boolean;
+  permMatrix?: boolean;
   active?: boolean;
 }
 
-/** SQLite 的 1/0 和假库里的 true/false 都归一成布尔 */
-function toBool(v: number | boolean): boolean {
+/**
+ * SQLite 的 1/0 和假库里的 true/false 都归一成布尔。
+ * 认不出的一律算关：老库补列前的 null、写坏的值都该落到「没有这项权益」。
+ */
+function toBool(v: unknown): boolean {
   return v === 1 || v === true;
 }
 
@@ -255,6 +267,7 @@ function rowToType(r: TypeRow): GuestTypeRow {
     permNotes: toBool(r.perm_notes),
     permFiles: toBool(r.perm_files),
     permPublic: toBool(r.perm_public),
+    permMatrix: toBool(r.perm_matrix),
     active: toBool(r.active),
     created: r.created,
   };
@@ -270,6 +283,7 @@ function rowToType(r: TypeRow): GuestTypeRow {
  * 口令列留空：进门验的是 env 里的前台门禁口令，不走这张表（findGuestTypeByPassword
  * 跳过这一行，免得空口令被谁撞上）。权益缺省全开 —— 与它历史上的行为一致，
  * 种入不改任何人的既得权限；收紧是管理员后来的事。
+ * 矩阵权是这一段的唯一例外：它从来不是「前台口令」自带的东西，种成关。
  * created 钉在最早，名册里它排第一。
  * ON CONFLICT DO NOTHING：种一次就够，管理员后来的改动不会被下一次建表冲掉。
  */
@@ -277,9 +291,9 @@ export function ensureCommonGuestType(sql: SqlTag): void {
   const tools = serializeTools([...GUEST_TOGGLABLE_TOOLS]);
   sql`INSERT INTO guest_types (id, name, password, note, tools, perm_search,
             perm_draw, perm_memory, perm_notes, perm_files, perm_public,
-            active, created)
+            perm_matrix, active, created)
       VALUES (${COMMON_TYPE_ID}, ${COMMON_TYPE_NAME}, ${""}, ${""}, ${tools},
-              ${1}, ${1}, ${1}, ${1}, ${1}, ${1}, ${1}, ${COMMON_TYPE_CREATED})
+              ${1}, ${1}, ${1}, ${1}, ${1}, ${1}, ${0}, ${1}, ${COMMON_TYPE_CREATED})
       ON CONFLICT(id) DO NOTHING`;
 }
 
@@ -296,6 +310,7 @@ export function ensureGuestTypesSchema(sql: SqlTag): void {
        perm_notes  INTEGER NOT NULL DEFAULT 0,
        perm_files  INTEGER NOT NULL DEFAULT 0,
        perm_public INTEGER NOT NULL DEFAULT 0,
+       perm_matrix INTEGER NOT NULL DEFAULT 0,
        active      INTEGER NOT NULL DEFAULT 1,
        created     TEXT NOT NULL
      )`;
@@ -323,6 +338,14 @@ export function ensureGuestTypesSchema(sql: SqlTag): void {
   } catch {
     /* 已有该列 */
   }
+  // 矩阵全量管理权是后加的第四项：老库补这一列，存量各档一律落 0（默认关）。
+  // 补列时必须给 DEFAULT 0 —— 不写默认值的话 SQLite 给老行填 NULL，
+  // 而「读不出值」在这一档上只能按「没有这个权」算（见 toBool）。
+  try {
+    sql`ALTER TABLE guest_types ADD COLUMN perm_matrix INTEGER NOT NULL DEFAULT 0`;
+  } catch {
+    /* 已有该列 */
+  }
   // 建表补齐之后就种上内置通用档：它是名册的底板，任何读名册的路都该看见它
   ensureCommonGuestType(sql);
 }
@@ -331,7 +354,7 @@ export function listGuestTypes(sql: SqlTag): GuestTypeRow[] {
   ensureGuestTypesSchema(sql);
   return sql<TypeRow>`
     SELECT id, name, password, note, tools, perm_search, perm_draw, perm_memory,
-           perm_notes, perm_files, perm_public, active, created
+           perm_notes, perm_files, perm_public, perm_matrix, active, created
     FROM guest_types ORDER BY created`.map(rowToType);
 }
 
@@ -346,7 +369,7 @@ export function listGuestTypes(sql: SqlTag): GuestTypeRow[] {
 function typeById(sql: SqlTag, id: string): GuestTypeRow | null {
   const rows = sql<TypeRow>`
     SELECT id, name, password, note, tools, perm_search, perm_draw, perm_memory,
-           perm_notes, perm_files, perm_public, active, created
+           perm_notes, perm_files, perm_public, perm_matrix, active, created
     FROM guest_types WHERE id = ${id} AND active = 1`;
   return rows.length ? rowToType(rows[0]) : null;
 }
@@ -362,7 +385,7 @@ function typeById(sql: SqlTag, id: string): GuestTypeRow | null {
 function typeByIdAnyState(sql: SqlTag, id: string): GuestTypeRow | null {
   const rows = sql<TypeRow>`
     SELECT id, name, password, note, tools, perm_search, perm_draw, perm_memory,
-           perm_notes, perm_files, perm_public, active, created
+           perm_notes, perm_files, perm_public, perm_matrix, active, created
     FROM guest_types WHERE id = ${id}`;
   return rows.length ? rowToType(rows[0]) : null;
 }
@@ -383,11 +406,33 @@ export interface GuestTypeInfo {
   permNotes: boolean;
   permFiles: boolean;
   permPublic: boolean;
+  /** 网页矩阵的全量管理权（同样只对持卡的长期身份生效） */
+  permMatrix: boolean;
 }
 
 /** 这一档能不能用某件来客工具：档位清单里开着的，或恒开的那些（天气/识图/卡片/留痕） */
 export function guestHasTool(t: GuestTypeInfo, name: string): boolean {
   return t.tools.includes(name) || GUEST_ALWAYS_ON.includes(name);
+}
+
+/**
+ * 四项「凭身份卡」的长期权益，名字与 guest_types 的四个 perm_* 列一一对应。
+ * 闸（index.ts 的 cardAllows）与 DO 的现查（cowork.ts 的 cardPerm）共用这一份口径，
+ * 免得两边各写一遍联合类型、漏掉一项就出现「REST 进得去、RPC 被拒」的半开。
+ */
+export type GuestCardPerm = "permNotes" | "permFiles" | "permPublic" | "permMatrix";
+
+/**
+ * 名册上查不到这一档时（档被删了、停用了、或主人房读不出表）算不算有这项权益。
+ *
+ * 内置通用档的老三项照旧按全开算：那是门口最后一把钥匙，不能因为一次 DO 抖动
+ * 把在场的长期客人锁在门外（它历史上的权限本来就是全开）。
+ * 矩阵权反过来 —— 核实不了的时候只能按没有：这一档给出去是整面网页，
+ * 兜底替管理员把它发出去，收回都不知道从哪收。
+ */
+export function cardPermFallback(typeId: string, perm: GuestCardPerm): boolean {
+  if (perm === "permMatrix") return false;
+  return typeId === COMMON_TYPE_ID;
 }
 
 export function toGuestTypeInfo(t: GuestTypeRow): GuestTypeInfo {
@@ -399,6 +444,7 @@ export function toGuestTypeInfo(t: GuestTypeRow): GuestTypeInfo {
     permNotes: t.permNotes,
     permFiles: t.permFiles,
     permPublic: t.permPublic,
+    permMatrix: t.permMatrix,
   };
 }
 
@@ -408,6 +454,8 @@ export function toGuestTypeInfo(t: GuestTypeRow): GuestTypeInfo {
  * 别的档核实不了要全关（见下面 disabledGuestTypeInfo），这一档反过来：
  * 它是门口最后一把钥匙（前台口令），不能因为一次 DO 抖动把所有进门的人
  * 锁在门外。缺省语义本来就是全开，兜底也就落在全开。
+ * 矩阵权不参与这个「全开」：它从来不在前台口令的历史权限里，兜底给开了
+ * 等于把整面网页交出去 —— 这一档要放行只走名册上真实的那一行。
  */
 export function defaultCommonGuestTypeInfo(): GuestTypeInfo {
   return {
@@ -418,6 +466,7 @@ export function defaultCommonGuestTypeInfo(): GuestTypeInfo {
     permNotes: true,
     permFiles: true,
     permPublic: true,
+    permMatrix: false,
   };
 }
 
@@ -439,6 +488,7 @@ export function disabledGuestTypeInfo(id: string): GuestTypeInfo {
     permNotes: false,
     permFiles: false,
     permPublic: false,
+    permMatrix: false,
   };
 }
 
@@ -483,16 +533,17 @@ export async function createGuestType(
     perm_notes: input.permNotes ? 1 : 0,
     perm_files: input.permFiles ? 1 : 0,
     perm_public: input.permPublic ? 1 : 0,
+    perm_matrix: input.permMatrix ? 1 : 0,
     active: 1,
     created: new Date().toISOString(),
   };
   sql`INSERT INTO guest_types (id, name, password, note, tools, perm_search,
             perm_draw, perm_memory, perm_notes, perm_files, perm_public,
-            active, created)
+            perm_matrix, active, created)
       VALUES (${row.id}, ${row.name}, ${row.password}, ${row.note},
               ${row.tools}, ${row.perm_search}, ${row.perm_draw},
               ${row.perm_memory}, ${row.perm_notes}, ${row.perm_files},
-              ${row.perm_public}, ${row.active}, ${row.created})`;
+              ${row.perm_public}, ${row.perm_matrix}, ${row.active}, ${row.created})`;
   return rowToType(row);
 }
 
@@ -557,17 +608,12 @@ export async function updateGuestType(
         : String(patch.note).trim().slice(0, 300),
     tools: serializeTools(tools),
     ...legacyCols(tools),
-    perm_notes:
-      patch.permNotes === undefined ? cur.permNotes : patch.permNotes ? 1 : 0,
-    perm_files:
-      patch.permFiles === undefined ? cur.permFiles : patch.permFiles ? 1 : 0,
-    perm_public:
-      patch.permPublic === undefined
-        ? cur.permPublic
-        : patch.permPublic
-          ? 1
-          : 0,
-    active: patch.active === undefined ? cur.active : patch.active ? 1 : 0,
+    perm_notes: (patch.permNotes ?? cur.permNotes) ? 1 : 0,
+    perm_files: (patch.permFiles ?? cur.permFiles) ? 1 : 0,
+    perm_public: (patch.permPublic ?? cur.permPublic) ? 1 : 0,
+    perm_matrix: (patch.permMatrix ?? cur.permMatrix) ? 1 : 0,
+    // 默认档不能停用；合法更新修复异常状态，但不放开已关闭权限。
+    active: id === COMMON_TYPE_ID ? 1 : (patch.active ?? cur.active) ? 1 : 0,
     created: cur.created,
   };
   sql`UPDATE guest_types SET name = ${row.name}, password = ${row.password},
@@ -575,7 +621,8 @@ export async function updateGuestType(
         perm_search = ${row.perm_search},
         perm_draw = ${row.perm_draw}, perm_memory = ${row.perm_memory},
         perm_notes = ${row.perm_notes}, perm_files = ${row.perm_files},
-        perm_public = ${row.perm_public}, active = ${row.active}
+        perm_public = ${row.perm_public}, perm_matrix = ${row.perm_matrix},
+        active = ${row.active}
       WHERE id = ${row.id}`;
   return rowToType(row);
 }
@@ -606,7 +653,7 @@ export async function findGuestTypeByPassword(
   ensureGuestTypesSchema(sql);
   const rows = sql<TypeRow>`
     SELECT id, name, password, note, tools, perm_search, perm_draw, perm_memory,
-           perm_notes, perm_files, perm_public, active, created
+           perm_notes, perm_files, perm_public, perm_matrix, active, created
     FROM guest_types WHERE active = 1 ORDER BY created`;
   const pwHash = await hashPassword(pw);
   for (const r of rows) {

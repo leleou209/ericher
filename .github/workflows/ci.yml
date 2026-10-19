@@ -16,6 +16,5 @@ jobs:
       - run: npm ci
       # 生成 worker-configuration.d.ts（已 gitignore，新克隆必跑）
       - run: npm run types
-      - run: npm run typecheck
-      - run: npm run test
-      - run: npm run build
+      # 一条命令跑全：类型 → 单测 → 生产构建 → 启动包守卫（口径见 package.json 的 check）
+      - run: npm run check

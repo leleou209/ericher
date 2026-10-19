@@ -112,9 +112,19 @@ Remove-Item Env:HR_DESK_WRANGLER_CONFIG
 ## 质量与测试
 
 ```bash
-npm run typecheck   # tsc -b，要求零输出
-npm run test        # vitest run，全部通过
+npm run check              # 类型 → 单测 → 生产构建 → 首屏包守卫，一条跑全
+npm run typecheck          # tsc -b，要求零输出
+npm run test               # vitest run，全部通过
+npm run test:chat-recovery # 隔离 workerd 上的断联恢复回归（假模型，不配密钥）
+npm run test:web-encoding  # 隔离 workerd 上的网页编码解码回归
+npm run test:weak-network  # 隔离 workerd 上的弱网首屏交付回归
 ```
+
+`test:*` 三条各自生成独立的 `.wrangler/<场景>-test-*` 配置与状态目录，结束时只停自己启动的进程；默认端口依次为 8792、8793、8794，可用 `CHAT_TEST_PORT` / `WEB_ENCODING_TEST_PORT` / `WEAK_NET_TEST_PORT` 换端口。它们不进 `npm run check`，也不在 CI 上跑（CI 只跑 `check` 那四步）。
+
+`fixture:weak-network` / `fixture:weak-network:stop` 手工起一个限速的本地实例，用来看门禁检不出来的浏览器绘制顺序；用完必须 stop，它只按自己记录的 pid 收进程。
+
+行为口径见 [docs/chat-recovery.md](docs/chat-recovery.md)（会话后台运行与断联恢复）与 [docs/web-encoding.md](docs/web-encoding.md)（搜索与网页读取编码）。
 
 ## 备份
 

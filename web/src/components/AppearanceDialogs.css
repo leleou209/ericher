@@ -1,0 +1,132 @@
+/* 外观面「列表 + 详情弹页」补的那点样式（组件见 ThemePanel.tsx / SettingsPage.tsx）。
+   列表行与弹页本体用 FormDialog.css 的原语，这里只补外观面的三个特例。
+   颜色一律走主题 token —— 这套界面本身可以换皮，不能写死。 */
+
+/* 云盘挑图器现在也能从弹页里打开：它必须盖在 FormDialog（z-index 340）之上，
+   否则点「云盘选图」会被遮罩压住，图挑不着。挑图器本身就是人明确点开的一层，
+   到点的公告（300）压在它下面，与弹页的取舍一致。 */
+.tp-drive-overlay {
+  z-index: 360;
+}
+
+/* 图标覆盖行上的那枚小图：这一项的内容就是「换了哪张图」，光看字母徽标认不出来。
+   原语的行首不给传图，所以缩略图挂在摘要文字前面，压到行高以内。 */
+.appearance-icon-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.appearance-icon-summary .tp-icon-thumb {
+  width: 22px;
+  height: 22px;
+}
+
+.appearance-icon-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 弹页里的预览砖跟在输入格下面：改一行话、换一张图，就在这一格里看到，
+   不用为了看一眼效果把弹页关掉 */
+.appearance-dialog-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin: 2px 0 8px;
+}
+
+.appearance-dialog-preview .tp-note {
+  margin: 0;
+}
+
+/* 动作按钮：文字 + 去向 + 删，排成一行，窄屏自动折 */
+.appearance-action-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 别被 .form-row-field input 的 width:100% 顶掉：这两格是按内容分宽的 */
+.appearance-action-row input {
+  width: auto;
+}
+
+.appearance-action-row .tp-action-label {
+  flex: 0 1 150px;
+}
+
+.appearance-action-row .tp-action-to {
+  flex: 1 1 120px;
+  min-width: 0;
+}
+
+/* 只读值：当前角色、设备标识这种「看着像输入框其实改不了」的格子，退回成一行文字 */
+.appearance-static {
+  min-width: 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--yuzhe-ink);
+  overflow-wrap: anywhere;
+}
+
+/* ── 壁纸行与花纹行（六个落点 / 底色 / 花纹的列表行）────────────────
+   行本身只读，值都在弹页里改；右侧槽留给「就地预览的本体」：一张小砖加压暗、
+   模糊两根滑杆。收进弹页就看不到效果了，所以这两根常驻 —— 尺寸要压到行高以内。 */
+.appearance-bg-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* .tp-preview 原样是 120x76 的一块，装进行里只留得到认图的大小 */
+.appearance-bg-preview {
+  width: 64px;
+  height: 42px;
+}
+
+.appearance-bg-sliders .tp-slider {
+  gap: 6px;
+}
+
+.appearance-bg-sliders .tp-slider span {
+  width: 26px;
+}
+
+/* 右侧槽没有可挤压的余量：滑杆别靠 flex:1 撑开，自己把宽度报出来 */
+.appearance-bg-sliders .tp-slider input[type="range"] {
+  flex: none;
+  width: 88px;
+}
+
+.appearance-bg-sliders .tp-slider b {
+  width: 40px;
+  font-size: 11.5px;
+}
+
+/* 底色与花纹行右侧的效果小样：原样 140x56 太高，行里放不下 */
+.appearance-row-swatch {
+  width: 60px;
+  height: 34px;
+}
+
+/* 窄屏：小砖先让位（弹页里还有），滑杆缩窄，整行不该横向溢出 */
+@media (max-width: 620px) {
+  .appearance-bg-controls {
+    gap: 6px;
+  }
+
+  .appearance-bg-preview {
+    display: none;
+  }
+
+  .appearance-bg-sliders .tp-slider input[type="range"] {
+    width: 60px;
+  }
+}
