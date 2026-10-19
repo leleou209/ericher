@@ -63,6 +63,13 @@
 - 已部署到 `erich.116671.xyz`，并把矩阵入口页（`/home`，公开访客打根路径即 302 过去）挂上线；
   入口页源码收在 `docs/promo-home.html`。
 
+### 发布补丁（部署包）
+
+- Worker 入口不再导出常量：`EML_FEED_MAX` 移到 `src/mail/mailbox.ts`。数字导出会被 workerd
+  当成入口，启动即报 `Incorrect type for map entry`；0.1.7 的部署包已用 `wrangler dev` 实机启动验证。
+- `release:pack` 把 Worker 分块（`assets/`）与前端静态资源（`client/`）分开打包，并静态校验
+  `index.js` 的导入闭包；包内回读校验，本地 `.dev.vars` 的密钥值不会被带进去。
+
 ### 已知边界（这一版没做的）
 
 - 真收信还差域名那侧三步：开 Email Routing、把 MX 交给 Cloudflare、投递目标选这个 Worker。
