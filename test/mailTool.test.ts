@@ -93,6 +93,7 @@ const inRow = (over: Partial<MailInRow> = {}): MailInRow => ({
   bytes: 4096,
   read: false,
   hasAttachment: false,
+  attachments: [],
   preview: "开头一段",
   emlKey: "mail/in/2026-10-19/m-1.eml",
   ...over,

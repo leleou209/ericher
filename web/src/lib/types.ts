@@ -1062,6 +1062,11 @@ export interface MailInRow {
   bytes: number;
   read: boolean;
   hasAttachment: boolean;
+  /**
+   * 附件清单（只有名字与大小）。可选是有意为之：这一列后加，
+   * 老库里那几封与别的调用方给的假行都可能没有它，读的人得按"没有清单"处理。
+   */
+  attachments?: { name: string; bytes: number }[];
   /** 纯文本正文的开头一段；随列表一起回 */
   preview: string;
   emlKey: string;

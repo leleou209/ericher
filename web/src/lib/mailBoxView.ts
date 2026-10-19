@@ -341,3 +341,84 @@ export const inDetailSummary = (row: MailInRow, when: string): string => {
     .filter(Boolean)
     .join(" · ");
 };
+
+// ── 附件清单 ────────────────────────────────────────
+//
+// 库里那一格只有名字与大小（内容在 R2 的原件里），所以这里**永远不说"可下载"**，
+// 也不把"带附件"和"有清单"混成一件事：老行只有前者。
+
+export const attachCount = (row: MailInRow): number => row.attachments?.length ?? 0;
+
+/** 行上那一句 */
+export const attachSummary = (row: MailInRow): string => {
+  const n = attachCount(row);
+  if (n) return `附件 ${n} 件`;
+  return row.hasAttachment ? "带附件（清单没记名）" : "";
+};
+
+/** 详情里逐条列出：名字 + 大小。条目本身缺字段也不该把整封信的读信面弄崩 */
+export const attachLines = (row: MailInRow): string[] =>
+  (row.attachments ?? []).map((a) => {
+    const name = String(a?.name ?? "").trim();
+    return `${name || "（没报名字）"} · ${fmtBytes(Number(a?.bytes ?? -1))}`;
+  });
+
+// ── 左列搜索 ────────────────────────────────────────
+//
+// 口径先说死：筛的是**清单里已经有的字段**（收件这侧是发件人名/地址/主题/摘要/附件名，
+// 寄件这侧是主题/收件人/失败原因/来路）。正文在云盘的原件里，不在清单上，
+// 所以占位符不许写"搜正文" —— 写了就是让人对着一个不做的事搜。
+
+export const normalizeQuery = (q: string): string => q.trim().toLowerCase();
+
+export const inRowMatches = (row: MailInRow, q: string): boolean => {
+  const k = normalizeQuery(q);
+  if (!k) return true;
+  return [
+    row.fromName,
+    row.from,
+    row.subject,
+    row.preview,
+    ...(row.attachments ?? []).map((a) => a.name),
+  ]
+    .join("\n")
+    .toLowerCase()
+    .includes(k);
+};
+
+export const outRowMatches = (row: MailOutRow, q: string): boolean => {
+  const k = normalizeQuery(q);
+  if (!k) return true;
+  return [row.subject, ...row.to, row.error, mailSourceLabel(row.source)]
+    .join("\n")
+    .toLowerCase()
+    .includes(k);
+};
+
+/** 空查询原样返回同一个数组（不复制一份，免得调用方拿引用比较时以为变了） */
+export const filterInRows = (rows: readonly MailInRow[], q: string): MailInRow[] =>
+  normalizeQuery(q) ? rows.filter((r) => inRowMatches(r, q)) : [...rows];
+
+export const filterOutRows = (
+  rows: readonly MailOutRow[],
+  q: string,
+): MailOutRow[] => (normalizeQuery(q) ? rows.filter((r) => outRowMatches(r, q)) : [...rows]);
+
+export const searchPlaceholder = (kind: "in" | "out"): string =>
+  kind === "in" ? "搜发件人、主题、摘要或附件名" : "搜主题、收件人、失败原因或来路";
+
+/**
+ * 空列表那句话：筛空了与本来就没有，是两件完全不同的事。
+ * 混成一句"还没有信进来"，人就会去查通道，而真相是他刚打了个错字。
+ */
+export const emptyListNote = (
+  kind: "in" | "out",
+  q: string,
+  total: number,
+  extra = "",
+): string => {
+  const k = normalizeQuery(q);
+  if (k) return `没有和「${q.trim()}」对得上的（清单里一共 ${total} 封）`;
+  if (extra) return extra;
+  return kind === "in" ? "还没有信进来" : "还没往外寄过东西";
+};

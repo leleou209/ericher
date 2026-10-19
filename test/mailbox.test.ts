@@ -28,10 +28,13 @@ import {
   listMailIn,
   listMailOut,
   mailInUnread,
+  parseAttachments,
   putEml,
   recordMailOut,
+  serializeAttachments,
   setMailInRead,
   toHex,
+  MAX_ATTACH_ITEMS,
   type EmlStore,
 } from "../src/mail/mailbox";
 import type { MailInRow } from "../src/mail/mailboxTypes";
@@ -65,6 +68,7 @@ const row = (over: Partial<MailInRow> = {}): MailInRow => ({
   bytes: 1234,
   read: false,
   hasAttachment: false,
+  attachments: [],
   preview: "正文开头一段",
   emlKey: "",
   ...over,
@@ -297,5 +301,96 @@ describe("原件落在 R2 的那几条", () => {
     expect(a).toBe(b);
     expect(a).not.toBe(c);
     expect(a).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+/**
+ * 附件清单：只记名字与大小，内容一概不在这儿（原件在 R2）。
+ *
+ * 这一格必须对脏数据宽容 —— 它是外站寄来的东西，一个坏条目不该把整封信的清单作废，
+ * 更不该让收件箱那一页读不出来。
+ */
+describe("附件清单那一格", () => {
+  it("存进去再读回来是同一份清单（名字与字节都在）", () => {
+    const { sql } = database();
+    const r = row({
+      hasAttachment: true,
+      attachments: [
+        { name: "月度 报告; v2.bin", bytes: 1234 },
+        { name: "note.pdf", bytes: 99 },
+      ],
+    });
+    const saved = insertMailIn(sql, r, "att1")!;
+    expect(findMailIn(sql, saved.id)?.attachments).toEqual([
+      { name: "月度 报告; v2.bin", bytes: 1234 },
+      { name: "note.pdf", bytes: 99 },
+    ]);
+  });
+
+  it(`超过 ${MAX_ATTACH_ITEMS} 个只留前若干，负数字节归零`, () => {
+    const many = Array.from({ length: MAX_ATTACH_ITEMS + 6 }, (_, i) => ({
+      name: `f${i}.bin`,
+      bytes: i === 0 ? -5 : 10,
+    }));
+    const text = serializeAttachments(many);
+    const back = parseAttachments(text);
+    expect(back.length).toBe(MAX_ATTACH_ITEMS);
+    expect(back[0]).toEqual({ name: "f0.bin", bytes: 0 });
+    expect(back[back.length - 1].name).toBe(`f${MAX_ATTACH_ITEMS - 1}.bin`);
+  });
+
+  it("名字过长被截住，空名字的条目丢掉而不是占一格", () => {
+    const back = parseAttachments(
+      serializeAttachments([
+        { name: "N".repeat(500), bytes: 1 },
+        { name: "   ", bytes: 2 },
+      ]),
+    );
+    expect(back.length).toBe(1);
+    expect(back[0].name.length).toBe(200);
+  });
+
+  it("那一格被写坏时读成「没有清单」，不抛也不把整行带走", () => {
+    const { db, sql } = database();
+    const saved = insertMailIn(
+      sql,
+      row({ hasAttachment: true, attachments: [{ name: "a.pdf", bytes: 3 }] }),
+      "att2",
+    )!;
+    for (const bad of ["不是 JSON", "{", "[]", '{"n":"x"}', "[null]", '[{"b":1}]']) {
+      db.prepare("UPDATE mail_in SET attach = ?").run(bad);
+      const r = findMailIn(sql, saved.id)!;
+      expect(r.attachments).toEqual([]);
+      // 清单坏了不影响这一封其它字段仍然读得到
+      expect(r.subject).toBe(saved.subject);
+    }
+  });
+
+  it("老库没有这一列时补上，且老行读出来是空清单而不是崩", () => {
+    const { db, sql } = database();
+    // 手工造一张今天早些时候那版的 mail_in（没有 attach 列）
+    db.prepare(
+      `CREATE TABLE mail_in (id TEXT PRIMARY KEY, hash TEXT, at TEXT, from_addr TEXT,
+        from_name TEXT, to_addr TEXT, subject TEXT, bytes INTEGER, read_flag INTEGER,
+        has_attach INTEGER, preview TEXT, eml_key TEXT)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO mail_in (id, hash, at, from_addr, from_name, to_addr, subject,
+        bytes, read_flag, has_attach, preview, eml_key)
+       VALUES ('old1','','2026-01-01T00:00:00.000Z','a@x.test','','t','旧的一封',1,0,0,'','')`,
+    ).run();
+    ensureMailboxSchema(sql);
+    const r = findMailIn(sql, "old1");
+    expect(r?.subject).toBe("旧的一封");
+    expect(r?.attachments).toEqual([]);
+    // 补完之后新行能正常带清单进去
+    const saved = insertMailIn(
+      sql,
+      row({ hasAttachment: true, attachments: [{ name: "b.zip", bytes: 7 }] }),
+      "att3",
+    )!;
+    expect(findMailIn(sql, saved.id)?.attachments).toEqual([
+      { name: "b.zip", bytes: 7 },
+    ]);
   });
 });

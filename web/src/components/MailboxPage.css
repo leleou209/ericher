@@ -176,6 +176,20 @@
   padding: 60px 38px;
 }
 
+/* 附件清单：只是"这封带了什么"的一张纸，不是下载入口 —— 不给 pointer，
+   也不做成卡片，免得人对着它找"点开看" */
+.mailbox-page .mailbox-attach {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--yuzhe-ink-dim);
+  border-left: 1px solid var(--yuzhe-line);
+}
+
 /* 读信那一面：正文左右各留 38px，与写信那面对齐 */
 .mailbox-page .mailbox-read {
   gap: 16px;

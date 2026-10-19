@@ -43,6 +43,8 @@ export interface MailInRow {
   bytes: number;
   read: boolean;
   hasAttachment: boolean;
+  /** 附件清单（只有名字与大小，内容不在这儿）；空数组 = 没带或这封入库时还没这一列 */
+  attachments: { name: string; bytes: number }[];
   /** 纯文本正文的开头一段；随列表一起回 */
   preview: string;
   emlKey: string;

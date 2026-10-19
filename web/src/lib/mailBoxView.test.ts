@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   MAIL_SOURCE_LABEL,
+  attachCount,
+  attachLines,
+  attachSummary,
+  emptyListNote,
+  filterInRows,
+  filterOutRows,
   fmtBytes,
   inDetailSummary,
+  inRowMatches,
+  normalizeQuery,
+  outRowMatches,
   inRowFromAddr,
   inRowFromLabel,
   inRowSummary,
@@ -21,6 +30,7 @@ import {
   readBodyOf,
   readMarkersOf,
   readToggleLabel,
+  searchPlaceholder,
   rowsNewestFirst,
   unreadFromRows,
   unreadReadOf,
@@ -283,5 +293,101 @@ describe("详情里那三个「这封看不全」的标记", () => {
     const 全空 = readBodyOf("   ", mail({ preview: "  " }));
     expect(全空.body).toBe("");
     expect(全空.missing).toContain("没有可读的正文");
+  });
+});
+
+// ── 附件清单 ─────────────────────────────────────────
+//
+// 这一格后加，所以"没有清单"有三种真实来路：老行没这一列、后端只记了带附件的标记、
+// 以及真没带附件。三者说的话必须不一样 —— 尤其不能对着老行说"没带附件"。
+
+describe("附件清单的读法", () => {
+  it("有清单就数件数，逐条是「名字 · 大小」", () => {
+    const row = mail({
+      hasAttachment: true,
+      attachments: [
+        { name: "月度报告.pdf", bytes: 1234 },
+        { name: "合同.docx", bytes: 20485 },
+      ],
+    });
+    expect(attachCount(row)).toBe(2);
+    expect(attachSummary(row)).toBe("附件 2 件");
+    expect(attachLines(row)).toEqual([
+      "月度报告.pdf · 1.2 KB",
+      "合同.docx · 20 KB",
+    ]);
+  });
+
+  it("老行只有「带附件」标记时，说的是「清单没记名」而不是没附件", () => {
+    const 老行 = mail({ hasAttachment: true });
+    expect(attachCount(老行)).toBe(0);
+    expect(attachSummary(老行)).toContain("没记名");
+    expect(attachLines(老行)).toEqual([]);
+  });
+
+  it("什么都没带就是空串：面上不多占一行", () => {
+    expect(attachSummary(mail({ hasAttachment: false }))).toBe("");
+  });
+
+  it("清单里混进空名字也不报错（后端已经滤过，界面这层再兜一次）", () => {
+    const row = mail({ attachments: [{ name: "", bytes: 5 }, undefined as never] } as never);
+    expect(attachCount(row)).toBe(2);
+    expect(attachLines(row)[1]).toBeDefined();
+  });
+});
+
+// ── 左列搜索 ─────────────────────────────────────────
+//
+// 口径：只筛清单上已有的字段。正文在云盘的原件里，所以占位符不许承诺"搜正文"。
+
+describe("左列搜索", () => {
+  const rows = [
+    mail({ id: "a", fromName: "徐一徍", subject: "关于邮箱托管", preview: "样例信", attachments: [{ name: "note.pdf", bytes: 9 }] }),
+    mail({ id: "b", fromName: "", from: "shop@vendor.test", subject: "发票", preview: "请查收" }),
+  ];
+
+  it("大小写不敏感，首尾空白不算", () => {
+    expect(normalizeQuery("  PDF ")).toBe("pdf");
+    expect(filterInRows(rows, "PDF").map((r) => r.id)).toEqual(["a"]);
+  });
+
+  it("发件人名、地址、主题、摘要、附件名都算命中面", () => {
+    expect(filterInRows(rows, "徐一徍").map((r) => r.id)).toEqual(["a"]);
+    expect(filterInRows(rows, "shop@vendor").map((r) => r.id)).toEqual(["b"]);
+    expect(filterInRows(rows, "请查收").map((r) => r.id)).toEqual(["b"]);
+    expect(filterInRows(rows, "note.pdf").map((r) => r.id)).toEqual(["a"]);
+  });
+
+  it("空查询原样返回全部（不是返回空）", () => {
+    expect(filterInRows(rows, "")).toHaveLength(2);
+    expect(filterInRows(rows, "   ")).toHaveLength(2);
+    expect(inRowMatches(rows[0], "")).toBe(true);
+  });
+
+  it("寄出那本筛主题、收件人、失败原因与来路", () => {
+    const outs = [
+      out({ subject: "周报", to: ["a@x.test"] }),
+      out({ subject: "账目", to: ["b@x.test"], ok: false, error: "认证被拒绝", source: "say" }),
+    ];
+    expect(filterOutRows(outs, "周报").map((r) => r.subject)).toEqual(["周报"]);
+    expect(filterOutRows(outs, "b@x.test").map((r) => r.subject)).toEqual(["账目"]);
+    expect(filterOutRows(outs, "认证被拒绝").map((r) => r.subject)).toEqual(["账目"]);
+    expect(filterOutRows(outs, "盯梢").map((r) => r.subject)).toEqual(["账目"]);
+    expect(outRowMatches(outs[0], "没见过的词")).toBe(false);
+  });
+
+  it("筛空了与本来就没有，是两句话", () => {
+    expect(emptyListNote("in", "错字", 12)).toContain("12 封");
+    expect(emptyListNote("in", "错字", 12)).toContain("对得上");
+    expect(emptyListNote("in", "", 0)).toBe("还没有信进来");
+    expect(emptyListNote("out", "", 0)).toBe("还没往外寄过东西");
+    // 通道没接这句优先：它比"没有信"更有解释力
+    expect(emptyListNote("in", "", 0, "收信通道还没接上")).toContain("通道");
+  });
+
+  it("占位符不承诺搜正文", () => {
+    expect(searchPlaceholder("in")).not.toContain("正文");
+    expect(searchPlaceholder("in")).toContain("摘要");
+    expect(searchPlaceholder("out")).toContain("失败原因");
   });
 });

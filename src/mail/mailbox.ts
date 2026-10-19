@@ -56,6 +56,49 @@ function toInt(v: unknown, fallback: number): number {
   return Number.isFinite(n) ? Math.trunc(n) : fallback;
 }
 
+/** 一行里最多记几个附件名：外站可以塞一百个，那不该把这一格撑爆 */
+export const MAX_ATTACH_ITEMS = 12;
+const ATTACH_NAME_MAX = 200;
+
+/**
+ * 附件清单存成一格 JSON 文本（只存名字与大小，内容一概不落这里 —— 原件在 R2，
+ * 而这一格是给人一眼看清"这封带了什么"用的）。
+ * 认不出的条目丢掉，不让一个坏条目把整封信的清单作废。
+ */
+export function serializeAttachments(
+  list: { name: string; bytes: number }[],
+): string {
+  const clean = (list ?? [])
+    .map((a) => ({
+      n: asStr(a?.name).trim().slice(0, ATTACH_NAME_MAX),
+      b: Math.max(0, toInt(a?.bytes, 0)),
+    }))
+    .filter((a) => a.n)
+    .slice(0, MAX_ATTACH_ITEMS);
+  return JSON.stringify(clean);
+}
+
+/** 读回来：脏文本、半截 JSON、不是数组的，一律当"没有清单"，不抛 */
+export function parseAttachments(
+  text: string,
+): { name: string; bytes: number }[] {
+  const t = asStr(text).trim();
+  if (!t) return [];
+  let v: unknown;
+  try {
+    v = JSON.parse(t);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((x) => ({
+      name: asStr((x as Record<string, unknown>)?.n),
+      bytes: toInt((x as Record<string, unknown>)?.b, 0),
+    }))
+    .filter((x) => x.name);
+}
+
 export function ensureMailboxSchema(sql: SqlTag): void {
   sql`CREATE TABLE IF NOT EXISTS mail_out (
         id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,9 +120,17 @@ export function ensureMailboxSchema(sql: SqlTag): void {
         bytes       INTEGER NOT NULL DEFAULT 0,
         read_flag   INTEGER NOT NULL DEFAULT 0,
         has_attach  INTEGER NOT NULL DEFAULT 0,
+        attach      TEXT    NOT NULL DEFAULT '',
         preview     TEXT    NOT NULL DEFAULT '',
         eml_key     TEXT    NOT NULL DEFAULT ''
       )`;
+  // 附件那一列是后加的：本地库里可能已经有今天早些时候建的 mail_in。
+  // 补列必须带 DEFAULT，否则老行读出来是 NULL，界面得替它猜"是没附件还是没这一列"
+  try {
+    sql`ALTER TABLE mail_in ADD COLUMN attach TEXT NOT NULL DEFAULT ''`;
+  } catch {
+    /* 已有该列 */
+  }
   // AUTOINCREMENT 在 DO 的 SQLite 上是可选项，老库缺索引也一样能长：
   // 这两条只是把「按时间倒序取最近若干行」变成索引扫，失败就当没建
   try {
@@ -157,6 +208,7 @@ interface MailInDbRow {
   bytes: number | null;
   read_flag: number | boolean;
   has_attach: number | boolean;
+  attach: string;
   preview: string;
   eml_key: string;
 }
@@ -172,6 +224,7 @@ function rowToIn(r: MailInDbRow): MailInRow {
     bytes: toInt(r.bytes, 0),
     read: fromBit(r.read_flag),
     hasAttachment: fromBit(r.has_attach),
+    attachments: parseAttachments(r.attach),
     preview: asStr(r.preview),
     emlKey: asStr(r.eml_key),
   };
@@ -196,11 +249,12 @@ export function insertMailIn(
     if (dup.length) return null;
   }
   sql`INSERT INTO mail_in (id, hash, at, from_addr, from_name, to_addr, subject,
-        bytes, read_flag, has_attach, preview, eml_key)
+        bytes, read_flag, has_attach, attach, preview, eml_key)
       VALUES (${row.id}, ${h}, ${row.at}, ${row.from.slice(0, 254)},
               ${row.fromName.slice(0, 120)}, ${row.to.slice(0, 254)},
               ${row.subject.slice(0, 500)}, ${Math.max(0, row.bytes)},
               ${toBit(row.read)}, ${toBit(row.hasAttachment)},
+              ${serializeAttachments(row.attachments ?? [])},
               ${row.preview.slice(0, MAIL_PREVIEW_MAX)}, ${row.emlKey.slice(0, 200)})`;
   // 超保留数的旧行连同它们的原件一起走 —— 只删行不删件就是静默攒字节
   const evicted = sql<{ eml_key: string }>`
@@ -219,7 +273,7 @@ export function listMailIn(sql: SqlTag, limit = 50): MailInRow[] {
   ensureMailboxSchema(sql);
   const rows = sql<MailInDbRow>`
     SELECT id, at, from_addr, from_name, to_addr, subject, bytes,
-           read_flag, has_attach, preview, eml_key
+           read_flag, has_attach, attach, preview, eml_key
     FROM mail_in ORDER BY at DESC
     LIMIT ${Math.max(1, toInt(limit, 20))}`;
   return rows.map(rowToIn);
@@ -236,7 +290,7 @@ export function findMailIn(sql: SqlTag, id: string): MailInRow | null {
   ensureMailboxSchema(sql);
   const rows = sql<MailInDbRow>`
     SELECT id, at, from_addr, from_name, to_addr, subject, bytes,
-           read_flag, has_attach, preview, eml_key
+           read_flag, has_attach, attach, preview, eml_key
     FROM mail_in WHERE id = ${id}`;
   return rows[0] ? rowToIn(rows[0]) : null;
 }

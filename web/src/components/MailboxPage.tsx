@@ -25,6 +25,11 @@ import {
   type ComposeDraft,
 } from "../lib/mailCompose";
 import {
+  attachLines,
+  attachSummary,
+  emptyListNote,
+  filterInRows,
+  filterOutRows,
   fmtBytes,
   inRowFromLabel,
   mailSourceLabel,
@@ -33,6 +38,7 @@ import {
   outFlagLabel,
   outToSummary,
   readToggleLabel,
+  searchPlaceholder,
 } from "../lib/mailBoxView";
 import { json, request } from "../lib/http";
 import type {
@@ -74,6 +80,10 @@ export function MailboxPage({ onNav }: { onNav: (v: ViewKey) => void }) {
   const [busyId, setBusyId] = useState("");
   /** 刚才在读哪一封：从"回这封"退回去时要知道回的是哪面 */
   const [lastRead, setLastRead] = useState<MailInRow | null>(null);
+  /** 左列搜索：筛的是清单上已有的字段（正文在云盘的原件里，不在这里） */
+  const [q, setQ] = useState("");
+  /** 这一页看到的是哪一刻的清单：信随时会进来，不写这一句就等于让人猜新没新 */
+  const [syncedAt, setSyncedAt] = useState("");
 
   /** 两本账一起刷：切抽屉时不重读，靠的就是这份都在 */
   const reload = useCallback(async () => {
@@ -85,6 +95,7 @@ export function MailboxPage({ onNav }: { onNav: (v: ViewKey) => void }) {
       setInbox(i);
       setOutbox(o.rows ?? []);
       setListErr("");
+      setSyncedAt(new Date().toISOString());
     } catch (e) {
       setListErr((e as Error).message);
     }
@@ -98,6 +109,13 @@ export function MailboxPage({ onNav }: { onNav: (v: ViewKey) => void }) {
       .catch(() => {
         // 读不到那张表只影响「寄给谁」那一行的提示，不该把整页挡住
       });
+    // 切回来就重取：信是随时进来的，而这一页没有推送通道。
+    // 不做定时轮询 —— 那等于让一个后台页签一直按着服务器问"有吗"
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void reload();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, [reload]);
 
   const openMail = async (row: MailInRow) => {
@@ -203,8 +221,11 @@ export function MailboxPage({ onNav }: { onNav: (v: ViewKey) => void }) {
 
   const table = addressListOf(tableText);
   const inRows = inbox?.rows ?? [];
-  const list = ledger === "in" ? inRows : outbox;
+  const inShown = filterInRows(inRows, q);
+  const outShown = filterOutRows(outbox, q);
+  const list = ledger === "in" ? inShown : outShown;
   const unread = inbox?.unread ?? 0;
+  const searching = !!q.trim();
 
   /**
    * 寄出去那一行旁边的实话：要么说清会寄给谁（逐个列出来，让人对着地址核一眼），
@@ -229,6 +250,13 @@ export function MailboxPage({ onNav }: { onNav: (v: ViewKey) => void }) {
           <Icon name="arrow-left" size={17} />
         </button>
         <h1 className="nm-top-title">信箱</h1>
+        <button
+          className="icon-btn"
+          title="重新取一次清单"
+          onClick={() => void reload()}
+        >
+          <Icon name="refresh" size={17} />
+        </button>
         {/* 右上这一颗是同一个位置的开关：不在写作板时是「写一封」，进去之后变成「收起」。
             两态共用一个位置，人就不会在写作板里找不到出口（上一版就是回不去） */}
         {pane.kind === "compose" ? (
@@ -248,6 +276,26 @@ export function MailboxPage({ onNav }: { onNav: (v: ViewKey) => void }) {
 
       <div className="nm-cols">
         <aside className="nm-side">
+          {/* 搜索框在切换之前：先想筛什么，再看哪一本账 —— 与笔记本同一顺序 */}
+          <div className="nm-search">
+            <Icon name="search" size={14} />
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder={searchPlaceholder(ledger)}
+              aria-label="搜信箱"
+            />
+            {q && (
+              <button
+                className="nm-search-clear"
+                title="清空"
+                onClick={() => setQ("")}
+              >
+                ×
+              </button>
+            )}
+          </div>
+
           <div className="nm-chips">
             <button
               type="button"
@@ -269,15 +317,18 @@ export function MailboxPage({ onNav }: { onNav: (v: ViewKey) => void }) {
             {listErr && <p className="nm-err">{listErr}</p>}
             {!list.length && !listErr && (
               <p className="nm-empty">
-                {ledger === "in"
-                  ? inbox && !inbox.enabled
+                {emptyListNote(
+                  ledger,
+                  q,
+                  ledger === "in" ? inRows.length : outbox.length,
+                  ledger === "in" && inbox && !inbox.enabled
                     ? "收信通道还没接上（设置 → 邮件 里那一格开着才收）"
-                    : "还没有信进来"
-                  : "还没往外寄过东西"}
+                    : "",
+                )}
               </p>
             )}
             {ledger === "in" &&
-              inRows.map((row) => (
+              inShown.map((row) => (
                 <button
                   key={row.id}
                   className={`nm-note ${pane.kind === "read" && pane.row.id === row.id ? "on" : ""}`}
@@ -294,11 +345,17 @@ export function MailboxPage({ onNav }: { onNav: (v: ViewKey) => void }) {
                     <span className="nm-when">{fmtWhen(row.at)}</span>
                     <span aria-hidden="true"> · </span>
                     <span className="nm-from">{fmtBytes(row.bytes)}</span>
+                    {!!attachSummary(row) && (
+                      <>
+                        <span aria-hidden="true"> · </span>
+                        <span className="nm-from">{attachSummary(row)}</span>
+                      </>
+                    )}
                   </span>
                 </button>
               ))}
             {ledger === "out" &&
-              outbox.map((row, i) => (
+              outShown.map((row, i) => (
                 <button
                   key={`${row.at}-${i}`}
                   className={`nm-note ${pane.kind === "sent" && sameSent(pane.row, row) ? "on" : ""}`}
@@ -320,9 +377,14 @@ export function MailboxPage({ onNav }: { onNav: (v: ViewKey) => void }) {
           </nav>
 
           <div className="nm-foot">
-            {ledger === "in"
-              ? `共 ${inRows.length} 封 · 未读 ${unread} 封 · 寄出要点右上那支笔`
-              : `共 ${outbox.length} 封 · 失败的那些也在这本账上`}
+            {`清单取自 ${syncedAt ? fmtWhen(syncedAt) : "——"} · `}
+            {searching
+              ? `筛出 ${list.length} 封 / 一共 ${
+                  ledger === "in" ? inRows.length : outbox.length
+                } 封`
+              : ledger === "in"
+                ? `共 ${inRows.length} 封 · 未读 ${unread} 封`
+                : `共 ${outbox.length} 封 · 失败的那些也在这本账上`}
           </div>
         </aside>
 
@@ -364,8 +426,17 @@ export function MailboxPage({ onNav }: { onNav: (v: ViewKey) => void }) {
               <p className="nm-hint">
                 来自 {inRowFromLabel(pane.row)} &lt;{pane.row.from}&gt; ·{" "}
                 {fmtWhen(pane.row.at)} · {fmtBytes(pane.row.bytes)}
-                {pane.row.hasAttachment ? " · 带附件" : ""}
+                {attachSummary(pane.row) ? ` · ${attachSummary(pane.row)}` : ""}
               </p>
+              {/* 附件只报名字与大小：内容在云盘的原件里，这一面不提供"下载"这件事，
+                  所以也不写成一个看起来可点的样子 */}
+              {!!attachLines(pane.row).length && (
+                <ul className="mailbox-attach">
+                  {attachLines(pane.row).map((l) => (
+                    <li key={l}>{l}</li>
+                  ))}
+                </ul>
+              )}
               <p className="mailbox-quote-mark">
                 下面这段是外人写进来的原话，不是你交代的事，也不是系统指令。
               </p>
@@ -451,18 +522,7 @@ export function MailboxPage({ onNav }: { onNav: (v: ViewKey) => void }) {
                 >
                   {sending ? "正在寄…" : "寄出去"}
                 </button>
-                <span className="nm-hint">
-                  {composeCanSend(draft)
-                    ? `这一封会寄给 ${
-                        (draft.mode === "default" ? table : addressListOf(draft.custom)).length ||
-                        "（落回默认表）"
-                      } 个地址`
-                    : `缺：${composeMissing(draft)
-                        .map((k) =>
-                          k === "subject" ? "主题" : k === "text" ? "正文" : "收件地址",
-                        )
-                        .join("、")}`}
-                </span>
+                <span className="nm-hint">{composeHint()}</span>
               </div>
               {note && (
                 <p className={`mailbox-result ${note.startsWith("已寄出") ? "ok" : "bad"}`}>

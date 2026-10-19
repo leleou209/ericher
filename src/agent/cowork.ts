@@ -5359,6 +5359,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       bytes: bytes.byteLength,
       read: false,
       hasAttachment: parsed.hasAttachment,
+      attachments: parsed.attachments,
       preview: parsed.text.slice(0, MAIL_PREVIEW_MAX),
       emlKey,
     };
