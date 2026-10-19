@@ -41,7 +41,8 @@ import {
 import type { SocketTransport } from "../src/mail/smtp";
 import type { SqlTag } from "../src/agent/state";
 import { CoworkAgent } from "../src/agent/cowork";
-import worker, { EML_FEED_MAX } from "../src/index";
+import worker from "../src/index";
+import { EML_FEED_MAX } from "../src/mail/mailbox";
 
 vi.mock("@cloudflare/ai-chat", () => ({ AIChatAgent: class {} }));
 vi.mock("agents", () => ({

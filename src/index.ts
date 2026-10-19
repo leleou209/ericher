@@ -42,6 +42,7 @@ import { DEFAULT_BASE_PROMPT } from "./agent/prompt";
 import { DEFAULT_RECAP_PROMPT } from "./agent/recap";
 // 邮件配置的字段闸：白名单收口在 store 里，路由不自己列可写字段（漏一格就是一格口子）
 import { parseMailConfigInput } from "./mail/store";
+import { EML_FEED_MAX } from "./mail/mailbox";
 import { analyzeUpload, attachBlock } from "./agent/attach";
 import {
   FOLDER_KEEP,
@@ -1208,7 +1209,6 @@ function mailLimit(url: URL): number {
 }
 
 /** 「喂一封」这一口的体积闸，按字符数算（DO 那边还有一道按字节的） */
-export const EML_FEED_MAX = 4 * 1024 * 1024;
 
 /**
  * 滑动续期：这次请求带的票剩余寿命不足半程，就在响应上顺手挂一张满寿命的新票。

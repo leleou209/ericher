@@ -30,6 +30,8 @@ export const EML_MAX_BYTES = 2 * 1024 * 1024;
  * 解析一封 20 MiB 的信要把它的 CPU 时间花光，而这一入口是公网任何人都能敲的。
  */
 export const INGEST_MAX_BYTES = 4 * 1024 * 1024;
+/** /api/mail/inbox/feed 的「喂一封」体积闸，按字符数算（DO 那边还有一道按字节的） */
+export const EML_FEED_MAX = 4 * 1024 * 1024;
 
 const SOURCES: readonly string[] = ["panel", "tool", "say"];
 

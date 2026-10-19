@@ -32,22 +32,40 @@ rmSync(stage, { recursive: true, force: true });
 mkdirSync(stage, { recursive: true });
 
 copyFileSync(worker, path.join(stage, "index.js"));
-copyTree(client, path.join(stage, "assets"));
+// Worker 自己的分块必须跟 index.js 的相对导入一起保留；静态前端另放 client/，
+// 两者都叫 assets/ 会互相覆盖（dry-run 不执行 Worker，查不出来）。
+copyTree(path.join(root, "dist", "ericher_app", "assets"), path.join(stage, "assets"));
+copyTree(client, path.join(stage, "client"));
 copyFileSync(path.join(root, "CHANGELOG.md"), path.join(stage, "CHANGELOG.md"));
+
+// 静态校验 Worker 的相对导入闭包：所有 ./assets/*.js 都必须真的在包里。
+const workerText = readFileSync(path.join(stage, "index.js"), "utf8");
+const workerRefs = new Set(
+  [...workerText.matchAll(/["'](\.\/assets\/[^"']+\.js)["']/g)].map((m) => m[1]),
+);
+if (!workerRefs.size) throw new Error("index.js 里找不到 Worker 分块导入，产物形状不对");
+for (const ref of workerRefs) {
+  if (!existsSync(path.join(stage, ref.replace(/^\.\//, "")))) {
+    throw new Error(`index.js 导入了 ${ref}，但包里没有这个分块`);
+  }
+}
 
 writeFileSync(
   path.join(stage, "wrangler.jsonc"),
   `{
-  // 这是 0.1.7 的完整部署包：index.js + assets/ 已构建完成，不需要再跑 npm install / build。
+  // 这是 0.1.7 的完整部署包：index.js 与 Worker 分块 assets/、前端静态资源 client/
+  // 都已构建完成，不需要再跑 npm install / build。
   // 换 Worker 名或资源名时，这里与下面三处一起改。
   "name": "ericher-app",
   "main": "index.js",
   "compatibility_date": "2026-05-14",
   "compatibility_flags": ["nodejs_compat"],
   "no_bundle": true,
+  // 只把 Worker 自己的分块当模块收进来；client/ 是静态资源，不能被当成模块。
+  "rules": [{ "type": "ESModule", "globs": ["assets/*.js"] }],
   "assets": {
     "binding": "ASSETS",
-    "directory": "./assets",
+    "directory": "./client",
     "not_found_handling": "single-page-application",
     "run_worker_first": true,
   },
@@ -100,8 +118,11 @@ writeFileSync(zipPath, zipped);
 
 // ── 回读校验：能解压、入口齐全、没有 .dev.vars、版本与提交号对得上 ──
 const back = unzipSync(zipped);
-for (const required of ["index.js", "wrangler.jsonc", "DEPLOY.md", "RELEASE.json", "assets/index.html"]) {
+for (const required of ["index.js", "wrangler.jsonc", "DEPLOY.md", "RELEASE.json", "client/index.html"]) {
   if (!back[required]) throw new Error(`打包结果缺少 ${required}`);
+}
+for (const ref of workerRefs) {
+  if (!back[ref.replace(/^\.\//, "")]) throw new Error(`打包结果缺少 Worker 分块 ${ref}`);
 }
 if (Object.keys(back).some((name) => name.endsWith(".dev.vars"))) throw new Error("打包结果里出现了 .dev.vars");
 if (!strFromU8(back["index.js"]).includes(version)) throw new Error("打包结果里的 index.js 版本号不对");
@@ -151,7 +172,7 @@ function readSecrets(file) {
 function deployDoc(version, commit) {
   return `# ericher ${version} · Cloudflare 部署包
 
-这是 0.1.7 的完整可部署产物（构建号 ${commit}）：Worker 已打包成 \`index.js\`，前端已构建在 \`assets/\`，配置在 \`wrangler.jsonc\`。包内没有源码、node_modules、\`.dev.vars\` 或任何密钥。
+这是 0.1.7 的完整可部署产物（构建号 ${commit}）：Worker 已打包成 \`index.js\`（分块在 \`assets/\`），前端已构建在 \`client/\`，配置在 \`wrangler.jsonc\`。包内没有源码、node_modules、\`.dev.vars\` 或任何密钥。
 
 ## 一条命令部署
 
@@ -162,7 +183,7 @@ npx wrangler@4 login
 npx wrangler@4 deploy
 \`\`\`
 
-\`wrangler deploy\` 会把本目录的 \`index.js\` 与 \`assets/\` 原样上传，不需要再安装依赖或构建。
+\`wrangler deploy\` 会把本目录的 \`index.js\`、\`assets/\` 与 \`client/\` 原样上传，不需要再安装依赖或构建。
 
 ## 首次部署前：建两个资源
 
