@@ -2,7 +2,7 @@
 
 跑在 Cloudflare Workers 上的单人 AI 助手兼接待台：管理员可安排任务，也可开放来客接待；不同来客的对话、记忆和私有文件按房间隔离。
 
-基于 Cloudflare Agents SDK + Durable Objects + React 构建，支持 PWA 与移动端访问。
+基于 Cloudflare Agents SDK + Durable Objects + React 构建，支持 PWA 与移动端访问。当前版本 **v0.1.7**，每个版本改了什么见 [CHANGELOG.md](CHANGELOG.md)。
 >说实在，这是一个用处相当狭窄的agent应用，当您想自己在自己的域名上部署agent，希望他能作为您与您家庭的名片和助手帮你处理来客，并且不希望被CF本身的套餐限制时，这个项目就会是一个完美的小工具，一个小玩具.
 
 - ericher可以在CF worker免费额度的情况下支持你在一日内完成数百次长聊天和工作调用，设置内也将向您显示方便您管理自己的余量开支，对于简单的个人用、日常用甚至于play一下，它都足够了。
