@@ -103,6 +103,7 @@ pre code{background:none;padding:0;font-size:13px;line-height:1.7;word-break:nor
     <a href="#personalize">个性化</a><a href="#matrix">矩阵</a><a href="#agent">给 AI</a><a href="#trouble">排错</a>
   </nav>
   <a class="ep-btn" href="/home">介绍页</a>
+  <a class="ep-btn" href="https://github.com/leleou209/ericher/releases" rel="noopener">下载部署包</a>
   <a class="ep-btn primary" href="/assistant">进入助手台</a>
 </div></header>
 
@@ -169,7 +170,38 @@ pre code{background:none;padding:0;font-size:13px;line-height:1.7;word-break:nor
         <li>一个可用的模型接口（Anthropic / OpenAI Chat / OpenAI Responses 三种线格式之一）。</li>
         <li>可选：SMTP 账号（发信）、Tavily key（搜索）、语音/绘图 key。没配时对应功能自动降级或关闭。</li>
       </ul>
-      <h3>2.2 从仓库部署</h3>
+      <h3>2.2 方式 A：下载预构建包（不想装构建链）</h3>
+      <p>GitHub Release 里有一个完整的部署包：Worker 已打包、前端已构建，不需要 <code>npm install</code> 或 <code>npm run build</code>。当前 0.1.7 的包名是 <code>ericher-0.1.7-cf.zip</code>。</p>
+      <p>下载页：<a href="https://github.com/leleou209/ericher/releases" rel="noopener">github.com/leleou209/ericher/releases</a>。直接链接：<code>https://github.com/leleou209/ericher/releases/download/v0.1.7/ericher-0.1.7-cf.zip</code>。大小 2,896,891 字节；SHA-256 <code>782edac4460882d03a16b9f1b3ce069152d4b44a261a7cc5fda938654a82b9a6</code>。</p>
+<pre><code># 1. 下载并校验（Linux / macOS）
+curl -L -o ericher-0.1.7-cf.zip \
+  https://github.com/leleou209/ericher/releases/download/v0.1.7/ericher-0.1.7-cf.zip
+sha256sum ericher-0.1.7-cf.zip
+# Windows PowerShell:
+# Get-FileHash .\ericher-0.1.7-cf.zip -Algorithm SHA256
+
+# 2. 解压并进入包目录
+unzip ericher-0.1.7-cf.zip -d ericher-0.1.7-cf
+cd ericher-0.1.7-cf
+
+# 3. 建资源（名字与包内 wrangler.jsonc 对应）
+npx wrangler@4 r2 bucket create ericher-memory
+npx wrangler@4 vectorize create ericher-memory-bge-m3 --dimensions 1024 --metric cosine
+
+# 4. 配 secret（逐项输入；包内不含任何密钥）
+npx wrangler@4 secret put API_ENDPOINT
+npx wrangler@4 secret put API_KEY
+npx wrangler@4 secret put API_MODEL
+npx wrangler@4 secret put ADMIN_PASSWORD
+npx wrangler@4 secret put GATE_PASSWORD
+npx wrangler@4 secret put SESSION_SECRET
+
+# 5. 部署（在包目录里执行）
+npx wrangler@4 deploy</code></pre>
+      <div class="ep-call"><b>不要用 Dashboard 直接传 index.js</b>这个 Worker 依赖 Durable Objects、R2、Vectorize 绑定和静态资源；Dashboard 的单文件上传带不上这些。用包目录里的 <code>npx wrangler@4 deploy</code> 才是完整部署。包内 <code>DEPLOY.md</code> 有同样的步骤。</div>
+      <p>以后版本从 <a href="https://github.com/leleou209/ericher/releases" rel="noopener">Releases</a> 取最新 zip，包名与校验值随版本变化；包内 <code>wrangler.jsonc</code> 的 <code>name</code> 与两个资源名可按自己的账号改。</p>
+
+      <h3>2.3 方式 B：从源码构建</h3>
 <pre><code>git clone https://github.com/leleou209/ericher.git
 cd ericher
 npm install
@@ -190,7 +222,7 @@ npm run deploy -- --dry-run
 npm run deploy</code></pre>
       <p>已有自己的域名与 Worker 时，把现用配置另存为 <code>.wrangler.local.jsonc</code>（已被 git 忽略），并用 <code>npm run deploy -- --private</code>；公开配置只部署到示例 Worker <code>ericher-app</code>。</p>
 
-      <h3>2.3 必需 secret</h3>
+      <h3>2.4 必需 secret</h3>
       <div class="ep-wrap-x"><table>
         <thead><tr><th>名字</th><th>用途</th><th>要点</th></tr></thead>
         <tbody>
@@ -204,7 +236,7 @@ npm run deploy</code></pre>
       </table></div>
       <p>可选：<code>MAIL_KEY</code>（SMTP 口令）、<code>TAVILY_API_KEY</code>、<code>ZHIPU_KEY</code> / <code>MIMO_API_KEY</code> / <code>DOUBAO_TTS_KEY</code>（语音）、<code>SILICONFLOW_API_KEY</code> / <code>MINIMAX_KEY</code>（绘画）、<code>CF_ACCOUNT_ID</code> + <code>CF_API_TOKEN</code>（额度校准）。完整清单见仓库 <code>.dev.vars.example</code>。</p>
 
-      <h3>2.4 第一次请求时发生了什么</h3>
+      <h3>2.5 第一次请求时发生了什么</h3>
       <div class="ep-kv">
         <dt>Worker</dt><dd>门禁与路由先启动；没有口令直接 503。静态资源由 <code>ASSETS</code> 绑定托管。</dd>
         <dt>DO</dt><dd>第一次进房时唤醒 <code>CoworkAgent</code>；建表、补列、读默认配置都在这一层完成。</dd>
@@ -394,7 +426,8 @@ npm run deploy</code></pre>
       <p>这一节给代为操作的人或 AI。每步都有可验证的结果；任一步失败就停，不要靠猜连续重试。</p>
       <h3>6.1 部署与门禁</h3>
       <ul class="ep-checks">
-        <li>Node ≥ 22.12；<code>npm install</code> 与 <code>npm run types</code> 成功。</li>
+        <li>预构建包：下载 zip → 校验 SHA-256 → 解压 → 目录内 <code>npx wrangler@4 deploy</code>（无需 npm install/build）；不要只传 index.js。</li>
+        <li>Node ≥ 22.12；<code>npm install</code> 与 <code>npm run types</code> 成功（走源码构建时）。</li>
         <li>R2 桶与 Vectorize 索引已创建，名字与 <code>wrangler.jsonc</code> 一致。</li>
         <li>六个必需 secret 已配置；<code>ADMIN_PASSWORD != GATE_PASSWORD</code>。</li>
         <li><code>npm run check</code> 全绿；<code>npm run deploy -- --dry-run</code> 的目标是预期 Worker。</li>

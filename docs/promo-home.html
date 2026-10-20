@@ -55,7 +55,7 @@ body{margin:0;background:var(--ep-bg);color:var(--ep-ink);font:16px/1.75 var(--e
 .ep-fact b{display:block;font:700 22px/1.2 var(--ep-serif)}
 .ep-fact span{font-size:13px;color:var(--ep-dim)}
 
-.ep-sec{padding:52px 0;border-bottom:1px solid var(--ep-line)}
+.ep-sec{padding:52px 0;border-bottom:1px solid var(--ep-line);scroll-margin-top:96px}
 .ep-sec h2{font:700 clamp(22px,3.4vw,30px)/1.35 var(--ep-serif);margin:0 0 8px}
 .ep-sec>p.sub{color:var(--ep-dim);margin:0 0 26px;max-width:64ch}
 .ep-two{display:grid;grid-template-columns:1fr 1fr;gap:34px;align-items:start}
@@ -131,6 +131,7 @@ pre code{background:none;padding:0;font-size:13px;line-height:1.7}
   <div class="ep-cta">
     <a class="ep-btn primary" href="/assistant">现在就试一句</a>
     <a class="ep-btn" href="/guide">看使用手册</a>
+    <a class="ep-btn" href="https://github.com/leleou209/ericher/releases" rel="noopener">下载部署包</a>
     <a class="ep-btn" href="https://github.com/leleou209/ericher" rel="noopener">在 GitHub 看源码</a>
   </div>
   <p class="ep-note">前提只有一个 Node 24（或 ≥22.12）与一个 Cloudflare 账号。<br>
@@ -238,8 +239,35 @@ pre code{background:none;padding:0;font-size:13px;line-height:1.7}
 </div></section>
 
 <section class="ep-sec" id="deploy"><div class="ep-wrap">
-  <h2>四步，装到你自己的账号下</h2>
-  <p class="sub">命令照 README 抄即可。第 4 步先 dry-run 看清目标，再真部署。</p>
+  <h2>下载与部署</h2>
+  <p class="sub">两条路：下载预构建包（不装构建链），或从源码构建。最后都是 <code>npx wrangler@4 deploy</code>。</p>
+
+  <div class="ep-mail" style="margin-bottom:22px">
+    <h3 style="margin:0 0 6px;font-size:17px">方式 A · 下载预构建包</h3>
+    <p style="margin:0 0 6px">包内是完整的 Worker 产物、静态资源与 <code>wrangler.jsonc</code>，不含密钥；解压后直接部署，不需要 <code>npm install</code> 或 <code>npm run build</code>。</p>
+    <p class="ep-note">下载页：<a href="https://github.com/leleou209/ericher/releases" rel="noopener">GitHub Releases</a> · 当前 <code>ericher-0.1.7-cf.zip</code>（2,896,891 字节）· SHA-256 <code>782edac4460882d03a16b9f1b3ce069152d4b44a261a7cc5fda938654a82b9a6</code></p>
+<pre><code>curl -L -o ericher-0.1.7-cf.zip \
+  https://github.com/leleou209/ericher/releases/download/v0.1.7/ericher-0.1.7-cf.zip
+sha256sum ericher-0.1.7-cf.zip
+# Windows: Get-FileHash .\ericher-0.1.7-cf.zip -Algorithm SHA256
+
+unzip ericher-0.1.7-cf.zip -d ericher-0.1.7-cf
+cd ericher-0.1.7-cf
+
+npx wrangler@4 r2 bucket create ericher-memory
+npx wrangler@4 vectorize create ericher-memory-bge-m3 --dimensions 1024 --metric cosine
+npx wrangler@4 secret put API_ENDPOINT
+npx wrangler@4 secret put API_KEY
+npx wrangler@4 secret put API_MODEL
+npx wrangler@4 secret put ADMIN_PASSWORD
+npx wrangler@4 secret put GATE_PASSWORD
+npx wrangler@4 secret put SESSION_SECRET
+npx wrangler@4 deploy</code></pre>
+    <p class="ep-warn">Dashboard 直接上传单个 <code>index.js</code> 带不上 Durable Objects / R2 / Vectorize 绑定和静态资源；完整部署必须用 <code>npx wrangler@4 deploy</code>。包内 <code>DEPLOY.md</code> 有同样步骤。</p>
+  </div>
+
+  <h3 style="margin:0 0 4px;font-size:17px">方式 B · 从源码构建</h3>
+  <p class="ep-note" style="margin-bottom:14px">适合要改代码的人。第 4 步先 dry-run 看清目标，再真部署。</p>
   <div class="ep-steps">
     <div class="ep-step"><h3><span>1</span>拉取与依赖</h3><pre><code>git clone https://github.com/leleou209/ericher.git
 cd ericher
@@ -261,7 +289,7 @@ npx wrangler secret put MAIL_KEY</code></pre><p class="ep-warn">来客口令与�
 npm run deploy -- --dry-run
 npm run deploy</code></pre><p class="ep-note">部署到你自己域名下，就配 <code>.wrangler.local.jsonc</code> 走 <code>npm run deploy -- --private</code>。</p></div>
   </div>
-  <p class="ep-note">不想在本地构建：从 GitHub Release 下载 <code>ericher-0.1.7-cf.zip</code>，解压后 <code>npx wrangler@4 deploy</code>；包内已含 Worker 与静态资源。</p>
+  <p class="ep-note">给 AI：先下载 zip 并校验 SHA-256，解压后读 <code>DEPLOY.md</code>，再建资源、配 secret、<code>npx wrangler@4 deploy</code>；不要只传 <code>index.js</code>。</p>
 </div></section>
 
 <section class="ep-sec" id="limits"><div class="ep-wrap">
