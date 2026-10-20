@@ -75,6 +75,7 @@
   当成入口，启动即报 `Incorrect type for map entry`；0.1.7 的部署包已用 `wrangler dev` 实机启动验证。
 - `release:pack` 把 Worker 分块（`assets/`）与前端静态资源（`client/`）分开打包，并静态校验
   `index.js` 的导入闭包；包内回读校验，本地 `.dev.vars` 的密钥值不会被带进去。
+- 工作台补载 `Panels.css`：`/assistant/workbench` 不再丢失矩阵布局（修复提交 `e021c1b`）。
 
 ### 已知边界（这一版没做的）
 
