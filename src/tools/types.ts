@@ -92,6 +92,24 @@ export interface ToolCtx {
   organize(): Promise<string>;
   /** 最近对话的纯文本视图，用于反思 / 整理 */
   transcript(limit?: number): string;
+  /** 主人侧：来客房间名册（按最近动静排序） */
+  listGuestRooms(): Promise<
+    Array<{
+      room: string;
+      nickname: string;
+      firstSeen: string;
+      lastSeen: string;
+    }>
+  >;
+  /** 主人侧：按房间读最近原话；找不到或没记录返回 null */
+  readGuestRoom(
+    room: string,
+    limit?: number,
+  ): Promise<{
+    nickname: string;
+    room: string;
+    messages: Array<{ role: string; text: string }>;
+  } | null>;
   /** 最近消息的 id + 摘要，反馈类工具靠它定位某条消息 */
   recentMessages(
     limit?: number,

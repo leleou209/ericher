@@ -447,7 +447,7 @@ function GuestIntro({
         <p style={line}>先说说你是谁、为什么来。能办的事，我当场办。</p>
         <p style={{ ...line, marginBottom: 20 }}>办不了的，原话记下来转达。</p>
         <p style={{ ...line, fontSize: 12, marginBottom: 20 }}>
-          对话与操作会留痕存档，供管理员查阅。
+          对话与操作会留痕存档；管理员可在自己的屋里按需查看本房间的聊天记录。
         </p>
         {/* 三种登记方式的小切换条：样式自成一体，跟介绍页其他部分一样不借外部类 */}
         <div

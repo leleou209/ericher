@@ -140,6 +140,19 @@ export function markEventsDelivered(sql: SqlTag, ids: string[]): void {
   }
 }
 
+/** 某个时间点之后出现过某类动静的 ref（房间）。用来判断「这间屋最近有没有真的说话」。 */
+export function listEventRefs(
+  sql: SqlTag,
+  kind: string,
+  sinceIso: string,
+): string[] {
+  ensureEventSchema(sql);
+  return sql<{ ref: string }>`
+    SELECT DISTINCT ref FROM events
+    WHERE scope = 'global' AND kind = ${kind} AND created > ${sinceIso} AND ref <> ''
+  `.map((r) => r.ref);
+}
+
 /** 同一屋、同一类动静在窗口内是否已经记过 —— 重连、连发不该刷屏。 */
 export function hasRecentEvent(
   sql: SqlTag,

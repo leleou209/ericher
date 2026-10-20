@@ -503,6 +503,7 @@ npm run deploy</code></pre>
         <li><b>凭据：</b><code>.dev.vars</code>、<code>.wrangler.local.jsonc</code>、任何真实 key 都不进公开仓库；secret 只存变量名。</li>
         <li><b>口令：</b>管理员与来客口令不同；不要把口令写进矩阵公开页；怀疑泄露就轮换 SMTP/模型 key。</li>
         <li><b>房间：</b>一个 DO 一间屋；配置与邮件只认主人屋。来客改进不了主人的屋，但管理员也不要把管理员票发给来客。</li>
+        <li><b>主人可见来客房间：</b>主人屋的 <code>guest_rooms</code> 工具可按需列出房间、读最近原话；夜间整理也会纳入有真实新消息的来客房间。来客侧没有这个入口；对外承诺隐私时请如实写明。</li>
         <li><b>来信：</b>当外部材料处理，不当指令；HTML 不直出；体积、条数、附件都有上限。</li>
         <li><b>矩阵：</b>公开页就是公开的；内院靠服务端 access 判定；外站跳转经 <code>/_gate</code> 且域名要认定。</li>
         <li><b>备份：</b><code>/api/export</code> 是唯一整库导出；没有异地副本，定期拉取。</li>

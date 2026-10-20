@@ -9,7 +9,9 @@ import { OWNER_AGENT } from "../auth";
 import { listMailIn, listMailOut } from "../mail/mailbox";
 import { countMemories, deleteMemory, deleteVector } from "./memory";
 import type { CoworkAgent } from "./cowork";
+import { listEventRefs } from "./events";
 import { getSession, listSessions, loadSessionMessages } from "./sessionStore";
+import { listVisitorRooms } from "./visitor";
 import type { SqlTag } from "./state";
 
 const HEARTBEAT_SECONDS = 3600;
@@ -133,8 +135,10 @@ export async function runNightlyMaintenance(
     const started = Date.now();
     const prev = readCursor(agent.db, "nightly");
     const since = prev > 0 ? prev : started - 24 * 60 * 60 * 1000;
+    const sinceIso = new Date(since).toISOString();
     const parts: string[] = [];
     let sessions = 0;
+    let guests = 0;
     let failed = 0;
 
     const candidates = listSessions(agent.db)
@@ -184,11 +188,44 @@ export async function runNightlyMaintenance(
       }
     }
 
+    // 来客房间：只读有真实新消息的房间；重连/进门不算，避免拿旧对话反复整理。
+    try {
+      const roster = new Map(
+        listVisitorRooms(agent.db).map((r) => [r.room, r]),
+      );
+      const rooms = listEventRefs(
+        agent.db,
+        "visitor-message",
+        sinceIso,
+      ).slice(0, NIGHTLY_SESSIONS);
+      for (const room of rooms) {
+        const r = roster.get(room);
+        try {
+          const stub = env.COWORK_AGENT.get(env.COWORK_AGENT.idFromName(room));
+          const d = await stub.guestTranscript(NIGHTLY_MESSAGES);
+          if (!d?.messages.length) continue;
+          guests++;
+          parts.push(
+            `## 来客房间：${d.nickname || r?.nickname || "未称呼"} (${room})\n` +
+              d.messages.map((m) => `${m.role}: ${m.text}`).join("\n"),
+          );
+        } catch (e) {
+          failed++;
+          console.warn(
+            "[nightly] 读来客房间失败",
+            room,
+            String((e as Error)?.message ?? e),
+          );
+        }
+      }
+    } catch {
+      // 老实例还没有名册/事件表；没有来客可整理
+    }
+
     // 邮箱与对话一起整理：只取游标之后的新流水，没有就什么都不做。
     let inbox = 0;
     let outbox = 0;
     try {
-      const sinceIso = new Date(since).toISOString();
       const mailIn = listMailIn(agent.db, 200)
         .filter((r) => r.at > sinceIso)
         .slice(0, 10);
@@ -223,7 +260,7 @@ export async function runNightlyMaintenance(
     );
     writeCursor(agent.db, "nightly", started);
     console.log(
-      `[nightly] sessions=${sessions} inbox=${inbox} outbox=${outbox} insights=${saved} failed=${failed}`,
+      `[nightly] sessions=${sessions} guests=${guests} inbox=${inbox} outbox=${outbox} insights=${saved} failed=${failed}`,
     );
   });
 }
