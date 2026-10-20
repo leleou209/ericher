@@ -37,6 +37,7 @@ import type {
   MatrixTheme,
   R2File,
 } from "../lib/types";
+import "./Panels.css";
 
 /**
  * 网页矩阵工作台：页面按层级路径安放，四档身份（公开/持票/管理员/指定档位），
