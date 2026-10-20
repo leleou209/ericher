@@ -376,6 +376,8 @@ import { coalesceStream } from "./coalesce";
 import { Thinker } from "./think";
 import {
   installRuntime,
+  NIGHTLY_MESSAGES,
+  NIGHTLY_TEXT,
   runContinueTask,
   runHeartbeat,
   runNightlyMaintenance,
@@ -1652,6 +1654,33 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   }
 
   /**
+   * 夜间整理的全站读取口：主屋按目录逐场调用，场屋只回本场游标之后的消息。
+   * 这里不做模型调用，也不写对话；整理由主屋统一做一次。
+   */
+  async nightlyDigest(sinceMs: number): Promise<{
+    title: string;
+    lastActive: string;
+    messages: Array<{ role: string; text: string }>;
+  } | null> {
+    const id = this.fixedSessionId;
+    if (!id) return null;
+    const s = getSession(this.db, id);
+    if (!s || s.archived) return null;
+    const at = new Date(s.lastActive || 0).getTime();
+    if (!Number.isFinite(at) || at <= sinceMs) return null;
+    const messages = loadSessionMessages(this.db, id)
+      .slice(-NIGHTLY_MESSAGES)
+      .map((m) => ({
+        role: m.role,
+        text: messageText(m).slice(0, NIGHTLY_TEXT),
+      }))
+      .filter((m) => m.text);
+    return messages.length
+      ? { title: s.title, lastActive: s.lastActive, messages }
+      : null;
+  }
+
+  /**
    * 换会话前把正在说的那一轮收干净：推进轮次代际，让迟到的结果被跳过，
    * 顺手清掉客户端「正在回应…」，否则新一场开局就是忙碌态。
    */
@@ -2436,6 +2465,40 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       }
     }
     return `已整理：${before} 条对话压缩为摘要（累计 ${summaries.length} 条），新增 ${saved} 条洞察记忆。`;
+  }
+
+  /**
+   * 全站夜间整理：主屋把各场新消息与邮箱流水拼成一份材料，只在这里烧一次维护模型。
+   * 不写对话；游标与日志由 runtime 负责。
+   */
+  async globalNightlyOrganize(material: string): Promise<number> {
+    if (!material.trim()) return 0;
+    const digest = await this.maintenance(
+      "从以下全站新对话与邮箱流水中提取 1-2 条值得长期记住的洞察。只输出洞察本身，每行一条；没有就输出 SKIP。",
+      material,
+    );
+    if (!digest || digest.includes("SKIP")) return 0;
+    let saved = 0;
+    for (const line of digest
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .slice(0, 2)) {
+      const entry = insertMemory(this.db, {
+        type: "insight",
+        content: line.slice(0, 300),
+        shelf: "reflections",
+      });
+      this.enqueueVector({
+        id: entry.id,
+        content: entry.content,
+        type: entry.type,
+        shelf: entry.shelf,
+        tags: entry.tags,
+      });
+      saved++;
+    }
+    return saved;
   }
 
   /** 手上的「自己的活」。夜间整理与休息态回想都要烧主模型，撞在一起会往记忆里写两条。 */

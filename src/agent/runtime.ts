@@ -5,14 +5,23 @@
 // 块间用 schedule() 交还控制权再续跑，游标落 SQLite。
 
 import type { UIMessage } from "ai";
+import { OWNER_AGENT } from "../auth";
+import { listMailIn, listMailOut } from "../mail/mailbox";
 import { countMemories, deleteMemory, deleteVector } from "./memory";
 import type { CoworkAgent } from "./cowork";
+import { getSession, listSessions, loadSessionMessages } from "./sessionStore";
 import type { SqlTag } from "./state";
 
 const HEARTBEAT_SECONDS = 3600;
-const NIGHTLY_CRON = "0 4 * * *";
+/** 04:00 Asia/Shanghai；cron-schedule 按运行时 UTC 解释。 */
+const NIGHTLY_CRON = "0 20 * * *";
 /** 单个 CPU 块的时间预算，留出余量 */
 const CHUNK_BUDGET_MS = 25_000;
+/** 一次全站整理最多带几场对话、每场几条、每条多长 */
+const NIGHTLY_SESSIONS = 8;
+export const NIGHTLY_MESSAGES = 8;
+export const NIGHTLY_TEXT = 600;
+const NIGHTLY_MATERIAL = 12_000;
 /** memories 表超过这个条数就开始裁剪最不重要的 */
 const MEMORY_SOFT_CAP = 800;
 /**
@@ -24,11 +33,34 @@ const PRUNE_PROTECT_MS = 30 * 24 * 60 * 60 * 1000;
 
 export function installRuntime(agent: CoworkAgent): void {
   ensureRuntimeSchema(agent.db);
-  // 来客那间不排夜间整理：它没有记忆库也没有经验库，整理只会白烧一次模型调用
+  // 来客那间不排后台整理：它没有记忆库也没有经验库，整理只会白烧一次模型调用
   if (!agent.isOwnerRoom) return;
   // scheduleEvery 与 cron 形式的 schedule 都默认幂等，onStart 每次唤醒重复调用是安全的
   void agent.scheduleEvery(HEARTBEAT_SECONDS, "heartbeat").catch(() => {});
-  void agent.schedule(NIGHTLY_CRON, "nightlyMaintenance").catch(() => {});
+  // 夜间整理只在主屋跑一次，读全站会话与邮箱；场屋不再各自排程。
+  // 旧版本曾在每间场屋排过 nightlyMaintenance，这里顺手把旧闹钟撤掉；
+  // 主屋也撤掉旧的 04:00 UTC 那条，只留新的 20:00 UTC。
+  const cleanup = agent.listSchedules().then((list) =>
+    Promise.all(
+      list
+        .filter(
+          (s) =>
+            (s as { callback?: string }).callback === "nightlyMaintenance" &&
+            (agent.name !== OWNER_AGENT ||
+              (s as { cron?: string }).cron !== NIGHTLY_CRON),
+        )
+        .map((s) => agent.cancelSchedule(s.id)),
+    ),
+  );
+  if (agent.name !== OWNER_AGENT) {
+    void cleanup.catch(() => {});
+    return;
+  }
+  void cleanup
+    .finally(() => {
+      void agent.schedule(NIGHTLY_CRON, "nightlyMaintenance").catch(() => {});
+    })
+    .catch(() => {});
 }
 
 function ensureRuntimeSchema(sql: SqlTag): void {
@@ -93,42 +125,116 @@ export async function runNightlyMaintenance(
   agent: CoworkAgent,
   env: Env,
 ): Promise<void> {
+  // 旧场屋可能还留着升级前排下的闹钟；到点也只在主屋做，不白烧模型。
+  if (agent.name !== OWNER_AGENT) return;
+  // 旧版本的 04:00 UTC 闹钟可能还在；只认新的 20:00 UTC（北京时间 04:00）。
+  if (new Date().getUTCHours() !== 20) return;
   await agent.keepAliveWhile(async () => {
-    const before = countMemories(agent.db);
-    // 走闸门那一版：正好有一场回想在跑时，让回想先跑完（那是他刚聊完的那一段，
-    // 比这场定时整理更近）。整理今晚不做，明晚还有 —— 撞着跑才会白烧两次模型。
-    const report = await agent.organizeGuarded();
-    const pruned = await pruneMemories(agent, env);
-    const after = countMemories(agent.db);
+    const started = Date.now();
+    const prev = readCursor(agent.db, "nightly");
+    const since = prev > 0 ? prev : started - 24 * 60 * 60 * 1000;
+    const parts: string[] = [];
+    let sessions = 0;
+    let failed = 0;
 
-    const worthTelling = after > before || pruned.length > 0;
-    if (!worthTelling) return;
+    const candidates = listSessions(agent.db)
+      .filter((s) => {
+        if (s.archived) return false;
+        const at = new Date(s.lastActive || 0).getTime();
+        return Number.isFinite(at) && at > since;
+      })
+      .sort(
+        (a, b) =>
+          new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime(),
+      )
+      .slice(0, NIGHTLY_SESSIONS);
 
-    const lines = [
-      report
-        ? `🌙 夜间整理完成：${report}`
-        : "🌙 夜间整理这次让位给了回想，没跑。",
-    ];
-    if (pruned.length) {
-      // 裁了什么要让管理员看得见：静默消失的记忆比没记忆更糟 —— 他不知道该补记什么
-      const shown = pruned
-        .slice(0, 5)
-        .map((s) => `「${s}…」`)
-        .join(" ");
-      lines.push(
-        `裁了 ${pruned.length} 条低权重记忆（当前共 ${after} 条）：${shown}${pruned.length > 5 ? " 等" : ""}`,
-      );
+    for (const s of candidates) {
+      try {
+        let messages: Array<{ role: string; text: string }>;
+        let title = s.title;
+        let lastActive = s.lastActive;
+        if (s.home) {
+          const stub = env.COWORK_AGENT.get(
+            env.COWORK_AGENT.idFromName(s.home),
+          );
+          const digest = await stub.nightlyDigest(since);
+          if (!digest) continue;
+          messages = digest.messages;
+          title = digest.title;
+          lastActive = digest.lastActive;
+        } else {
+          messages = loadSessionMessages(agent.db, s.id)
+            .slice(-NIGHTLY_MESSAGES)
+            .map((m) => ({
+              role: m.role,
+              text: textOfMessage(m).slice(0, NIGHTLY_TEXT),
+            }))
+            .filter((m) => m.text);
+        }
+        if (!messages.length) continue;
+        sessions++;
+        parts.push(
+          `## 对话：${title} · ${lastActive}\n` +
+            messages.map((m) => `${m.role}: ${m.text}`).join("\n"),
+        );
+      } catch (e) {
+        failed++;
+        console.warn("[nightly] 读会话失败", s.id, String((e as Error)?.message ?? e));
+      }
     }
 
-    // 定时任务推送必须用 persistMessages（只落库 + 广播），
-    // 用 saveMessages 会白烧一整轮 LLM 调用。
-    const msg: UIMessage = {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      parts: [{ type: "text", text: lines.join("\n") }],
-    };
-    await agent.persistMessages([...agent.messages, msg]);
+    // 邮箱与对话一起整理：只取游标之后的新流水，没有就什么都不做。
+    let inbox = 0;
+    let outbox = 0;
+    try {
+      const sinceIso = new Date(since).toISOString();
+      const mailIn = listMailIn(agent.db, 200)
+        .filter((r) => r.at > sinceIso)
+        .slice(0, 10);
+      const mailOut = listMailOut(agent.db, 200)
+        .filter((r) => r.at > sinceIso)
+        .slice(0, 10);
+      inbox = mailIn.length;
+      outbox = mailOut.length;
+      for (const r of mailIn) {
+        parts.push(
+          `## 来信：${r.at} · ${r.fromName || r.from} · ${r.subject}\n${r.preview}`,
+        );
+      }
+      for (const r of mailOut) {
+        parts.push(
+          `## 寄出：${r.at} · ${r.to.join("、")} · ${r.subject}\n${
+            r.ok ? "成功" : r.error || "失败"
+          }`,
+        );
+      }
+    } catch {
+      // 老实例可能还没有邮件表；没有新邮件可整理
+    }
+
+    if (!parts.length) {
+      if (!failed) writeCursor(agent.db, "nightly", started);
+      return;
+    }
+
+    const saved = await agent.globalNightlyOrganize(
+      parts.join("\n\n").slice(0, NIGHTLY_MATERIAL),
+    );
+    writeCursor(agent.db, "nightly", started);
+    console.log(
+      `[nightly] sessions=${sessions} inbox=${inbox} outbox=${outbox} insights=${saved} failed=${failed}`,
+    );
   });
+}
+
+/** 会话消息里的纯文本；与分析无关的工具块不进来。 */
+function textOfMessage(m: UIMessage): string {
+  return m.parts
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join(" ")
+    .trim();
 }
 
 // ── 长任务分步续跑 ─────────────────────────────────────
