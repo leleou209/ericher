@@ -1,23 +1,22 @@
 /**
- * 门禁口令与 token 测试（云端这一份）。
+ * 门禁口令与会话票测试（云端这一份）。
  *
- * 这批用例盯着两件事：
- * 1. 没配口令时必须谁都进不来。公网 Worker 不能带内置默认口令，
- *    漏配 secret 必须显式失败，因此在这里单独验证。
- * 2. 没配签名密钥时不许签、也不许验。空密钥签出来的票如果还能被接受，
- *    任何人都能给自己签发一张 admin 票。
- *
- * 运行: npx vitest run test/auth.test.ts
+ * 现在 Cookie 只带随机 sid；身份与过期在主屋的 auth_sessions 里。
+ * 这批用例盯：没配口令/密钥必须失败；每登录一张新票；篡改/撤销/过期/换密钥都进不来；
+ * Cookie 属性（HttpOnly / SameSite / Secure / __Host-）与续期边界。
  */
 
 import { describe, expect, it } from "vitest";
 import {
   adminPassword,
+  authToken,
   clearCookie,
+  clearCookies,
   cookieSecure,
   gatePassword,
   issueToken,
-  renewToken,
+  renewSession,
+  revokeSession,
   roleForPassword,
   SESSION_RENEW_LEFT_SEC,
   SESSION_TTL_SEC,
@@ -25,10 +24,18 @@ import {
   tokenNeedsRenewal,
   verifyToken,
   verifyTokenInfo,
-  type Role,
 } from "../src/auth";
+import { attachFakeSessions, type FakeSession } from "./fakeSessions";
 
-const env = (v: Partial<Env> = {}) => v as unknown as Env;
+const DAY_SEC = 24 * 60 * 60;
+const store = () => new Map<string, FakeSession>();
+function env(v: Partial<Env> = {}, sessions = store()) {
+  const agent = attachFakeSessions({}, sessions);
+  return {
+    ...v,
+    COWORK_AGENT: { idFromName: (n: string) => n, get: () => agent },
+  } as unknown as Env;
+}
 
 describe("口令只在配了的情况下才算数", () => {
   it("三项全缺：任何口令都换不到角色，没有内置默认值", () => {
@@ -61,385 +68,167 @@ describe("口令只在配了的情况下才算数", () => {
   });
 });
 
-describe("token 的签发与校验", () => {
-  it("配了密钥：签出去的原样验得回来，角色跟着票走", async () => {
-    const e = env({ GATE_PASSWORD: "menkou", SESSION_SECRET: "s3cr3t" });
+describe("会话票的签发与校验", () => {
+  it("签出去的原样验得回来，角色跟着会话说", async () => {
+    const e = env({ SESSION_SECRET: "s3cr3t" });
     const admin = await issueToken(e, "admin");
     expect(await verifyToken(e, admin)).toBe("admin");
     const guest = await issueToken(e, "user");
     expect(await verifyToken(e, guest)).toBe("user");
   });
 
-  it("过期票不作数", async () => {
+  it("每次签发都是不同的 sid：同角色同秒也拿不到同一张票", async () => {
     const e = env({ SESSION_SECRET: "s3cr3t" });
-    const stale = await issueToken(e, "admin", -10);
-    expect(await verifyToken(e, stale)).toBeNull();
+    const a = await issueToken(e, "admin");
+    const b = await issueToken(e, "admin");
+    expect(a).not.toBe(b);
+    expect(await verifyToken(e, a)).toBe("admin");
+    expect(await verifyToken(e, b)).toBe("admin");
   });
 
-  it("换密钥即作废：旧票在新密钥下验不过", async () => {
-    const old = env({ SESSION_SECRET: "old" });
-    const token = await issueToken(old, "admin");
-    expect(await verifyToken(env({ SESSION_SECRET: "new" }), token)).toBeNull();
+  it("会话带 type / card：校验时原样返回", async () => {
+    const e = env({ SESSION_SECRET: "s3cr3t" });
+    const token = await issueToken(e, "user", undefined, "vip", "abcd1234");
+    expect(await verifyTokenInfo(e, token)).toMatchObject({
+      role: "user",
+      type: "vip",
+      card: "abcd1234",
+    });
   });
 
-  it("换了签名密钥，旧票一律作废；门禁码怎么改都与票据无关", async () => {
-    const before = env({ SESSION_SECRET: "s1" });
-    const token = await issueToken(before, "user");
-    expect(await verifyToken(before, token)).toBe("user");
-    expect(await verifyToken(env({ SESSION_SECRET: "s2" }), token)).toBeNull();
-    // 门禁码不在签名链里：换门禁码不动摇任何一张票
-    expect(
-      await verifyToken(
-        env({ SESSION_SECRET: "s1", GATE_PASSWORD: "b" }),
-        token,
-      ),
-    ).toBe("user");
+  it("非法 type / card 在签发时就拒绝", async () => {
+    const e = env({ SESSION_SECRET: "s3cr3t" });
+    await expect(
+      issueToken(e, "user", undefined, "Vip!", "abcd1234"),
+    ).rejects.toThrow();
+    await expect(
+      issueToken(e, "user", undefined, "vip", "bad id"),
+    ).rejects.toThrow();
   });
 
-  it("缺密钥：签会抛错，形状再对的票也验不过", async () => {
-    const e = env();
-    await expect(issueToken(e, "admin")).rejects.toThrow(/门禁未配置/);
-    const forged = await signWith(
-      "attacker-guess",
-      Date.now() + 60_000,
-      "admin",
-    );
-    expect(await verifyToken(e, forged)).toBeNull();
+  it("没配签名密钥：签不出、也验不过", async () => {
+    const e = env({ GATE_PASSWORD: "menkou" });
+    await expect(issueToken(e, "admin")).rejects.toThrow(/SESSION_SECRET/);
+    expect(await verifyToken(e, "a.b")).toBeNull();
+  });
+
+  it("签名被改、格式不对、空票都进不来", async () => {
+    const e = env({ SESSION_SECRET: "s3cr3t" });
+    const token = await issueToken(e, "admin");
+    const [sid, sig] = token.split(".");
+    expect(await verifyToken(e, `${sid}.${sig.slice(0, -1)}x`)).toBeNull();
     expect(await verifyToken(e, "1700000000000.admin.deadbeef")).toBeNull();
     expect(await verifyToken(e, "garbage")).toBeNull();
     expect(await verifyToken(e, null)).toBeNull();
   });
 
-  it("空密钥这条路本身也走不通：WebCrypto 就拒绝零长 HMAC 密钥", async () => {
-    await expect(
-      crypto.subtle.importKey(
-        "raw",
-        new TextEncoder().encode(""),
-        { name: "HMAC", hash: "SHA-256" },
-        false,
-        ["sign"],
-      ),
-    ).rejects.toThrow(/Zero-length key/);
-  });
-});
-
-describe("签名密钥不落门禁码", () => {
-  it("只配门禁码：什么票都签不出来 —— 门禁码是来客知道的东西，不能当签名钥", async () => {
-    const e = env({ GATE_PASSWORD: "menkou" });
-    await expect(issueToken(e, "admin")).rejects.toThrow(/SESSION_SECRET/);
-    await expect(issueToken(e, "user")).rejects.toThrow(/SESSION_SECRET/);
+  it("换签名密钥：旧票全部失效，哪怕会话记录还在", async () => {
+    const sessions = store();
+    const before = env({ SESSION_SECRET: "old" }, sessions);
+    const token = await issueToken(before, "admin");
+    expect(await verifyToken(env({ SESSION_SECRET: "new" }, sessions), token)).toBeNull();
+    expect(await verifyToken(env({ SESSION_SECRET: "old" }, sessions), token)).toBe("admin");
   });
 
-  it("只配门禁码：仿签的 admin 票验不过", async () => {
-    const e = env({ GATE_PASSWORD: "menkou" });
-    const forged = await signWith("menkou", Date.now() + 60_000, "admin");
-    expect(await verifyTokenInfo(e, forged)).toBeNull();
-  });
-
-  it("只配门禁码：仿签的 user 票连别人的卡 id 一起签上也验不过 —— 这本来是能进别人房间的那条链", async () => {
-    const e = env({ GATE_PASSWORD: "menkou" });
-    const forged = await signWithCard(
-      "menkou",
-      Date.now() + 60_000,
-      "user",
-      "common",
-      "abcd1234",
-    );
-    expect(await verifyTokenInfo(e, forged)).toBeNull();
-  });
-
-  it("配了 SESSION_SECRET：user 票带卡照常签验，拿门禁码仿签的照旧进不来", async () => {
-    const e = env({ SESSION_SECRET: "s3cr3t", GATE_PASSWORD: "menkou" });
-    const token = await issueToken(e, "user", undefined, "common", "abcd1234");
-    expect(await verifyTokenInfo(e, token)).toEqual({
-      role: "user",
-      type: "common",
-      card: "abcd1234",
-      exp: expect.any(Number),
-    });
-    const forged = await signWithCard(
-      "menkou",
-      Date.now() + 60_000,
-      "user",
-      "common",
-      "abcd1234",
-    );
-    expect(await verifyTokenInfo(e, forged)).toBeNull();
-  });
-
-  it("只配 ADMIN_PASSWORD：票用口令签、用口令验，照常工作", async () => {
-    const e = env({ ADMIN_PASSWORD: "guanmen" });
+  it("会话被撤销：票即使签名有效也不再认", async () => {
+    const e = env({ SESSION_SECRET: "s3cr3t" });
     const token = await issueToken(e, "admin");
-    expect(await verifyTokenInfo(e, token)).toEqual({
-      role: "admin",
-      exp: expect.any(Number),
-    });
+    expect(await revokeSession(e, token)).toBe(true);
+    expect(await verifyToken(e, token)).toBeNull();
+    expect(await revokeSession(e, token)).toBe(false);
+  });
+
+  it("会话记录不存在（换库/清理）：按未登录处理", async () => {
+    const e = env({ SESSION_SECRET: "s3cr3t" });
+    const token = await issueToken(e, "admin");
+    expect(
+      await verifyToken(env({ SESSION_SECRET: "s3cr3t" }), token),
+    ).toBeNull();
+  });
+
+  it("过期会话：签发时就带过去的时间，也验不过", async () => {
+    const e = env({ SESSION_SECRET: "s3cr3t" });
+    const stale = await issueToken(e, "admin", -10);
+    expect(await verifyToken(e, stale)).toBeNull();
   });
 });
 
-describe("token v2：带档位的来客票", () => {
-  it("带档位签出四段票：role 和 type 都验得回来", async () => {
-    const e = env({ SESSION_SECRET: "s3cr3t" });
-    const token = await issueToken(e, "user", undefined, "vip");
-    expect(token.split(".")).toHaveLength(4);
-    expect(await verifyToken(e, token)).toBe("user");
-    expect(await verifyTokenInfo(e, token)).toEqual({
-      role: "user",
-      type: "vip",
-      exp: expect.any(Number),
-    });
-  });
-
-  it("admin 不分档：给了 type 也只签三段", async () => {
-    const e = env({ SESSION_SECRET: "s3cr3t" });
-    const token = await issueToken(e, "admin", undefined, "vip");
-    expect(token.split(".")).toHaveLength(3);
-    expect(await verifyTokenInfo(e, token)).toEqual({
-      role: "admin",
-      exp: expect.any(Number),
-    });
-  });
-
-  it("v1 老票（三段）照样验得过，type 视为没有", async () => {
-    const e = env({ SESSION_SECRET: "s3cr3t" });
-    const old = await signWith("s3cr3t", Date.now() + 60_000, "user");
-    expect(old.split(".")).toHaveLength(3);
-    expect(await verifyTokenInfo(e, old)).toEqual({
-      role: "user",
-      exp: expect.any(Number),
-    });
-  });
-
-  it("档位对不上签名：整张票作废 —— 档位是签进去的，改不动", async () => {
-    const e = env({ SESSION_SECRET: "s3cr3t" });
-    const token = await issueToken(e, "user", undefined, "vip");
-    const [exp, role, , sig] = token.split(".");
-    const swapped = `${exp}.${role}.other.${sig}`;
-    expect(await verifyTokenInfo(e, swapped)).toBeNull();
-    expect(await verifyToken(e, swapped)).toBeNull();
-  });
-
-  it("type 长得不像档位 id：签名是好的也不算数", async () => {
-    const e = env({ SESSION_SECRET: "s3cr3t" });
-    const bad = await signWithTyped(
-      "s3cr3t",
-      Date.now() + 60_000,
-      "user",
-      "BAD.TYPE",
-    );
-    expect(await verifyTokenInfo(e, bad)).toBeNull();
-  });
-
-  it("过期票和乱写的四段票一样不作数", async () => {
-    const e = env({ SESSION_SECRET: "s3cr3t" });
-    const stale = await issueToken(e, "user", -10, "vip");
-    expect(await verifyTokenInfo(e, stale)).toBeNull();
-    expect(await verifyTokenInfo(e, "1.2.3.4")).toBeNull();
-    expect(await verifyTokenInfo(e, null)).toBeNull();
-  });
-});
-
-describe("token v3：长期使用者的身份卡票", () => {
-  it("带 type+card 签出五段票：role/type/card 都验得回来", async () => {
-    const e = env({ SESSION_SECRET: "s3cr3t" });
-    const token = await issueToken(e, "user", undefined, "vip", "abcd1234");
-    expect(token.split(".")).toHaveLength(5);
-    expect(await verifyToken(e, token)).toBe("user");
-    expect(await verifyTokenInfo(e, token)).toEqual({
-      role: "user",
-      type: "vip",
-      card: "abcd1234",
-      exp: expect.any(Number),
-    });
-  });
-
-  it("admin 不带卡：给了 card 也只签三段", async () => {
-    const e = env({ SESSION_SECRET: "s3cr3t" });
-    const token = await issueToken(e, "admin", undefined, "vip", "abcd1234");
-    expect(token.split(".")).toHaveLength(3);
-    expect(await verifyTokenInfo(e, token)).toEqual({
-      role: "admin",
-      exp: expect.any(Number),
-    });
-  });
-
-  it("v2 四段老票照样验得过：card 视为没有", async () => {
-    const e = env({ SESSION_SECRET: "s3cr3t" });
-    const old = await issueToken(e, "user", undefined, "vip");
-    expect(old.split(".")).toHaveLength(4);
-    expect(await verifyTokenInfo(e, old)).toEqual({
-      role: "user",
-      type: "vip",
-      exp: expect.any(Number),
-    });
-  });
-
-  it("card 段换掉：签名对不上，整张票作废 —— 卡 id 是签进去的，改不动", async () => {
-    const e = env({ SESSION_SECRET: "s3cr3t" });
-    const token = await issueToken(e, "user", undefined, "vip", "abcd1234");
-    const [exp, role, type, , sig] = token.split(".");
-    const swapped = `${exp}.${role}.${type}.zzzz9999.${sig}`;
-    expect(await verifyTokenInfo(e, swapped)).toBeNull();
-  });
-
-  it("card 形状不合法：签名再好也不算数", async () => {
-    const e = env({ SESSION_SECRET: "s3cr3t" });
-    for (const card of ["ABCD1234", "含汉字", "a".repeat(17)]) {
-      const forged = await signWithCard(
-        "s3cr3t",
-        Date.now() + 60_000,
-        "user",
-        "vip",
-        card,
-      );
-      expect(await verifyTokenInfo(e, forged)).toBeNull();
-    }
-  });
-
-  it("乱写的五段票和过期票一样不作数", async () => {
-    const e = env({ SESSION_SECRET: "s3cr3t" });
-    const stale = await issueToken(e, "user", -10, "vip", "abcd1234");
-    expect(await verifyTokenInfo(e, stale)).toBeNull();
-    expect(await verifyTokenInfo(e, "1.2.3.4.5")).toBeNull();
-    expect(await verifyTokenInfo(e, null)).toBeNull();
-  });
-});
-
-/** 用任意密钥签一张票，模拟攻击者手上那张「猜出来的钥匙」 */
-async function signWith(key: string, exp: number, role: Role): Promise<string> {
-  const material = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(key),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const buf = await crypto.subtle.sign(
-    "HMAC",
-    material,
-    new TextEncoder().encode(`gate.${role}.${exp}`),
-  );
-  const bytes = new Uint8Array(buf);
-  let s = "";
-  for (const b of bytes) s += String.fromCharCode(b);
-  return `${exp}.${role}.${btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
-}
-
-/** 同上，但签的是 v2 四段票（攻击者按新格式仿制） */
-async function signWithTyped(
-  key: string,
-  exp: number,
-  role: Role,
-  type: string,
-): Promise<string> {
-  const material = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(key),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const buf = await crypto.subtle.sign(
-    "HMAC",
-    material,
-    new TextEncoder().encode(`gate.${role}.${type}.${exp}`),
-  );
-  const bytes = new Uint8Array(buf);
-  let s = "";
-  for (const b of bytes) s += String.fromCharCode(b);
-  return `${exp}.${role}.${type}.${btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
-}
-
-/** 同上，但签的是 v3 五段票（card 形状不合法的仿制票走这条） */
-async function signWithCard(
-  key: string,
-  exp: number,
-  role: Role,
-  type: string,
-  card: string,
-): Promise<string> {
-  const material = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(key),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const buf = await crypto.subtle.sign(
-    "HMAC",
-    material,
-    new TextEncoder().encode(`gate.${role}.${type}.${card}.${exp}`),
-  );
-  const bytes = new Uint8Array(buf);
-  let s = "";
-  for (const b of bytes) s += String.fromCharCode(b);
-  return `${exp}.${role}.${type}.${card}.${btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
-}
-
-const reqTo = (url: string) => new Request(url);
-
-describe("cookie 上的 Secure 跟着这次请求走", () => {
-  it("云端 https：带 Secure", () => {
-    const cookie = sessionCookie(
-      "t2",
-      cookieSecure(reqTo("https://example.workers.dev/")),
-    );
-    expect(cookie).toContain("Secure");
-  });
-
-  // wrangler dev 是 http://，无条件加 Secure 会让「登录成功」之后每一句都是未登录
-  it("本机 http：不带 Secure，否则票在下一句就发不回去", () => {
-    const cookie = sessionCookie(
-      "t1",
-      cookieSecure(reqTo("http://localhost:5173/api/auth")),
-    );
-    expect(cookie).not.toContain("Secure");
-    expect(cookie).toContain("xm_session=t1");
+describe("Cookie 属性", () => {
+  it("https 用 __Host-，带 Secure / HttpOnly / SameSite", () => {
+    const cookie = sessionCookie("t1", true);
+    expect(cookie).toContain("__Host-xm_session=t1");
     expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("Secure");
     expect(cookie).toContain("SameSite=Lax");
+    expect(cookie).toContain(`Max-Age=${SESSION_TTL_SEC}`);
   });
 
-  it("登出用的那一张跟着同一把尺子", () => {
-    expect(clearCookie(false)).not.toContain("Secure");
+  it("本机 http 退回 xm_session，不硬塞 Secure", () => {
+    const cookie = sessionCookie("t1", false);
+    expect(cookie).toContain("xm_session=t1");
+    expect(cookie).not.toContain("__Host-");
+    expect(cookie).not.toContain("Secure");
+  });
+
+  it("值会 URL 编码；清 Cookie 是 Max-Age=0", () => {
+    expect(sessionCookie("a.b=c d", false)).toContain(
+      "xm_session=" + encodeURIComponent("a.b=c d"),
+    );
+    expect(clearCookie(true)).toContain("__Host-xm_session=;");
     expect(clearCookie(true)).toContain("Secure");
     expect(clearCookie(true)).toContain("Max-Age=0");
   });
 
-  it("token 里有特殊字符也不会把 cookie 撑成两条", () => {
-    const cookie = sessionCookie("a.b=c d", false);
-    expect(cookie.split(";").length).toBeGreaterThan(1);
-    expect(cookie).not.toContain("a.b=c d");
-    expect(cookie).toContain(encodeURIComponent("a.b=c d"));
+  it("登出同时清新旧两个名字", () => {
+    const all = clearCookies(true);
+    expect(all).toHaveLength(2);
+    expect(all.join("\n")).toContain("__Host-xm_session=");
+    expect(all.join("\n")).toContain("xm_session=");
+  });
+
+  it("cookieSecure 只看这次请求的协议", () => {
+    expect(cookieSecure(new Request("https://x.test/"))).toBe(true);
+    expect(cookieSecure(new Request("http://localhost/"))).toBe(false);
+  });
+
+  it("读 Cookie 时 __Host- 优先，Bearer 兜底", () => {
+    const req = new Request("https://x.test/", {
+      headers: {
+        Cookie: "xm_session=legacy; __Host-xm_session=host",
+        Authorization: "Bearer bearer-token",
+      },
+    });
+    expect(authToken(req)).toBe("host");
+    const onlyLegacy = new Request("http://localhost/", {
+      headers: { Cookie: "xm_session=legacy" },
+    });
+    expect(authToken(onlyLegacy)).toBe("legacy");
+    const header = new Request("https://x.test/", {
+      headers: { Authorization: "Bearer bearer-token" },
+    });
+    expect(authToken(header)).toBe("bearer-token");
   });
 });
 
-/**
- * 滑动续期：活跃的票永远被续着（持续制），30 天完全不露面的票自然死亡。
- * 判定是「剩余寿命不足半程」—— 一张票最多每 15 天被续一次，不是天天塞 Set-Cookie。
- */
 describe("滑动续期", () => {
-  const DAY_SEC = 24 * 3600;
-
-  it("新签的票满寿命，不需要续", async () => {
+  it("剩余寿命过半不续；掉进半程才续", async () => {
     const e = env({ SESSION_SECRET: "s3cr3t" });
-    const token = await issueToken(e, "user", SESSION_TTL_SEC, "type_a");
-    const info = await verifyTokenInfo(e, token);
-    expect(info).not.toBeNull();
-    expect(tokenNeedsRenewal(info!)).toBe(false);
+    const full = await verifyTokenInfo(
+      e,
+      await issueToken(e, "user", SESSION_TTL_SEC, "type_a"),
+    );
+    expect(full).not.toBeNull();
+    expect(tokenNeedsRenewal(full!)).toBe(false);
+
+    const near = await verifyTokenInfo(
+      e,
+      await issueToken(e, "user", 10 * DAY_SEC, "type_a"),
+    );
+    expect(near).not.toBeNull();
+    expect(tokenNeedsRenewal(near!)).toBe(true);
   });
 
-  it("剩余寿命掉进半程 → 该续了（活跃的票从此被一直续着）", async () => {
-    const e = env({ SESSION_SECRET: "s3cr3t" });
-    // 手签一张只剩 10 天寿命的票：10 天 < 15 天半程
-    const token = await issueToken(e, "user", 10 * DAY_SEC, "type_a");
-    const info = await verifyTokenInfo(e, token);
-    expect(info).not.toBeNull();
-    expect(tokenNeedsRenewal(info!)).toBe(true);
-  });
-
-  it("正好卡在半程上不算该续：判定是「不足半程」，不是「不足等于」", () => {
-    // 把 now 钉死再算边界：不然测试里 Date.now() 和函数里那一下差上 1ms，
-    // 「正好卡半程」就被推成「不足半程」，红得毫无道理。
+  it("正好卡在半程上不算该续", () => {
     const now = Date.now();
     expect(
       tokenNeedsRenewal(
@@ -449,29 +238,27 @@ describe("滑动续期", () => {
     ).toBe(false);
   });
 
-  it("续出的新票满寿命、权益原样带过去", async () => {
+  it("续期延长同一张会话，权益原样带过去", async () => {
     const e = env({ SESSION_SECRET: "s3cr3t" });
-    const old = await issueToken(e, "user", 10 * DAY_SEC, "type_a", "card1234");
-    const info = (await verifyTokenInfo(e, old))!;
-    const fresh = await renewToken(e, info);
-    const freshInfo = await verifyTokenInfo(e, fresh);
-    expect(freshInfo).toMatchObject({
+    const old = await issueToken(e, "user", 10 * DAY_SEC, "type_a", "abcd1234");
+    const fresh = await renewSession(e, old);
+    expect(fresh).toBe(old);
+    const info = await verifyTokenInfo(e, fresh!);
+    expect(info).toMatchObject({
       role: "user",
       type: "type_a",
-      card: "card1234",
+      card: "abcd1234",
     });
-    // 新票的寿命回到了满程（允许签发过程耗掉一点时间）
-    expect(freshInfo!.exp - Date.now()).toBeGreaterThan(
+    expect(info!.exp - Date.now()).toBeGreaterThan(
       SESSION_TTL_SEC * 1000 - 60_000,
     );
-    expect(tokenNeedsRenewal(freshInfo!)).toBe(false);
+    expect(tokenNeedsRenewal(info!)).toBe(false);
   });
 
-  it("admin 票同样能续：只换寿命不换角色", async () => {
+  it("撤销后的会话不能再续", async () => {
     const e = env({ SESSION_SECRET: "s3cr3t" });
-    const old = await issueToken(e, "admin", 5 * DAY_SEC);
-    const info = (await verifyTokenInfo(e, old))!;
-    const freshInfo = await verifyTokenInfo(e, await renewToken(e, info));
-    expect(freshInfo).toMatchObject({ role: "admin" });
+    const token = await issueToken(e, "admin");
+    await revokeSession(e, token);
+    expect(await renewSession(e, token)).toBeNull();
   });
 });

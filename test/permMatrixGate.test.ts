@@ -12,6 +12,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { issueToken, sessionCookie } from "../src/auth";
 import worker from "../src/index";
+import { attachFakeSessions } from "./fakeSessions";
 
 vi.mock("../src/agent/cowork", () => ({ CoworkAgent: class {} }));
 vi.mock("agents", () => ({
@@ -48,6 +49,7 @@ function environment(allowed: string[] = []) {
       ...patch,
     })),
   };
+  attachFakeSessions(agent);
   const env = {
     ADMIN_PASSWORD: "admin-test",
     GATE_PASSWORD: "guest-test",

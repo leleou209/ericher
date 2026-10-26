@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { agentNameFor, issueToken, sessionCookie } from "../src/auth";
 import worker from "../src/index";
+import { attachFakeSessions } from "./fakeSessions";
 
 vi.mock("../src/agent/cowork", () => ({ CoworkAgent: class {} }));
 vi.mock("agents", () => ({
@@ -24,6 +25,8 @@ function environment() {
     resetActiveSession: vi.fn(async () => {}),
   };
   const names: string[] = [];
+  attachFakeSessions(agent);
+  const authAgent = attachFakeSessions({});
   const env = {
     ADMIN_PASSWORD: "admin-test",
     GATE_PASSWORD: "guest-test",
@@ -35,6 +38,7 @@ function environment() {
       },
       get: () => agent,
     },
+    AUTH_SESSIONS: { idFromName: (name: string) => name, get: () => authAgent },
     ASSETS: { fetch: vi.fn(async () => new Response("app")) },
   } as unknown as Env;
   return { env, agent, names };

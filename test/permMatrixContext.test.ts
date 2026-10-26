@@ -12,6 +12,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { issueToken, sessionCookie } from "../src/auth";
 import worker from "../src/index";
+import { attachFakeSessions } from "./fakeSessions";
 
 // 回声桩要把收到的身份交回测试看，而 vi.mock 的工厂在 import 之前就要能取到这两个数组
 const store = vi.hoisted(() => ({
@@ -48,6 +49,7 @@ function environment(pushToken = "") {
   const agent = {
     cardPerm: vi.fn(async (_card: string, perm: string) => perm === "permMatrix"),
   };
+  attachFakeSessions(agent);
   const env = {
     ADMIN_PASSWORD: "admin-test",
     GATE_PASSWORD: "guest-test",

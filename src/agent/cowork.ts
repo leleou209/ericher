@@ -228,6 +228,14 @@ import {
   type VisitorRoom,
 } from "./visitor";
 import {
+  ensureAuthSessionSchema,
+  getAuthSession,
+  insertAuthSession,
+  pruneAuthSessions,
+  revokeAuthSession,
+  touchAuthSession,
+} from "./authSessions";
+import {
   activateModelEntry,
   createModelEntry,
   createModelProvider,
@@ -4436,6 +4444,64 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     if (row) return row[perm];
     // 查无此档：通用档老三项全开、其余档全关，矩阵权一律没有（见 cardPermFallback）
     return cardPermFallback(card.typeId, perm);
+  }
+
+  // ── 登录会话（auth_sessions，见 authSessions.ts）────────────
+  // Cookie 只带随机 sid；身份、类型、卡与过期都在主屋这张表里，登出/撤销才真生效。
+
+  async sessionCreate(input: {
+    hash: string;
+    role: "admin" | "user";
+    type?: string;
+    card?: string;
+    exp: number;
+  }): Promise<void> {
+    if (this.name !== OWNER_AGENT) return;
+    const now = new Date().toISOString();
+    insertAuthSession(this.db, {
+      hash: input.hash,
+      role: input.role,
+      type: input.type || "",
+      card: input.card || "",
+      created: now,
+      lastSeen: now,
+      expires: input.exp,
+    });
+    pruneAuthSessions(this.db);
+  }
+
+  async sessionVerify(hash: string): Promise<{
+    role: "admin" | "user";
+    type?: string;
+    card?: string;
+    exp: number;
+  } | null> {
+    if (this.name !== OWNER_AGENT) return null;
+    ensureAuthSessionSchema(this.db);
+    const row = getAuthSession(this.db, hash);
+    if (!row || row.expires <= Date.now()) return null;
+    if (row.role !== "admin" && row.role !== "user") return null;
+    return {
+      role: row.role,
+      type: row.type || undefined,
+      card: row.card || undefined,
+      exp: row.expires,
+    };
+  }
+
+  async sessionRenew(hash: string, ttlSec: number): Promise<number | null> {
+    if (this.name !== OWNER_AGENT) return null;
+    ensureAuthSessionSchema(this.db);
+    const exp = Date.now() + Math.max(0, ttlSec) * 1000;
+    return touchAuthSession(this.db, hash, exp, new Date().toISOString())
+      ? exp
+      : null;
+  }
+
+  async sessionRevoke(hash: string): Promise<boolean> {
+    if (this.name !== OWNER_AGENT) return false;
+    ensureAuthSessionSchema(this.db);
+    return revokeAuthSession(this.db, hash);
   }
 
   /** 持卡人名册（面板用）：摘要永不出门 —— 名册是给人看的，不是给猜密码的。 */

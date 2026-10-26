@@ -17,6 +17,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, vi } from "vitest";
 import { issueToken, sessionCookie } from "../src/auth";
+import { attachFakeSessions } from "./fakeSessions";
 import {
   DEFAULT_MAIL_CONFIG,
   MAX_MAIL_RECIPIENTS,
@@ -850,6 +851,7 @@ describe("路由", () => {
       },
       ASSETS: { fetch: vi.fn(async () => new Response("app")) },
     } as unknown as Env;
+    attachFakeSessions(agent);
     return { env, agent };
   }
 

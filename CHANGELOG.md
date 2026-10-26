@@ -69,6 +69,14 @@
 - 介绍页补「三分钟试用」与矩阵双层宅院；README 改为信息优先，截图更新到 0.1.7。
 - 核心代码注释提纯：长段压到 1–3 行，保留协议、安全、迁移、竞态约束；测试断言不动。
 
+### 安全补丁（会话）
+
+- Cookie 改为随机 sid + 主屋 `auth_sessions` 服务端会话：每登录独一、登出/撤销真生效；
+  Cookie 里不再含 role/type/card，抓包/泄露读不到身份。
+- 线上 Cookie 使用 `__Host-`（HTTPS）+ `Secure / HttpOnly / SameSite=Lax`；HTTP 强制跳 HTTPS 并加 HSTS；
+  登录/登出响应 `no-store`。旧 HMAC 票全部失效，升级后需重新登录。
+- 会话表随主屋 SQLite；测试按新会话模型重写，全量 95 文件 / 1423 例。
+
 ### 发布补丁（部署包）
 
 - Worker 入口不再导出常量：`EML_FEED_MAX` 移到 `src/mail/mailbox.ts`。数字导出会被 workerd

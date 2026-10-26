@@ -9,12 +9,13 @@ import {
   agentNameForToken,
   authToken,
   authRole,
-  clearCookie,
+  clearCookies,
   cookieSecure,
   forbidden,
   gatePassword,
   issueToken,
-  renewToken,
+  renewSession,
+  revokeSession,
   tokenNeedsRenewal,
   OWNER_AGENT,
   roleForPassword,
@@ -248,6 +249,7 @@ async function handleLogin(req: Request, env: Env): Promise<Response> {
   }
 
   attempts.delete(key);
+  await revokeSession(env, authToken(req)).catch(() => false);
   const token = await issueToken(env, role ?? "user", undefined, type);
   // 顺带把「该连哪间屋」告诉前端：一个 DO 只有一份对话，来客必须进自己那间，
   // 否则一开门就看见主人正在聊的内容
@@ -293,6 +295,7 @@ async function handleCardLogin(req: Request, env: Env): Promise<Response> {
     );
   }
   attempts.delete(key);
+  await revokeSession(env, authToken(req)).catch(() => false);
   const token = await issueToken(env, "user", undefined, card.typeId, card.id);
   const agent = await agentNameForToken(env, "user", token);
   return Response.json(
@@ -1174,9 +1177,11 @@ async function renewIfNeeded(
   env: Env,
   res: Response,
 ): Promise<Response> {
-  const info = await verifyTokenInfo(env, authToken(req));
+  const raw = authToken(req);
+  const info = await verifyTokenInfo(env, raw);
   if (!info || !tokenNeedsRenewal(info)) return res;
-  const fresh = await renewToken(env, info);
+  const fresh = raw ? await renewSession(env, raw) : null;
+  if (!fresh) return res;
   const headers = new Headers(res.headers);
   headers.append("Set-Cookie", sessionCookie(fresh, cookieSecure(req)));
   return new Response(res.body, { status: res.status, headers });
@@ -2976,6 +2981,18 @@ export default {
     }
   },
   fetch(req: Request, env: Env): Promise<Response> {
+    const pageUrl = new URL(req.url);
+    const host = pageUrl.hostname;
+    const local =
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "::1" ||
+      host === "[::1]";
+    // 登录/口令只在 HTTPS 上走；本机开发保留 http。
+    if (pageUrl.protocol === "http:" && !local) {
+      pageUrl.protocol = "https:";
+      return Promise.resolve(Response.redirect(pageUrl.toString(), 301));
+    }
     // 兜底：矩阵认领、静态回退等不在局部 try 里的异常若冒出 Worker，就是 Cloudflare 1101 纯文本页 ——
     // 前端拿不到 {ok:false}，用户只看到「网站坏了」。
     async function run(): Promise<Response> {
@@ -2994,11 +3011,14 @@ export default {
       // 登录 / 登出无需鉴权
       if (p === "/api/auth")
         return req.method === "POST" ? handleLogin(req, env) : methodNotAllowed();
-      if (p === "/api/logout")
-        return Response.json(
-          { ok: true },
-          { headers: { "Set-Cookie": clearCookie(cookieSecure(req)) } },
-        );
+      if (p === "/api/logout") {
+        const raw = authToken(req);
+        if (raw) await revokeSession(env, raw).catch(() => false);
+        const headers = new Headers();
+        for (const c of clearCookies(cookieSecure(req)))
+          headers.append("Set-Cookie", c);
+        return Response.json({ ok: true }, { headers });
+      }
 
       // ── 身份卡：登卡是免门禁的（卡本身就是钥匙），限速与门禁同一套 ──
       if (p === "/api/card/login" && req.method === "POST")
@@ -3047,6 +3067,7 @@ export default {
               card.typeId,
               card.id,
             );
+            await revokeSession(env, authToken(req)).catch(() => false);
             const agent = await agentNameForToken(env, "user", token);
             return Response.json(
               { ok: true, role: "user", agent, card },
@@ -3074,6 +3095,7 @@ export default {
         // 再登卡就回来 —— 解卡只是这台设备不再持卡
         if (p === "/api/card/detach" && req.method === "POST") {
           const token = await issueToken(env, "user", undefined, info.type);
+          await revokeSession(env, authToken(req)).catch(() => false);
           const agent = await agentNameForToken(env, "user", token);
           return Response.json(
             { ok: true, role: "user", agent },
@@ -3156,6 +3178,35 @@ export default {
     }
     // 用 .catch 而不是 try/catch：大量 `return handleX(...)` 没 await，
     // 这类 promise 拒绝会绕过 try/catch，只有挂在返回值上才收得住。
-    return run().catch(fail);
+    return run()
+      .catch(fail)
+      .then((res) => withSecurityHeaders(res, pageUrl));
   },
 };
+
+/** 统一加传输/嗅探/缓存头；WebSocket 升级响应原样放行，不能重新包一层。 */
+function withSecurityHeaders(res: Response, url: URL): Response {
+  if (
+    res.status === 101 ||
+    (res as Response & { webSocket?: unknown }).webSocket
+  )
+    return res;
+  const headers = new Headers(res.headers);
+  if (url.protocol === "https:")
+    headers.set("Strict-Transport-Security", "max-age=31536000");
+  if (!headers.has("X-Content-Type-Options"))
+    headers.set("X-Content-Type-Options", "nosniff");
+  if (!headers.has("Referrer-Policy"))
+    headers.set("Referrer-Policy", "no-referrer");
+  if (
+    url.pathname === "/api/auth" ||
+    url.pathname === "/api/card/login" ||
+    url.pathname === "/api/logout"
+  )
+    headers.set("Cache-Control", "no-store");
+  return new Response(res.body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers,
+  });
+}
