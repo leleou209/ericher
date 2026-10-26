@@ -24,6 +24,11 @@ const enc = new TextEncoder();
 const SESSION_CACHE_MS = 5000;
 const sessionCache = new Map<string, { info: TokenInfo; at: number }>();
 
+/** 账号级刷新后用：本 isolate 里缓存的旧身份立即作废。 */
+export function clearSessionCache(): void {
+  sessionCache.clear();
+}
+
 /** 来客类型 id / 身份卡 id 的形状；签会话前先过一遍，脏值不进库 */
 const TYPE_RE = /^[a-z0-9_-]{1,32}$/;
 const CARD_RE = /^[a-z0-9]{4,16}$/;

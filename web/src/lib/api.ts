@@ -75,6 +75,10 @@ export const api = {
 
   logout: () => fetch("/api/logout", { method: "POST" }),
 
+  /** 账号级刷新：管理员清 admin 会话，持卡人清这张卡的会话；当前设备也重登 */
+  refreshLogin: () =>
+    req<{ revoked: number }>("/api/auth/refresh", json("POST", {})),
+
   // ── 配置态（任务 / 禁令 / 技能 / 联系人 / 思考模式 / 自我认知 / 人格提示词）──
   getConfig: () => req<ChatState>("/api/config"),
 

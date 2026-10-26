@@ -10,6 +10,7 @@ import {
   authToken,
   authRole,
   clearCookies,
+  clearSessionCache,
   cookieSecure,
   forbidden,
   gatePassword,
@@ -3020,6 +3021,28 @@ export default {
         return Response.json({ ok: true }, { headers });
       }
 
+      // 账号级刷新：管理员清 admin 会话，持卡人清这张卡；临时票只能登出当前设备。
+      if (p === "/api/auth/refresh" && req.method === "POST") {
+        const origin = req.headers.get("Origin");
+        if (origin && origin !== new URL(req.url).origin) return forbidden();
+        const info = await verifyTokenInfo(env, authToken(req));
+        if (!info) return unauthorized();
+        if (info.role !== "admin" && !info.card)
+          return Response.json(
+            { ok: false, error: "临时票没有账号级刷新，只能登出当前设备" },
+            { status: 400 },
+          );
+        const revoked = await agentStub(env).sessionRevokeAccount(
+          info.role === "admin" ? { role: "admin" } : { card: info.card },
+        );
+        clearSessionCache();
+        const headers = new Headers();
+        for (const c of clearCookies(cookieSecure(req)))
+          headers.append("Set-Cookie", c);
+        headers.set("Cache-Control", "no-store");
+        return Response.json({ ok: true, data: { revoked } }, { headers });
+      }
+
       // ── 身份卡：登卡是免门禁的（卡本身就是钥匙），限速与门禁同一套 ──
       if (p === "/api/card/login" && req.method === "POST")
         return handleCardLogin(req, env);
@@ -3200,6 +3223,7 @@ function withSecurityHeaders(res: Response, url: URL): Response {
     headers.set("Referrer-Policy", "no-referrer");
   if (
     url.pathname === "/api/auth" ||
+    url.pathname === "/api/auth/refresh" ||
     url.pathname === "/api/card/login" ||
     url.pathname === "/api/logout"
   )

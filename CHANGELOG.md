@@ -75,6 +75,8 @@
   Cookie 里不再含 role/type/card，抓包/泄露读不到身份。
 - 线上 Cookie 使用 `__Host-`（HTTPS）+ `Secure / HttpOnly / SameSite=Lax`；HTTP 强制跳 HTTPS 并加 HSTS；
   登录/登出响应 `no-store`。旧 HMAC 票全部失效，升级后需重新登录。
+- 账号级刷新：管理员清 admin 会话、持卡人清本卡会话，同时关闭对应房间的 WebSocket；
+  临时票只能登出当前设备。入口在“设置 → 个人信息 → 刷新登录状态”。
 - 会话表随主屋 SQLite；测试按新会话模型重写，全量 95 文件 / 1423 例。
 
 ### 发布补丁（部署包）

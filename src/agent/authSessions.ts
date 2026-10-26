@@ -84,6 +84,24 @@ export function revokeAuthSession(sql: SqlTag, hash: string): boolean {
   return true;
 }
 
+/** 账号级刷新：管理员清 role=admin，持卡人清这张卡；返回撤掉的会话数。 */
+export function revokeAuthSessions(
+  sql: SqlTag,
+  filter: { role?: "admin"; card?: string },
+): number {
+  const rows =
+    filter.role === "admin"
+      ? sql<{ n: number }>`
+          SELECT COUNT(*) AS n FROM auth_sessions WHERE role = 'admin'`
+      : sql<{ n: number }>`
+          SELECT COUNT(*) AS n FROM auth_sessions WHERE card = ${filter.card || ""}`;
+  const count = rows[0]?.n ?? 0;
+  if (filter.role === "admin")
+    sql`DELETE FROM auth_sessions WHERE role = 'admin'`;
+  else sql`DELETE FROM auth_sessions WHERE card = ${filter.card || ""}`;
+  return count;
+}
+
 /** 过期一周以上的清掉；再按过期时间留最近 1000 条，防止无限长。 */
 export function pruneAuthSessions(sql: SqlTag, cap = 1000): void {
   sql`DELETE FROM auth_sessions WHERE expires < ${Date.now() - 7 * 86400_000}`;

@@ -233,6 +233,7 @@ import {
   insertAuthSession,
   pruneAuthSessions,
   revokeAuthSession,
+  revokeAuthSessions,
   touchAuthSession,
 } from "./authSessions";
 import {
@@ -4511,6 +4512,66 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     if (this.name !== OWNER_AGENT) return false;
     this.ensureAuthSessions();
     return revokeAuthSession(this.db, hash);
+  }
+
+  /** 关掉本屋当前所有 WebSocket；会话刷新/撤销时必须让长连接一起断。 */
+  closeAllConnections(): void {
+    for (const conn of this.getConnections()) {
+      try {
+        conn.close(4001, "session refreshed");
+      } catch {
+        // 连接已经断了
+      }
+    }
+  }
+
+  /** 本屋 + 本屋名下各场屋的连接一起关；账号刷新用。 */
+  async closeRoomTreeConnections(): Promise<void> {
+    this.closeAllConnections();
+    let sessions: Array<{ home: string }> = [];
+    try {
+      sessions = listSessions(this.db);
+    } catch {
+      // 老实例还没建会话表
+    }
+    for (const s of sessions) {
+      if (!s.home) continue;
+      try {
+        await this.env.COWORK_AGENT.get(
+          this.env.COWORK_AGENT.idFromName(s.home),
+        ).closeAllConnections();
+      } catch {
+        // 场屋没醒/已删：没有连接可关
+      }
+    }
+  }
+
+  /**
+   * 账号级刷新：管理员清 role=admin，持卡人清这张卡的所有会话；
+   * 同时关掉对应房间的 WebSocket，避免 REST 已退出、长连接还在聊。
+   */
+  async sessionRevokeAccount(input: {
+    role?: "admin";
+    card?: string;
+  }): Promise<number> {
+    if (this.name !== OWNER_AGENT) return 0;
+    this.ensureAuthSessions();
+    const n = revokeAuthSessions(this.db, input);
+    if (input.role === "admin") {
+      await this.closeRoomTreeConnections();
+    } else if (input.card) {
+      const room = await this.cardRoom(input.card);
+      if (room) {
+        try {
+          await this.env.COWORK_AGENT.get(
+            this.env.COWORK_AGENT.idFromName(room),
+          ).closeRoomTreeConnections();
+        } catch {
+          // 房间没醒/已删
+        }
+      }
+    }
+    return n;
   }
 
   /** 持卡人名册（面板用）：摘要永不出门 —— 名册是给人看的，不是给猜密码的。 */

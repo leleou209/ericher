@@ -633,6 +633,26 @@ export function SettingsPage({
   // 矩阵分区的进门资格：管理员天生有，来客要持卡且档位开了 permMatrix。
   // 名册读不到、后端是老版本没回这一格，都算没有（?? false）—— 整面网页不能靠猜
   const canMatrix = isAdmin || (!!card && (state.guestType?.permMatrix ?? false));
+  const [refreshBusy, setRefreshBusy] = useState(false);
+  const [refreshErr, setRefreshErr] = useState("");
+  const refreshLogin = async () => {
+    const who = isAdmin ? "管理员账号" : "这张卡";
+    if (
+      !window.confirm(
+        `这会把${who}在所有设备上的登录全部作废，当前设备也要重新登录。继续？`,
+      )
+    )
+      return;
+    setRefreshBusy(true);
+    setRefreshErr("");
+    try {
+      await api.refreshLogin();
+      window.location.reload();
+    } catch (e) {
+      setRefreshErr((e as Error).message || "刷新失败");
+      setRefreshBusy(false);
+    }
+  };
   const groups = useMemo(
     () =>
       GROUPS.map((g) => ({
@@ -773,6 +793,40 @@ export function SettingsPage({
                     </span>
                   </div>
                 </div>
+                {(isAdmin || card) && (
+                  <div className="toggle-list" style={{ marginTop: 8 }}>
+                    <div className="toggle-row">
+                      <div className="toggle-info">
+                        <div className="toggle-icon">
+                          <Icon name="refresh" size={17} />
+                        </div>
+                        <div className="toggle-text">
+                          <div className="toggle-title">刷新登录状态</div>
+                          <div className="toggle-desc">
+                            作废{isAdmin ? "管理员账号" : "这张卡"}
+                            在所有设备上的登录；当前设备也要重新登录。
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        className="save-btn"
+                        disabled={refreshBusy}
+                        onClick={() => void refreshLogin()}
+                      >
+                        <Icon name="refresh" size={16} />
+                        <span>{refreshBusy ? "刷新中…" : "全部下线"}</span>
+                      </button>
+                    </div>
+                    {refreshErr && (
+                      <p
+                        className="toggle-desc"
+                        style={{ color: "var(--yuzhe-danger)", padding: "4px 0 0" }}
+                      >
+                        {refreshErr}
+                      </p>
+                    )}
+                  </div>
+                )}
                 <div className="row-actions" style={{ marginTop: 16 }}>
                   <button className="save-btn" onClick={onLogout}>
                     <Icon name="arrow-left" size={16} />
