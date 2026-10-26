@@ -1346,6 +1346,8 @@ async function handleApi(
     return handleMatrixApi(req, env, p, {
       ...(await matrixViewerOf(req, env)),
       matrix: role === "admin" || permMatrix,
+      // 引用云盘文件时按调用者划界（管理员全库，其余只到公开区与自己那间）
+      fileRoom: role === "admin" ? undefined : await agentNameFor(req, env, role),
     });
 
   if (p === "/api/upload" && m === "POST") return handleUpload(req, env);

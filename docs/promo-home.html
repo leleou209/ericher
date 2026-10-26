@@ -141,7 +141,7 @@ pre code{background:none;padding:0;font-size:13px;line-height:1.7}
 <section class="ep-facts"><div class="ep-wrap" style="display:contents">
   <div class="ep-fact"><b>零月费</b><span>Workers / DO / R2 免费额度内自配自管，不绑付费服务</span></div>
   <div class="ep-fact"><b>一个 DO 一间屋</b><span>对话与记忆按身份隔离，切换设备也回得到原话</span></div>
-  <div class="ep-fact"><b>1429 例测试</b><span>95 个测试文件；门禁全绿才算一次构建</span></div>
+  <div class="ep-fact"><b>1434 例测试</b><span>96 个测试文件；门禁全绿才算一次构建</span></div>
   <div class="ep-fact"><b>MIT</b><span>可自用、可修改、可分发，包括商用</span></div>
 </div></section>
 
@@ -285,7 +285,7 @@ npx wrangler secret put GATE_PASSWORD
 npx wrangler secret put SESSION_SECRET
 # 要用信箱再加一把：
 npx wrangler secret put MAIL_KEY</code></pre><p class="ep-warn">来客口令与管理口令不要相同；只给 <code>GATE_PASSWORD</code> 的话，管理员进不了自己的全套工具。</p></div>
-    <div class="ep-step"><h3><span>4</span>看目标，再部署</h3><pre><code>npm run check          # 类型 + 1429 例 + 构建
+    <div class="ep-step"><h3><span>4</span>看目标，再部署</h3><pre><code>npm run check          # 类型 + 1434 例 + 构建
 npm run deploy -- --dry-run
 npm run deploy</code></pre><p class="ep-note">部署到你自己域名下，就配 <code>.wrangler.local.jsonc</code> 走 <code>npm run deploy -- --private</code>。</p></div>
   </div>

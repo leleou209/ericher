@@ -5,6 +5,7 @@
 // /api/matrix/* 管理面、矩阵包整体替换（zip ↔ 整套矩阵）。
 
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
+import { canReadFile } from "../fileAccess";
 
 /** 访客身份：主包验过 cookie 之后算好的东西（public = 没带票的过路人） */
 export type MatrixViewer = {
@@ -16,6 +17,11 @@ export type MatrixViewer = {
    * 只有管理面认这一位；页面访问（allowed）仍只看 role / type / card。
    */
   matrix?: boolean;
+  /**
+   * 管理面才用：这位来客的房间名（主包按签名票派生）。
+   * 引用云盘文件时按它划界 —— 矩阵管理权不等于整只桶的读取权。
+   */
+  fileRoom?: string;
 };
 
 /** 矩阵这一块只用到云盘桶；主包的 Env 结构上天然满足 */
@@ -1262,10 +1268,15 @@ export class MatrixInputError extends Error {}
 /**
  * 保存一页（新建或整页覆盖）。管理面 FormData 与 AI 工具共用这一份逻辑 ——
  * 同一套收口，不存在「走工具就能绕过校验」的口子。
+ *
+ * keyAllowed 管「引用云盘文件」那一路：R2 是同一只桶，key 可以指向邮件原件或
+ * 别人房间的文件。管理面按调用者身份传范围（管理员全库，其余只到公开与自己那间）；
+ * 内部调用（主人侧工具）不传 key，默认放行。
  */
 export async function savePageCore(
   env: MatrixEnv,
   input: MatrixSaveInput,
+  keyAllowed: (key: string) => boolean = () => true,
 ): Promise<MatrixPage> {
   const path = normPath(String(input.path ?? ""));
   if (!validPath(path))
@@ -1336,6 +1347,11 @@ export async function savePageCore(
       });
       page.driveKey = undefined;
     } else if (typeof driveKey === "string" && driveKey) {
+      // 先验范围再 head：拿 head 当「这个 key 存不存在」的探针也不行
+      if (!keyAllowed(driveKey))
+        throw new MatrixInputError(
+          "这个云盘文件不在你能引用的范围内（只能引用公开文件或自己房间的文件）",
+        );
       const src = await env.MEMORY_BUCKET.head(driveKey);
       if (!src) throw new MatrixInputError("云盘里找不到这个文件");
       if (src.size > MAX_BODY_BYTES)
@@ -1372,7 +1388,11 @@ export async function savePageCore(
   return page;
 }
 
-async function handleSave(req: Request, env: MatrixEnv): Promise<Response> {
+async function handleSave(
+  req: Request,
+  env: MatrixEnv,
+  keyAllowed: (key: string) => boolean,
+): Promise<Response> {
   let form: FormData;
   try {
     form = await req.formData();
@@ -1392,21 +1412,25 @@ async function handleSave(req: Request, env: MatrixEnv): Promise<Response> {
   const text = form.get("text");
   const key = form.get("key");
   try {
-    const page = await savePageCore(env, {
-      id: typeof meta.id === "string" ? meta.id : undefined,
-      path: String(meta.path ?? ""),
-      title: String(meta.title ?? ""),
-      kind: typeof meta.kind === "string" ? meta.kind : undefined,
-      access: typeof meta.access === "string" ? meta.access : undefined,
-      types: meta.types,
-      sandbox: meta.sandbox === true,
-      entry: meta.entry === true,
-      external: String(meta.external ?? ""),
-      css: meta.css,
-      file: file instanceof File ? file : undefined,
-      text: typeof text === "string" ? text : undefined,
-      key: typeof key === "string" ? key : undefined,
-    });
+    const page = await savePageCore(
+      env,
+      {
+        id: typeof meta.id === "string" ? meta.id : undefined,
+        path: String(meta.path ?? ""),
+        title: String(meta.title ?? ""),
+        kind: typeof meta.kind === "string" ? meta.kind : undefined,
+        access: typeof meta.access === "string" ? meta.access : undefined,
+        types: meta.types,
+        sandbox: meta.sandbox === true,
+        entry: meta.entry === true,
+        external: String(meta.external ?? ""),
+        css: meta.css,
+        file: file instanceof File ? file : undefined,
+        text: typeof text === "string" ? text : undefined,
+        key: typeof key === "string" ? key : undefined,
+      },
+      keyAllowed,
+    );
     return json({ ok: true, data: { page } });
   } catch (e) {
     if (e instanceof MatrixInputError) return badRequest(e.message);
@@ -1797,6 +1821,7 @@ async function exportMatrixPack(
 async function equipMatrixPack(
   env: MatrixEnv,
   bytes: Uint8Array,
+  keyAllowed: (key: string) => boolean,
 ): Promise<{
   pages: number;
   links: number;
@@ -1813,6 +1838,11 @@ async function equipMatrixPack(
   // 不核的话，包里写个不存在的 key 也能装上线，那一页当场变成「引用的文件不见了」。
   for (const p of cfg.pages) {
     if (!p.driveKey) continue;
+    // 与「保存一页」同一把尺：包里的引用也不能越过调用者的文件范围
+    if (!keyAllowed(p.driveKey))
+      throw packError(
+        `页面 /${p.path} 引用了你不能读的云盘文件（只能引用公开文件或自己房间的文件）`,
+      );
     const src = await env.MEMORY_BUCKET.head(p.driveKey);
     if (!src) throw packError(`页面 /${p.path} 引用的云盘文件不存在：${p.driveKey}`);
     if (src.size > MAX_BODY_BYTES)
@@ -1880,6 +1910,12 @@ export async function handleMatrixApi(
   const canManage =
     viewer.role === "admin" || (viewer.role === "user" && viewer.matrix === true);
   if (!canManage) return json({ ok: false, error: "无权访问" }, 403);
+  // 矩阵管理权不等于整只 R2 桶的读取权：引用云盘文件时管理员全库可见，
+  // 其余调用者只到公开区与自己那间。内部调用（AI 工具）不走这里。
+  const keyAllowed =
+    viewer.role === "admin"
+      ? () => true
+      : (key: string) => canReadFile(key, "user", viewer.fileRoom || "");
 
   const cfg = await loadConfig(env);
   // 工作台/设置页状态卡用的一次性总览：版本 + 矩阵规模 + 外观开关。
@@ -1956,7 +1992,10 @@ export async function handleMatrixApi(
       if (bytes.byteLength > MAX_PACK_TOTAL_BYTES)
         return badRequest(`包体超过上限（${MAX_PACK_TOTAL_BYTES >> 20}MB）`);
       try {
-        return json({ ok: true, data: await equipMatrixPack(env, bytes) });
+        return json({
+          ok: true,
+          data: await equipMatrixPack(env, bytes, keyAllowed),
+        });
       } catch (e) {
         return badRequest((e as Error).message);
       }
@@ -1984,6 +2023,8 @@ export async function handleMatrixApi(
       const data = await equipMatrixPack(
         env,
         new Uint8Array(await snap.arrayBuffer()),
+        // 留底是服务器自己写的快照，原样装回不引入新的 key
+        () => true,
       );
       return json({ ok: true, data });
     } catch (e) {
@@ -2003,7 +2044,7 @@ export async function handleMatrixApi(
     return json({ ok: true, data: { page, body } });
   }
   if (pathname === "/api/matrix/save" && req.method === "POST")
-    return handleSave(req, env);
+    return handleSave(req, env, keyAllowed);
   if (pathname === "/api/matrix/delete" && req.method === "POST")
     return handleDelete(req, env);
   if (pathname === "/api/matrix/links")
