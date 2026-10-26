@@ -117,6 +117,14 @@ function fakeDb() {
 
     if (sql.startsWith("update guest_types set")) {
       if (values.some(v => typeof v === "boolean")) throw new Error("SQL boolean binding is not allowed");
+      // 登录命中旧格式时的就地升级：只写 password 一格
+      if (sql.startsWith("update guest_types set password =")) {
+        const [password, id] = values as [string, string];
+        const row = rows.find((r) => r.id === id);
+        if (!row) throw new Error("假库：升级密码没找到行");
+        row.password = password;
+        return [] as T[];
+      }
       const [name, password, note, tools, ps, pd, pm, pn, pf, pp, pmx, active, id] =
         values as [
           string,
@@ -191,7 +199,8 @@ describe("guest_types 增删改查", () => {
     });
     expect(t.id).toMatch(/^[0-9a-f]{8}$/);
     expect(t.name).toBe("合作方");
-    expect(t.password).toMatch(/^[0-9a-f]{64}$/);
+    // 口令落库是加盐摘要（v2$盐$摘要），盐每次随机
+    expect(t.password).toMatch(/^v2\$[0-9a-f]{32}\$[0-9a-f]{64}$/);
     expect(t.permSearch).toBe(true);
     expect(t.permDraw).toBe(true);
     expect(t.permMemory).toBe(true);
@@ -270,7 +279,7 @@ describe("guest_types 增删改查", () => {
     expect(up?.name).toBe("新名");
     expect(up?.note).toBe("新说明");
     expect(up?.active).toBe(false);
-    expect(up?.password).toMatch(/^[0-9a-f]{64}$/);
+    expect(up?.password).toMatch(/^v2\$[0-9a-f]{32}\$[0-9a-f]{64}$/);
     expect(up?.permSearch).toBe(true);
   });
 
@@ -615,7 +624,7 @@ describe("密码查重", () => {
     ).rejects.toThrow(/在用/);
     const kept = await updateGuestType(db, b.id, { password: "p2", ...ENV_PW });
     // 同一个口令重交一遍：内容不变（同一个摘要），只是存法保证还是摘要代
-    expect(kept?.password).toMatch(/^[0-9a-f]{64}$/);
+    expect(kept?.password).toMatch(/^v2\$[0-9a-f]{32}\$[0-9a-f]{64}$/);
   });
 
   it("名称或密码为空：抛", async () => {
@@ -724,7 +733,7 @@ describe("摘要存储与两代兼容", () => {
       ...ENV_PW,
     });
     const row = rows.find((r) => r.id === t.id)!;
-    expect(row.password).toMatch(/^[0-9a-f]{64}$/);
+    expect(row.password).toMatch(/^v2\$[0-9a-f]{32}\$[0-9a-f]{64}$/);
     expect(row.password).not.toContain("秘密口令");
     const hit = await findGuestTypeByPassword(
       db,
@@ -735,7 +744,7 @@ describe("摘要存储与两代兼容", () => {
     expect(hit?.name).toBe("a");
   });
 
-  it("老条目还是明文：门口照样验得过", async () => {
+  it("老条目还是明文：门口照样验得过，并就地升级成摘要", async () => {
     const { db, rows } = fakeDb();
     const t = await createGuestType(db, {
       name: "老档",
@@ -750,6 +759,8 @@ describe("摘要存储与两代兼容", () => {
       ENV_PW.gatePw,
     );
     expect(hit?.name).toBe("老档");
+    // 登录成功那一刻是唯一能拿到明文的地方，顺手把旧格式换掉
+    expect(rows.find((r) => r.id === t.id)!.password).toMatch(/^v2\$/);
   });
 
   it("老明文条目原样重交同一口令：就地升级成摘要", async () => {
@@ -764,13 +775,91 @@ describe("摘要存储与两代兼容", () => {
       password: "old-pw",
       ...ENV_PW,
     });
-    expect(up?.password).toMatch(/^[0-9a-f]{64}$/);
+    expect(up?.password).toMatch(/^v2\$[0-9a-f]{32}\$[0-9a-f]{64}$/);
     expect(
       await findGuestTypeByPassword(
         db,
         "old-pw",
         ENV_PW.adminPw,
         ENV_PW.gatePw,
+      ),
+    ).not.toBeNull();
+  });
+});
+
+describe("口令胡椒（PASSWORD_PEPPER）", () => {
+  const PEPPER = "pepper-for-tests";
+
+  it("配了胡椒：落库是 v2p，原口令照验", async () => {
+    const { db } = fakeDb();
+    const t = await createGuestType(
+      db,
+      { name: "合作方", password: "hz-2026", ...ENV_PW },
+      PEPPER,
+    );
+    expect(t.password).toMatch(/^v2p\$[0-9a-f]{32}\$[0-9a-f]{64}$/);
+    expect(t.password).not.toContain("hz-2026");
+    const hit = await findGuestTypeByPassword(
+      db,
+      "hz-2026",
+      ENV_PW.adminPw,
+      ENV_PW.gatePw,
+      PEPPER,
+    );
+    expect(hit?.id).toBe(t.id);
+  });
+
+  it("胡椒不对或没配：验不过 —— 只拿到库的人撞不出明文", async () => {
+    const { db } = fakeDb();
+    await createGuestType(
+      db,
+      { name: "合作方", password: "hz-2026", ...ENV_PW },
+      PEPPER,
+    );
+    expect(
+      await findGuestTypeByPassword(
+        db,
+        "hz-2026",
+        ENV_PW.adminPw,
+        ENV_PW.gatePw,
+        "wrong-pepper",
+      ),
+    ).toBeNull();
+    expect(
+      await findGuestTypeByPassword(
+        db,
+        "hz-2026",
+        ENV_PW.adminPw,
+        ENV_PW.gatePw,
+      ),
+    ).toBeNull();
+  });
+
+  it("先无胡椒建、后配胡椒：登录一次就升级成 v2p", async () => {
+    const { db, rows } = fakeDb();
+    const t = await createGuestType(db, {
+      name: "老档",
+      password: "old-pw",
+      ...ENV_PW,
+    });
+    expect(rows.find((r) => r.id === t.id)!.password).toMatch(/^v2\$/);
+    const hit = await findGuestTypeByPassword(
+      db,
+      "old-pw",
+      ENV_PW.adminPw,
+      ENV_PW.gatePw,
+      PEPPER,
+    );
+    expect(hit?.name).toBe("老档");
+    expect(rows.find((r) => r.id === t.id)!.password).toMatch(/^v2p\$/);
+    // 升级后同一胡椒仍然验得过
+    expect(
+      await findGuestTypeByPassword(
+        db,
+        "old-pw",
+        ENV_PW.adminPw,
+        ENV_PW.gatePw,
+        PEPPER,
       ),
     ).not.toBeNull();
   });

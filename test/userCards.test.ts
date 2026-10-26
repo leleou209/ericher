@@ -91,6 +91,14 @@ function fakeDb() {
     }
 
     if (sql.startsWith("update user_cards set")) {
+      // 登卡命中旧格式时的就地升级：只写 password_hash 一格
+      if (sql.startsWith("update user_cards set password_hash =")) {
+        const [passwordHash, id] = values as [string, string];
+        const row = rows.find((r) => r.id === id);
+        if (!row) throw new Error("假库：升级密码没找到行");
+        row.password_hash = passwordHash;
+        return [] as T[];
+      }
       const [last_seen, id] = values as [string, string];
       const row = rows.find((r) => r.id === id);
       if (!row) throw new Error("假库：update 没找到行");
@@ -140,7 +148,7 @@ describe("领卡", () => {
     const card = await createUserCard(db, BASE);
     expect(card.id).toMatch(/^[0-9a-f]{8}$/);
     expect(card.name).toBe("陈客");
-    expect(card.passwordHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(card.passwordHash).toMatch(/^v2\$[0-9a-f]{32}\$[0-9a-f]{64}$/);
     expect(card.typeId).toBe("hr");
     expect(card.room).toBe("guest-ab12cd34");
     expect(card.created).toMatch(/^\d{4}-\d{2}-\d{2}T/);
@@ -230,6 +238,35 @@ describe("登卡", () => {
     const { db } = fakeDb();
     await createUserCard(db, BASE);
     expect(await verifyCardLogin(db, " 陈客 ", "card-pw-123")).not.toBeNull();
+  });
+});
+
+describe("口令胡椒（PASSWORD_PEPPER）", () => {
+  const PEPPER = "pepper-for-tests";
+
+  it("配了胡椒：卡摘要落 v2p，原密码照验", async () => {
+    const { db } = fakeDb();
+    const made = await createUserCard(db, BASE, PEPPER);
+    expect(made.passwordHash).toMatch(/^v2p\$[0-9a-f]{32}\$[0-9a-f]{64}$/);
+    const hit = await verifyCardLogin(db, "陈客", "card-pw-123", PEPPER);
+    expect(hit?.id).toBe(made.id);
+  });
+
+  it("胡椒不对或没配：登不进去 —— 只拿到库的人撞不出明文", async () => {
+    const { db } = fakeDb();
+    await createUserCard(db, BASE, PEPPER);
+    expect(
+      await verifyCardLogin(db, "陈客", "card-pw-123", "wrong-pepper"),
+    ).toBeNull();
+    expect(await verifyCardLogin(db, "陈客", "card-pw-123")).toBeNull();
+  });
+
+  it("先无胡椒领卡、后配胡椒：登一次就升级成 v2p", async () => {
+    const { db, rows } = fakeDb();
+    const made = await createUserCard(db, BASE);
+    expect(rows.find((r) => r.id === made.id)!.password_hash).toMatch(/^v2\$/);
+    expect(await verifyCardLogin(db, "陈客", "card-pw-123", PEPPER)).not.toBeNull();
+    expect(rows.find((r) => r.id === made.id)!.password_hash).toMatch(/^v2p\$/);
   });
 });
 

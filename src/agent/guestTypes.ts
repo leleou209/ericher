@@ -1,6 +1,7 @@
 // guest_types：多档来客类型的名册（表只建在主人那间）。
 // 每档有名字、密码、可用对外工具、接待说明；来客那间只在鉴权时拿去掉密码的快照。
-// 密码存 SHA-256 hex，不存明文；老条目明文照常能验，下次改密就地升级（verifyStoredPassword 兼容两代）。
+// 密码存加盐摘要（配了 PASSWORD_PEPPER 时是带胡椒的 HMAC），不存明文；
+// 老条目（明文 / 无盐 SHA-256 / 无胡椒 v2）照常能验，登录成功时就地升级（见 verifyPassword）。
 
 import { timingSafeEqual } from "../auth";
 import type { SqlTag } from "./state";
@@ -21,7 +22,7 @@ const COMMON_TYPE_CREATED = "1970-01-01T00:00:00.000Z";
 export interface GuestTypeRow {
   id: string;
   name: string;
-  /** SHA-256 摘要（hex）；老条目可能是明文，验密码时两代都认 */
+  /** 加盐摘要（v2 / v2p）；老条目可能是无盐 hex 或明文，验密码时四代都认 */
   password: string;
   /** 接待说明：进提示词，告诉 ericher 这一档该怎么待 */
   note: string;
@@ -187,31 +188,73 @@ function legacyCols(tools: string[]): {
   };
 }
 
-/** 摘要的形状：64 位 hex。存进去的值长得像这个就是摘要代 */
+/** 摘要的形状：64 位 hex。存进去的值长得像这个就是旧的无盐摘要代 */
 const HEX64 = /^[0-9a-f]{64}$/;
+const enc = new TextEncoder();
 
-/** 口令 → SHA-256 摘要（小写 hex）。入库存这个，明文不落表 */
-export async function hashPassword(pw: string): Promise<string> {
-  const buf = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(pw),
+function hex(bytes: Uint8Array): string {
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", enc.encode(input));
+  return hex(new Uint8Array(buf));
+}
+
+async function hmacHex(key: string, input: string): Promise<string> {
+  const k = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(key),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
   );
-  return [...new Uint8Array(buf)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return hex(
+    new Uint8Array(await crypto.subtle.sign("HMAC", k, enc.encode(input))),
+  );
 }
 
 /**
- * 比对口令，两代都认：存的是摘要（64 hex）且调用方预算了 pwHash 就用摘要比；
- * 存的是明文（老条目）就逐字比。哈希要 await，所以不在本函数里算。
+ * 口令 → 加盐摘要。配置了 PASSWORD_PEPPER 时用 HMAC（v2p），否则加盐 SHA-256（v2）。
+ * 两者都远快于 PBKDF2；pepper 让「只拿到库、没拿到 env」的离线撞库失效。
  */
-function verifyStoredPassword(
-  stored: string,
+export async function hashPassword(pw: string, pepper = ""): Promise<string> {
+  const salt = hex(crypto.getRandomValues(new Uint8Array(16)));
+  const material = `${salt}|${pw}`;
+  const sig = pepper ? await hmacHex(pepper, material) : await sha256Hex(material);
+  return `${pepper ? "v2p" : "v2"}$${salt}$${sig}`;
+}
+
+/**
+ * 比对口令，兼容四代：v2p（pepper）、v2（加盐 SHA-256）、无盐 SHA-256、老明文。
+ * 成功且代际落后时返回 needsRehash，由登录成功的那条路就地升级。
+ */
+export async function verifyPassword(
   pw: string,
-  pwHash?: string,
-): boolean {
-  if (HEX64.test(stored)) return !!pwHash && timingSafeEqual(stored, pwHash);
-  return timingSafeEqual(pw, stored);
+  stored: string,
+  pepper = "",
+): Promise<{ ok: boolean; needsRehash: boolean }> {
+  if (stored.startsWith("v2p$")) {
+    const [, salt, sig] = stored.split("$");
+    if (!pepper || !salt || !sig) return { ok: false, needsRehash: false };
+    return {
+      ok: timingSafeEqual(await hmacHex(pepper, `${salt}|${pw}`), sig),
+      needsRehash: false,
+    };
+  }
+  if (stored.startsWith("v2$")) {
+    const [, salt, sig] = stored.split("$");
+    if (!salt || !sig) return { ok: false, needsRehash: false };
+    const ok = timingSafeEqual(await sha256Hex(`${salt}|${pw}`), sig);
+    return { ok, needsRehash: ok && !!pepper };
+  }
+  if (HEX64.test(stored)) {
+    return {
+      ok: timingSafeEqual(await sha256Hex(pw), stored),
+      needsRehash: true,
+    };
+  }
+  return { ok: timingSafeEqual(pw, stored), needsRehash: true };
 }
 
 /** 把一行剥成对外回显的形状（无密码、无三个老开关） */
@@ -443,16 +486,16 @@ async function assertPasswordFree(
   pw: string,
   adminPw: string,
   gatePw: string,
+  pepper = "",
 ): Promise<void> {
   if (adminPw && timingSafeEqual(pw, adminPw))
     throw new Error("这档密码和管理员口令撞了，换一个");
   if (gatePw && timingSafeEqual(pw, gatePw))
     throw new Error("这档密码和前台口令撞了，换一个");
-  const pwHash = await hashPassword(pw);
   for (const t of listGuestTypes(sql)) {
     // 内置档的密码就是前台门禁口令，表里那格是空的，不参与查重
     if (t.id === COMMON_TYPE_ID) continue;
-    if (verifyStoredPassword(t.password, pw, pwHash))
+    if ((await verifyPassword(pw, t.password, pepper)).ok)
       throw new Error(`这档密码已经「${t.name}」在用，换一个`);
   }
 }
@@ -460,18 +503,19 @@ async function assertPasswordFree(
 export async function createGuestType(
   sql: SqlTag,
   input: GuestTypeInput & { adminPw: string; gatePw: string },
+  pepper = "",
 ): Promise<GuestTypeRow> {
   ensureGuestTypesSchema(sql);
   const name = (input.name || "").trim().slice(0, 40);
   const password = input.password || "";
   if (!name) throw new Error("来客类型的名称不能为空");
   if (!password) throw new Error("来客类型的密码不能为空");
-  await assertPasswordFree(sql, password, input.adminPw, input.gatePw);
+  await assertPasswordFree(sql, password, input.adminPw, input.gatePw, pepper);
   const tools = toolsFromInput(input);
   const row: TypeRow = {
     id: crypto.randomUUID().slice(0, 8),
     name,
-    password: await hashPassword(password),
+    password: await hashPassword(password, pepper),
     note: (input.note || "").trim().slice(0, 300),
     tools: serializeTools(tools),
     ...legacyCols(tools),
@@ -496,6 +540,7 @@ export async function updateGuestType(
   sql: SqlTag,
   id: string,
   patch: GuestTypePatch & { adminPw: string; gatePw: string },
+  pepper = "",
 ): Promise<GuestTypeRow | null> {
   ensureGuestTypesSchema(sql);
   // 改档路径用不过滤 active 的查档：停用的档也查得到，PATCH {active:true} 才有路转正
@@ -518,13 +563,19 @@ export async function updateGuestType(
   if (patch.password !== undefined) {
     const next = patch.password || "";
     if (!next) throw new Error("来客类型的密码不能为空");
-    const nextHash = await hashPassword(next);
-    if (!verifyStoredPassword(cur.password, next, nextHash)) {
-      await assertPasswordFree(sql, next, patch.adminPw, patch.gatePw);
-      password = nextHash;
-    } else if (!HEX64.test(cur.password)) {
-      // 口令没换，但旧条目还是明文：顺手就地升级成摘要
-      password = nextHash;
+    const checked = await verifyPassword(next, cur.password, pepper);
+    if (!checked.ok) {
+      await assertPasswordFree(
+        sql,
+        next,
+        patch.adminPw,
+        patch.gatePw,
+        pepper,
+      );
+      password = await hashPassword(next, pepper);
+    } else if (checked.needsRehash) {
+      // 口令没换，但旧条目是明文/无盐/v2：顺手升级到当前格式
+      password = await hashPassword(next, pepper);
     }
   }
   // 工具清单：给了 tools 就整份换掉；只有老开关时按老开关重推一遍；
@@ -584,12 +635,15 @@ export function removeGuestType(sql: SqlTag, id: string): boolean {
 
 /**
  * 门口验密码：先排除两个内置口令（另一条路），再逐档比已启用类型；命中返回整行。
+ * 命中一条旧格式（明文 / 无盐 / 无 pepper）的记录时，就地升级成当前格式 ——
+ * 登录成功那一刻是唯一能拿到明文的地方，错过这次又要等下一回。
  */
 export async function findGuestTypeByPassword(
   sql: SqlTag,
   pw: string,
   adminPw: string,
   gatePw: string,
+  pepper = "",
 ): Promise<GuestTypeRow | null> {
   if (!pw) return null;
   if (adminPw && timingSafeEqual(pw, adminPw)) return null;
@@ -599,12 +653,21 @@ export async function findGuestTypeByPassword(
     SELECT id, name, password, note, tools, perm_search, perm_draw, perm_memory,
            perm_notes, perm_files, perm_public, perm_matrix, active, created
     FROM guest_types WHERE active = 1 ORDER BY created`;
-  const pwHash = await hashPassword(pw);
   for (const r of rows) {
     // 内置档走的是 env 里的前台口令（上面已早退排除），表里那一格是空的：
     // 跳过它，免得哪个来客拿空口令或撞上这一行
     if (r.id === COMMON_TYPE_ID) continue;
-    if (verifyStoredPassword(r.password, pw, pwHash)) return rowToType(r);
+    const checked = await verifyPassword(pw, r.password, pepper);
+    if (!checked.ok) continue;
+    if (checked.needsRehash) {
+      try {
+        sql`UPDATE guest_types SET password = ${await hashPassword(pw, pepper)}
+            WHERE id = ${r.id}`;
+      } catch {
+        /* 升级失败下次登录再试，不影响这次进门 */
+      }
+    }
+    return rowToType(r);
   }
   return null;
 }

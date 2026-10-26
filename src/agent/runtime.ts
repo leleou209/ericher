@@ -35,6 +35,8 @@ const PRUNE_PROTECT_MS = 30 * 24 * 60 * 60 * 1000;
 
 export function installRuntime(agent: CoworkAgent): void {
   ensureRuntimeSchema(agent.db);
+  // 所有房间都要定期复核长连接：会话过期/超过最长连接寿命就断开，重连时再审。
+  void agent.scheduleEvery(HEARTBEAT_SECONDS, "sessionSweep").catch(() => {});
   // 来客那间不排后台整理：它没有记忆库也没有经验库，整理只会白烧一次模型调用
   if (!agent.isOwnerRoom) return;
   // scheduleEvery 与 cron 形式的 schedule 都默认幂等，onStart 每次唤醒重复调用是安全的

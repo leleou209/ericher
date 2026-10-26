@@ -132,7 +132,7 @@ pre code{background:none;padding:0;font-size:13px;line-height:1.7;word-break:nor
   <article class="ep-doc">
     <h1>ericher 使用手册</h1>
     <p class="ep-lede">这份手册只回答三件事：怎么把它跑起来；每个组件在什么时候初始化、数据放在哪；按自己的需求怎么改。命令和入口都按当前仓库可执行，不写“未来会有”。</p>
-    <p class="ep-meta">适用 0.1.7 · 95 个测试文件 / 1423 例 · 零外部请求</p>
+    <p class="ep-meta">适用 0.1.7 · 95 个测试文件 / 1429 例 · 零外部请求</p>
 
     <details class="ep-mobile-toc"><summary>目录</summary>
       <a href="#quick">1. 五分钟试用</a><a href="#deploy">2. 部署与初始化</a>
@@ -232,6 +232,7 @@ npm run deploy</code></pre>
           <tr><td><code>ADMIN_PASSWORD</code></td><td>管理员口令</td><td>人能敲出来的口令；与来客口令不同</td></tr>
           <tr><td><code>GATE_PASSWORD</code></td><td>通用来客口令</td><td>没有它时管理员仍可用管理员口令进入自己的屋</td></tr>
           <tr><td><code>SESSION_SECRET</code></td><td>会话票签名</td><td>独立随机值；更换会让旧票全部失效</td></tr>
+          <tr><td><code>PASSWORD_PEPPER</code>（可选）</td><td>来客档 / 身份卡的口令胡椒</td><td>独立随机值；配了之后即使库被拿走也无法离线撞库。更换等于这些口令全部失效，管理员与门禁口令不受影响</td></tr>
         </tbody>
       </table></div>
       <p>可选：<code>MAIL_KEY</code>（SMTP 口令）、<code>TAVILY_API_KEY</code>、<code>ZHIPU_KEY</code> / <code>MIMO_API_KEY</code> / <code>DOUBAO_TTS_KEY</code>（语音）、<code>SILICONFLOW_API_KEY</code> / <code>MINIMAX_KEY</code>（绘画）、<code>CF_ACCOUNT_ID</code> + <code>CF_API_TOKEN</code>（额度校准）。完整清单见仓库 <code>.dev.vars.example</code>。</p>

@@ -1131,7 +1131,11 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       return;
     }
     const role: Role = info.role;
-    conn.setState({ role });
+    conn.setState({
+      role,
+      authAt: Date.now(),
+      authExp: info.exp,
+    });
 
     // 把这一场的历史推给刚连上的连接：客户端只在收到 cf_agent_chat_messages 时换新，
     // 新场屋是空的、没有新消息触发广播，不推就一直显示上一场的话。
@@ -3421,6 +3425,31 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     return runHeartbeat(this, this.env);
   }
 
+  /**
+   * 长连接复核：会话过期或连满 12 小时就断开；客户端重连时 onConnect 会再验一次票。
+   * 不在每条消息上查，避免给聊天加延迟。
+   */
+  async sessionSweep(): Promise<void> {
+    const now = Date.now();
+    const maxAge = 12 * 60 * 60 * 1000;
+    for (const conn of this.getConnections()) {
+      const st = conn.state as
+        | { authAt?: number; authExp?: number }
+        | undefined;
+      if (
+        !st?.authExp ||
+        st.authExp <= now ||
+        (st.authAt && now - st.authAt >= maxAge)
+      ) {
+        try {
+          conn.close(1008, "session expired");
+        } catch {
+          // 已经断了
+        }
+      }
+    }
+  }
+
   async nightlyMaintenance(): Promise<void> {
     return runNightlyMaintenance(this, this.env);
   }
@@ -4345,6 +4374,14 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   // ── 多档来客类型（guest_types，见 guestTypes.ts）──────────────
   // 名册归主人那间（管理路由与门口验票都打这里）；来客连接时隔着 DO 取一份快照。
 
+  /**
+   * 口令胡椒：配了就用 HMAC 存来客档与身份卡的口令，没配就退加盐 SHA-256。
+   * 只从 env 取，不落库；泄露一份库文件的人没法离线撞库。
+   */
+  private get passwordPepper(): string {
+    return (this.env as Env & { PASSWORD_PEPPER?: string }).PASSWORD_PEPPER || "";
+  }
+
   private ensureGuestTypes(): void {
     ensureGuestTypesSchema(this.db);
   }
@@ -4361,11 +4398,15 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     if (!this.isOwnerRoom) throw new Error("来客类型只在主人那间维护");
     this.ensureGuestTypes();
     return toGuestTypePublic(
-      await createGuestTypeRow(this.db, {
-        ...input,
-        adminPw: adminPassword(this.env),
-        gatePw: gatePassword(this.env),
-      }),
+      await createGuestTypeRow(
+        this.db,
+        {
+          ...input,
+          adminPw: adminPassword(this.env),
+          gatePw: gatePassword(this.env),
+        },
+        this.passwordPepper,
+      ),
     );
   }
 
@@ -4376,11 +4417,16 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
   ): Promise<GuestTypePublic | null> {
     if (!this.isOwnerRoom) throw new Error("来客类型只在主人那间维护");
     this.ensureGuestTypes();
-    const row = await updateGuestTypeRow(this.db, id, {
-      ...patch,
-      adminPw: adminPassword(this.env),
-      gatePw: gatePassword(this.env),
-    });
+    const row = await updateGuestTypeRow(
+      this.db,
+      id,
+      {
+        ...patch,
+        adminPw: adminPassword(this.env),
+        gatePw: gatePassword(this.env),
+      },
+      this.passwordPepper,
+    );
     return row ? toGuestTypePublic(row) : null;
   }
 
@@ -4401,6 +4447,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       pw,
       adminPassword(this.env),
       gatePassword(this.env),
+      this.passwordPepper,
     );
     return hit ? { id: hit.id, name: hit.name } : null;
   }
@@ -4426,7 +4473,12 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     name: string,
     password: string,
   ): Promise<UserCardPublic | null> {
-    const card = await verifyCardLoginRow(this.db, name, password);
+    const card = await verifyCardLoginRow(
+      this.db,
+      name,
+      password,
+      this.passwordPepper,
+    );
     return card ? toUserCardPublic(card) : null;
   }
 
@@ -4439,11 +4491,15 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     typeId: string;
     room: string;
   }): Promise<UserCardPublic> {
-    const card = await createUserCard(this.db, {
-      ...input,
-      adminPw: adminPassword(this.env),
-      gatePw: gatePassword(this.env),
-    });
+    const card = await createUserCard(
+      this.db,
+      {
+        ...input,
+        adminPw: adminPassword(this.env),
+        gatePw: gatePassword(this.env),
+      },
+      this.passwordPepper,
+    );
     return toUserCardPublic(card);
   }
 

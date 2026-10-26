@@ -24,6 +24,8 @@ interface CoworkSecrets {
   GATE_PASSWORD?: string;
   ADMIN_PASSWORD?: string;
   SESSION_SECRET?: string;
+  /** 来客档 / 身份卡密码摘要的胡椒（HMAC 密钥）。不配则退加盐 SHA-256 */
+  PASSWORD_PEPPER?: string;
 
   // ── 多模态 ──
   ZHIPU_KEY?: string;

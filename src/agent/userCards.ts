@@ -12,7 +12,7 @@
 // 跟着所属类型档走 —— 档位勾了记事本 / 云盘 / 公开，卡的主人才能开。
 
 import { timingSafeEqual } from "../auth";
-import { COMMON_TYPE_ID, hashPassword } from "./guestTypes";
+import { COMMON_TYPE_ID, hashPassword, verifyPassword } from "./guestTypes";
 import type { SqlTag } from "./state";
 
 // 内置通用档的档位 id 定义在 guestTypes.ts（它现在是名册里真实的一行）；
@@ -27,7 +27,7 @@ interface UserCardRow {
   purpose: string;
   /** 联系邮箱：只登记不发送（项目没有邮件通道），管理员面板可见，用于人工联系 */
   email: string;
-  /** SHA-256 摘要（hex）。明文不落表，和 guest_types 同一套规矩 */
+  /** 加盐摘要（v2 / v2p）。明文不落表，和 guest_types 同一套规矩 */
   passwordHash: string;
   /** 归属权限档 */
   typeId: string;
@@ -116,6 +116,7 @@ export async function createUserCard(
     adminPw: string;
     gatePw: string;
   },
+  pepper = "",
 ): Promise<UserCardRow> {
   ensureUserCardsSchema(sql);
   const name = (input.name || "").trim().slice(0, 40);
@@ -138,7 +139,7 @@ export async function createUserCard(
     name,
     purpose,
     email,
-    password_hash: await hashPassword(password),
+    password_hash: await hashPassword(password, pepper),
     type_id: input.typeId || COMMON_TYPE_ID,
     room: input.room,
     created: new Date().toISOString(),
@@ -155,12 +156,13 @@ export async function createUserCard(
 /**
  * 登卡：昵称 + 密码对上了返回那张卡。密码只认摘要比对；
  * 查无此人、密码不对都返回 null —— 不区分「没有这个人」和「密码错了」，
- * 免得给试探的人报点。
+ * 免得给试探的人报点。旧格式（明文 / 无盐 / 无 pepper）验过就就地升级。
  */
 export async function verifyCardLogin(
   sql: SqlTag,
   name: string,
   password: string,
+  pepper = "",
 ): Promise<UserCardRow | null> {
   if (!name || !password) return null;
   ensureUserCardsSchema(sql);
@@ -170,8 +172,17 @@ export async function verifyCardLogin(
     FROM user_cards WHERE name = ${(name || "").trim().slice(0, 40)}`;
   if (!rows.length) return null;
   const card = rowToCard(rows[0]);
-  const hash = await hashPassword(password);
-  if (!timingSafeEqual(card.passwordHash, hash)) return null;
+  const checked = await verifyPassword(password, card.passwordHash, pepper);
+  if (!checked.ok) return null;
+  if (checked.needsRehash) {
+    try {
+      const next = await hashPassword(password, pepper);
+      sql`UPDATE user_cards SET password_hash = ${next} WHERE id = ${card.id}`;
+      card.passwordHash = next;
+    } catch {
+      /* 升级失败下次登卡再试，不影响这次进门 */
+    }
+  }
   return card;
 }
 
