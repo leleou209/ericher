@@ -15,6 +15,7 @@ import {
   forbidden,
   gatePassword,
   issueToken,
+  loginThrottleKey,
   renewSession,
   revokeSession,
   tokenNeedsRenewal,
@@ -217,11 +218,12 @@ async function handleLogin(req: Request, env: Env): Promise<Response> {
       { status: 503 },
     );
   const key = clientKey(req);
+  const throttleKey = await loginThrottleKey(key, "auth");
   const locked = isLockedOut(key);
   if (locked) {
     return Response.json(
       { ok: false, error: `尝试过于频繁，请 ${locked} 秒后再试` },
-      { status: 429 },
+      { status: 429, headers: { "Retry-After": String(locked) } },
     );
   }
 
@@ -246,10 +248,22 @@ async function handleLogin(req: Request, env: Env): Promise<Response> {
   }
   if (!role && !type) {
     noteFailure(key);
+    const slow = await agentStub(env).loginFailure(throttleKey).catch(() => null);
+    if (slow?.blocked) {
+      return Response.json(
+        { ok: false, error: `尝试过于频繁，请 ${slow.blocked} 秒后再试` },
+        { status: 429, headers: { "Retry-After": String(slow.blocked) } },
+      );
+    }
     return Response.json({ ok: false, error: "密码错误" }, { status: 401 });
   }
 
   attempts.delete(key);
+  try {
+    void agentStub(env).loginSuccess(throttleKey).catch(() => {});
+  } catch {
+    // 限速存储不可用：成功登录不受影响
+  }
   await revokeSession(env, authToken(req)).catch(() => false);
   const token = await issueToken(env, role ?? "user", undefined, type);
   // 顺带把「该连哪间屋」告诉前端：一个 DO 只有一份对话，来客必须进自己那间，
@@ -271,7 +285,7 @@ async function handleCardLogin(req: Request, env: Env): Promise<Response> {
   if (locked) {
     return Response.json(
       { ok: false, error: `尝试过于频繁，请 ${locked} 秒后再试` },
-      { status: 429 },
+      { status: 429, headers: { "Retry-After": String(locked) } },
     );
   }
   let body: { name?: unknown; password?: unknown };
@@ -282,6 +296,7 @@ async function handleCardLogin(req: Request, env: Env): Promise<Response> {
   }
   const name = typeof body.name === "string" ? body.name : "";
   const password = typeof body.password === "string" ? body.password : "";
+  const throttleKey = await loginThrottleKey(key, `card:${name.trim()}`);
   let card = null;
   try {
     card = await agentStub(env).verifyCardLogin(name, password);
@@ -290,12 +305,24 @@ async function handleCardLogin(req: Request, env: Env): Promise<Response> {
   }
   if (!card) {
     noteFailure(key);
+    const slow = await agentStub(env).loginFailure(throttleKey).catch(() => null);
+    if (slow?.blocked) {
+      return Response.json(
+        { ok: false, error: `尝试过于频繁，请 ${slow.blocked} 秒后再试` },
+        { status: 429, headers: { "Retry-After": String(slow.blocked) } },
+      );
+    }
     return Response.json(
       { ok: false, error: "昵称或密码不对" },
       { status: 401 },
     );
   }
   attempts.delete(key);
+  try {
+    void agentStub(env).loginSuccess(throttleKey).catch(() => {});
+  } catch {
+    // 限速存储不可用：成功登录不受影响
+  }
   await revokeSession(env, authToken(req)).catch(() => false);
   const token = await issueToken(env, "user", undefined, card.typeId, card.id);
   const agent = await agentNameForToken(env, "user", token);

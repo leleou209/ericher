@@ -237,6 +237,13 @@ import {
   touchAuthSession,
 } from "./authSessions";
 import {
+  bumpLoginFailure,
+  clearLoginFailures,
+  ensureLoginThrottleSchema,
+  pruneLoginThrottle,
+  type LoginThrottleResult,
+} from "./loginThrottle";
+import {
   activateModelEntry,
   createModelEntry,
   createModelProvider,
@@ -973,6 +980,14 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     if (this.authSessionsReady) return;
     ensureAuthSessionSchema(this.db);
     this.authSessionsReady = true;
+  }
+
+  /** 登录失败表同理，每实例只建一次。 */
+  private loginThrottleReady = false;
+  private ensureLoginThrottle(): void {
+    if (this.loginThrottleReady) return;
+    ensureLoginThrottleSchema(this.db);
+    this.loginThrottleReady = true;
   }
 
   /** 同 feedback：会话表也可能建在旧实例上，用到的地方先过一遍 */
@@ -4572,6 +4587,22 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       }
     }
     return n;
+  }
+
+  /** 登录失败：持久计数；只在失败路径调用，不拖慢成功登录。 */
+  async loginFailure(key: string): Promise<LoginThrottleResult> {
+    if (this.name !== OWNER_AGENT) return { blocked: 0, count: 0 };
+    this.ensureLoginThrottle();
+    const result = bumpLoginFailure(this.db, key);
+    pruneLoginThrottle(this.db);
+    return result;
+  }
+
+  /** 登录成功：清掉这一格失败计数（调用方不等待）。 */
+  async loginSuccess(key: string): Promise<void> {
+    if (this.name !== OWNER_AGENT) return;
+    this.ensureLoginThrottle();
+    clearLoginFailures(this.db, key);
   }
 
   /** 持卡人名册（面板用）：摘要永不出门 —— 名册是给人看的，不是给猜密码的。 */

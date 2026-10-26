@@ -39,5 +39,8 @@ export function attachFakeSessions<T extends object>(
     return s.exp;
   };
   a.sessionRevoke = async (hash: string) => store.delete(hash);
+  a.sessionRevokeAccount = async () => 0;
+  a.loginFailure = async () => ({ blocked: 0, count: 1 });
+  a.loginSuccess = async () => {};
   return agent;
 }

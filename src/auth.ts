@@ -67,6 +67,20 @@ function randomSid(): string {
   return b64url(bytes.buffer);
 }
 
+/** 登录限速的键：IP 不落原值，目标把 admin / 某张卡分开。 */
+export async function loginThrottleKey(
+  ip: string,
+  target: string,
+): Promise<string> {
+  const buf = await crypto.subtle.digest(
+    "SHA-256",
+    enc.encode(`login.${ip}.${target}`),
+  );
+  return [...new Uint8Array(buf)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 /** 常量时间比较，避免按字符早退泄露签名前缀（agent 子目录查口令也用它） */
 export function timingSafeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
