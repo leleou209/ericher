@@ -20,6 +20,10 @@ export interface TokenInfo {
 
 const enc = new TextEncoder();
 
+/** 同一 isolate 内 5 秒会话缓存：一次请求里会多次验票，别每次都打主屋 DO。 */
+const SESSION_CACHE_MS = 5000;
+const sessionCache = new Map<string, { info: TokenInfo; at: number }>();
+
 /** 来客类型 id / 身份卡 id 的形状；签会话前先过一遍，脏值不进库 */
 const TYPE_RE = /^[a-z0-9_-]{1,32}$/;
 const CARD_RE = /^[a-z0-9]{4,16}$/;
@@ -166,10 +170,20 @@ export async function verifyTokenInfo(
   const key = signingKey(env);
   if (!key) return null;
   if (!(await timingSafeEqual(sig, await hmac(key, `sid.${sid}`)))) return null;
+  const cacheKey = `${key}\u0000${token}`;
+  const hit = sessionCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < SESSION_CACHE_MS && hit.info.exp > Date.now())
+    return hit.info;
   try {
     const info = await sessionStub(env).sessionVerify(await hashSid(sid));
     if (!info || info.exp <= Date.now()) return null;
     if (info.role !== "admin" && info.role !== "user") return null;
+    if (sessionCache.size > 500) {
+      const now = Date.now();
+      for (const [k, v] of sessionCache)
+        if (now - v.at >= SESSION_CACHE_MS) sessionCache.delete(k);
+    }
+    sessionCache.set(cacheKey, { info, at: Date.now() });
     return info;
   } catch {
     return null;
@@ -196,7 +210,9 @@ export async function revokeSession(
   if (!sid || !sig || !key) return false;
   if (!(await timingSafeEqual(sig, await hmac(key, `sid.${sid}`)))) return false;
   try {
-    return await sessionStub(env).sessionRevoke(await hashSid(sid));
+    const ok = await sessionStub(env).sessionRevoke(await hashSid(sid));
+    sessionCache.delete(`${key}\u0000${token}`);
+    return ok;
   } catch {
     return false;
   }
@@ -217,7 +233,9 @@ export async function renewSession(
   if (!(await timingSafeEqual(sig, await hmac(key, `sid.${sid}`)))) return null;
   try {
     const exp = await sessionStub(env).sessionRenew(await hashSid(sid), ttlSec);
-    return exp === null ? null : token;
+    if (exp === null) return null;
+    sessionCache.delete(`${key}\u0000${token}`);
+    return token;
   } catch {
     return null;
   }

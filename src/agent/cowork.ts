@@ -966,6 +966,14 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     this.feedbackReady = true;
   }
 
+  /** 会话表：每实例只建一次，不在每次鉴权时跑 DDL。 */
+  private authSessionsReady = false;
+  private ensureAuthSessions(): void {
+    if (this.authSessionsReady) return;
+    ensureAuthSessionSchema(this.db);
+    this.authSessionsReady = true;
+  }
+
   /** 同 feedback：会话表也可能建在旧实例上，用到的地方先过一遍 */
   private sessionsReady = false;
   private ensureSessions(): void {
@@ -4457,6 +4465,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     exp: number;
   }): Promise<void> {
     if (this.name !== OWNER_AGENT) return;
+    this.ensureAuthSessions();
     const now = new Date().toISOString();
     insertAuthSession(this.db, {
       hash: input.hash,
@@ -4477,7 +4486,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     exp: number;
   } | null> {
     if (this.name !== OWNER_AGENT) return null;
-    ensureAuthSessionSchema(this.db);
+    this.ensureAuthSessions();
     const row = getAuthSession(this.db, hash);
     if (!row || row.expires <= Date.now()) return null;
     if (row.role !== "admin" && row.role !== "user") return null;
@@ -4491,7 +4500,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   async sessionRenew(hash: string, ttlSec: number): Promise<number | null> {
     if (this.name !== OWNER_AGENT) return null;
-    ensureAuthSessionSchema(this.db);
+    this.ensureAuthSessions();
     const exp = Date.now() + Math.max(0, ttlSec) * 1000;
     return touchAuthSession(this.db, hash, exp, new Date().toISOString())
       ? exp
@@ -4500,7 +4509,7 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
 
   async sessionRevoke(hash: string): Promise<boolean> {
     if (this.name !== OWNER_AGENT) return false;
-    ensureAuthSessionSchema(this.db);
+    this.ensureAuthSessions();
     return revokeAuthSession(this.db, hash);
   }
 

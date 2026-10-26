@@ -37,7 +37,6 @@ export function ensureAuthSessionSchema(sql: SqlTag): void {
 }
 
 export function insertAuthSession(sql: SqlTag, row: AuthSessionRow): void {
-  ensureAuthSessionSchema(sql);
   sql`INSERT OR REPLACE INTO auth_sessions
       (hash, role, type, card, created, last_seen, expires)
       VALUES (${row.hash}, ${row.role}, ${row.type}, ${row.card},
@@ -48,7 +47,6 @@ export function getAuthSession(
   sql: SqlTag,
   hash: string,
 ): AuthSessionRow | null {
-  ensureAuthSessionSchema(sql);
   const rows = sql<Row>`
     SELECT hash, role, type, card, created, last_seen, expires
     FROM auth_sessions WHERE hash = ${hash}`;
@@ -72,7 +70,6 @@ export function touchAuthSession(
   expires: number,
   lastSeen: string,
 ): boolean {
-  ensureAuthSessionSchema(sql);
   const row = getAuthSession(sql, hash);
   if (!row || row.expires <= Date.now()) return false;
   sql`UPDATE auth_sessions SET expires = ${expires}, last_seen = ${lastSeen}
@@ -81,7 +78,6 @@ export function touchAuthSession(
 }
 
 export function revokeAuthSession(sql: SqlTag, hash: string): boolean {
-  ensureAuthSessionSchema(sql);
   const row = getAuthSession(sql, hash);
   if (!row) return false;
   sql`DELETE FROM auth_sessions WHERE hash = ${hash}`;
@@ -90,7 +86,6 @@ export function revokeAuthSession(sql: SqlTag, hash: string): boolean {
 
 /** 过期一周以上的清掉；再按过期时间留最近 1000 条，防止无限长。 */
 export function pruneAuthSessions(sql: SqlTag, cap = 1000): void {
-  ensureAuthSessionSchema(sql);
   sql`DELETE FROM auth_sessions WHERE expires < ${Date.now() - 7 * 86400_000}`;
   sql`DELETE FROM auth_sessions WHERE hash NOT IN (
         SELECT hash FROM auth_sessions ORDER BY expires DESC LIMIT ${cap}
