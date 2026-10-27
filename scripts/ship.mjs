@@ -403,17 +403,24 @@ async function pushGit() {
       "POST",
       "-H",
       `Authorization: Bearer ${token}`,
-      "-F",
-      `name=${name}`,
-      "-F",
-      `file=@${zipRel}`,
+      // 原样传字节：-F 发的是 multipart 外壳，GitHub 会把它整段当成资产内容，
+      // 下回来的 zip 比本地大几百字节、校验永远对不上
+      "-H",
+      "Content-Type: application/octet-stream",
+      "--data-binary",
+      `@${zipRel}`,
       ...(proxy ? ["-x", proxy] : []),
       `https://uploads.github.com/repos/${owner}/${repo}/releases/${rel.id}/assets?name=${name}`,
     ],
-    { cwd: root, encoding: "utf8" },
+    { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
   );
   const upJson = JSON.parse(upload.stdout || "{}");
   if (!upJson.id) die(`资产上传失败：${(upload.stdout || "").slice(0, 200)}`);
+  const expect = existsSync(path.join(root, zipRel))
+    ? readFileSync(path.join(root, zipRel)).length
+    : 0;
+  if (expect && upJson.size !== expect)
+    die(`资产大小对不上：本地 ${expect} 字节，GitHub ${upJson.size} 字节`);
   ok(`已挂新资产 ${name}${shaText ? `（sha256 ${shaText.slice(0, 16)}…）` : ""}`);
 }
 
