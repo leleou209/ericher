@@ -2,7 +2,7 @@
 
 跑在 Cloudflare Workers 上的单人 AI 助手兼接待台：管理员可安排任务，也可开放来客接待；不同来客的对话、记忆和私有文件按房间隔离。
 
-基于 Cloudflare Agents SDK + Durable Objects + React，支持 PWA 与移动端。当前 **v0.1.7**；变更见 [CHANGELOG.md](CHANGELOG.md)，完整用法见[在线使用手册](https://erich.116671.xyz/guide)。
+基于 Cloudflare Agents SDK + Durable Objects + React，支持 PWA 与移动端。当前 **v0.1.7.1**；变更见 [CHANGELOG.md](CHANGELOG.md)，完整用法见[在线使用手册](https://erich.116671.xyz/guide)。
 
 **适用场景**：在自己的域名下部署一个个人/家庭助手，在 Cloudflare 免费额度内运行；需要搜索、微知识库、绘画、TTS、多来客隔离，但不想被平台套餐绑定。不适合作为面向大量陌生访客的客服 SaaS。
 
@@ -135,6 +135,20 @@ npm run test:weak-network  # 隔离 workerd 上的弱网首屏交付回归
 `fixture:weak-network` / `fixture:weak-network:stop` 手工起一个限速的本地实例，用来看门禁检不出来的浏览器绘制顺序；用完必须 stop，它只按自己记录的 pid 收进程。
 
 行为口径见 [docs/chat-recovery.md](docs/chat-recovery.md)（会话后台运行与断联恢复）与 [docs/web-encoding.md](docs/web-encoding.md)（搜索与网页读取编码）。
+
+## 发布
+
+```bash
+npm run ship               # status：看提交 / 版本号 / version.json / 文档测试数是否对齐
+npm run ship:gate          # 门禁 + 把测试数从 vitest 输出写回文档 + 构建 + 首屏守卫
+npm run ship:next -- 0.1.8 --title "…"   # 一次改齐 package.json / version.json / CHANGELOG 骨架
+npm run ship:pack          # 干净树前提下重建公开产物并打部署包，输出 sha256
+npm run ship:deploy        # 干净树前提下部署私有目标，输出线上版本 id
+npm run ship:git           # 推 main + 打 tag + 建/换 release 资产（要 --yes，默认拒绝）
+```
+
+顺序、准入条件与回滚口径见 [docs/release-workflow.md](docs/release-workflow.md)。
+一次更新 = 一个提交 + 一个版本号 + 一个部署包 + 一个线上版本 id；数字由脚本产出，不手抄。
 
 ## 备份
 
