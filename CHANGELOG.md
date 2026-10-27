@@ -72,8 +72,9 @@
 ### 门禁与交付
 
 - 全量 **96 个测试文件 / 1434 例**通过；`tsc -b` 零输出；生产构建与首屏包守卫通过。
-- 发布包：`ericher-0.1.7.1-cf.zip`（内容提交待补）sha256 待补。
-- 线上 Worker 版本 id：待补。
+- 发布包：`ericher-0.1.7.1-cf.zip`（内容提交 `b3655cf`）2,883,971 字节，
+  sha256 `f0fff9ae9e114d60b9f64118f19400bd7db0cfc19e7138ae85a14b4239a524a7`。
+- 线上 Worker 版本 id：`7b94785f-a0f3-4fcd-a922-4ad35635e7ea`（提交 `7420c28`）。
 - **升级到这一版要做什么**：旧会话票全部失效，管理员与来客都要重登一次；可选配 `PASSWORD_PEPPER`
   （`npx wrangler secret put PASSWORD_PEPPER`），来客档与身份卡口令不需要重设。
 
