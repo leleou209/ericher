@@ -245,14 +245,14 @@ pre code{background:none;padding:0;font-size:13px;line-height:1.7}
   <div class="ep-mail" style="margin-bottom:22px">
     <h3 style="margin:0 0 6px;font-size:17px">方式 A · 下载预构建包</h3>
     <p style="margin:0 0 6px">包内是完整的 Worker 产物、静态资源与 <code>wrangler.jsonc</code>，不含密钥；解压后直接部署，不需要 <code>npm install</code> 或 <code>npm run build</code>。</p>
-    <p class="ep-note">下载页：<a href="https://github.com/leleou209/ericher/releases" rel="noopener">GitHub Releases</a> · 当前 <code>ericher-0.1.7-cf.zip</code>（2,896,891 字节）· SHA-256 <code>782edac4460882d03a16b9f1b3ce069152d4b44a261a7cc5fda938654a82b9a6</code></p>
-<pre><code>curl -L -o ericher-0.1.7-cf.zip \
-  https://github.com/leleou209/ericher/releases/download/v0.1.7/ericher-0.1.7-cf.zip
-sha256sum ericher-0.1.7-cf.zip
-# Windows: Get-FileHash .\ericher-0.1.7-cf.zip -Algorithm SHA256
+    <p class="ep-note">下载页：<a href="https://github.com/leleou209/ericher/releases" rel="noopener">GitHub Releases</a> · 当前 <code>ericher-0.1.7.1-cf.zip</code>（2,883,971 字节）· SHA-256 <code>f0fff9ae9e114d60b9f64118f19400bd7db0cfc19e7138ae85a14b4239a524a7</code></p>
+<pre><code>curl -L -o ericher-0.1.7.1-cf.zip \
+  https://github.com/leleou209/ericher/releases/download/v0.1.7.1/ericher-0.1.7.1-cf.zip
+sha256sum ericher-0.1.7.1-cf.zip
+# Windows: Get-FileHash .\ericher-0.1.7.1-cf.zip -Algorithm SHA256
 
-unzip ericher-0.1.7-cf.zip -d ericher-0.1.7-cf
-cd ericher-0.1.7-cf
+unzip ericher-0.1.7.1-cf.zip -d ericher-0.1.7.1-cf
+cd ericher-0.1.7.1-cf
 
 npx wrangler@4 r2 bucket create ericher-memory
 npx wrangler@4 vectorize create ericher-memory-bge-m3 --dimensions 1024 --metric cosine
@@ -318,7 +318,7 @@ npm run deploy</code></pre><p class="ep-note">部署到你自己域名下，就�
 </main>
 
 <footer class="ep-foot"><div class="ep-wrap ep-foot" style="padding:0">
-  <span>ericher 接待台 · v0.1.7 <code>a0aa19b</code> · 2026-10-19</span>
+  <span>ericher 接待台 · v0.1.7.1 <code>b3655cf</code> · 2026-10-27</span>
   <span>Cloudflare Agents SDK + Durable Objects + React · 以 MIT 开源</span>
 </div></footer>
 </body>
