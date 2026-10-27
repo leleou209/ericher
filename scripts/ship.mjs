@@ -287,10 +287,26 @@ function next() {
   );
 }
 
+/** 取一次 GitHub 凭据：push 与 release API 共用，避免分两步各弹一次登录窗 */
+function credentialFill() {
+  const r = spawnSync("git", ["credential", "fill"], {
+    cwd: root,
+    encoding: "utf8",
+    input: "protocol=https\nhost=github.com\n\n",
+  });
+  if ((r.status ?? 1) !== 0)
+    die(`取不到 GitHub 凭据：${(r.stderr || "").slice(0, 200)}`);
+  const out = r.stdout || "";
+  const username = /^username=(.*)$/m.exec(out)?.[1]?.trim();
+  const password = /^password=(.*)$/m.exec(out)?.[1]?.trim();
+  if (!password) die("凭据里没有 password（token）");
+  return { username: username || "x-access-token", password };
+}
+
 async function pushGit() {
   if (!has("yes"))
     die(
-      "推 GitHub 需要显式 --yes（这一版你说过先不上传；线上部署不等于已发布）",
+      "推 GitHub 需要显式 --yes（线上部署不等于已发布）",
     );
   requireClean("推 GitHub");
   const proxy = flagValue("proxy");
@@ -298,14 +314,29 @@ async function pushGit() {
   const { pkg } = versionIds();
   const tag = `v${pkg}`;
 
-  run("git", [...proxyArgs, "push", "origin", "HEAD:main"]);
+  // 凭据只取一次；下面用一次性 helper 通过环境变量交给 git，token 不进 argv
+  const cred = credentialFill();
+  ok("已拿到 GitHub 凭据（本次运行内复用）");
+  const authArgs = [
+    "-c",
+    "credential.helper=",
+    "-c",
+    'credential.helper=!f() { echo "username=$SHIP_GIT_USER"; echo "password=$SHIP_GIT_PASS"; }; f',
+  ];
+  const authEnv = { SHIP_GIT_USER: cred.username, SHIP_GIT_PASS: cred.password };
+
+  run("git", [...proxyArgs, ...authArgs, "push", "origin", "HEAD:main"], {
+    env: authEnv,
+  });
   ok("已推 main");
   const hasTag = git(["tag", "--list", tag]);
   if (!hasTag) {
     run("git", ["tag", "-a", tag, "-m", `${tag} ${subject()}`]);
     ok(`已打 tag ${tag}`);
   }
-  run("git", [...proxyArgs, "push", "origin", tag]);
+  run("git", [...proxyArgs, ...authArgs, "push", "origin", tag], {
+    env: authEnv,
+  });
   ok(`已推 tag ${tag}`);
 
   const zipRel = `release/ericher-${pkg}-cf.zip`;
@@ -316,17 +347,8 @@ async function pushGit() {
   }
   const owner = flagValue("owner") || "leleou209";
   const repo = flagValue("repo") || "ericher";
-  // 凭据只取一次，然后在同一条命令里用完：反复 git credential fill 会一次次弹账号窗
-  const filled = spawnSync("git", ["credential", "fill"], {
-    cwd: root,
-    encoding: "utf8",
-    input: "protocol=https\nhost=github.com\n\n",
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-  });
-  if ((filled.status ?? 1) !== 0)
-    die(`取不到 GitHub 凭据：${(filled.stderr || "").slice(0, 200)}`);
-  const token = /^password=(.*)$/m.exec(filled.stdout || "")?.[1]?.trim();
-  if (!token) die("凭据里没有 password（token）");
+  // 用开头取到的那一份，不再 fill 第二次
+  const token = cred.password;
 
   const api = (method, url, body) =>
     spawnSync(
