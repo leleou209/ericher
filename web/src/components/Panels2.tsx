@@ -99,6 +99,8 @@ import {
   type VisitorRoom,
 } from "../lib/types";
 import { fmtWhen, toolMeta, type Patch } from "./PanelsShared";
+import { percentOf, useDriveUploader } from "../hooks/useDriveUploader";
+import type { UploadTier } from "../lib/upload";
 import "./Panels.css";
 import "./Panels2Panels.css";
 
@@ -545,14 +547,17 @@ export function FilePanel({ sessions }: { sessions: SessionMeta[] }) {
   /** 相对路径 → 完整 key：写操作都按完整 key 谈 */
   const fullKey = (rel: string) => scope + rel;
 
+  // 上传走新的分档通道：多份并发、各自带进度、失败只重试那一份。
+  const uploader = useDriveUploader(target, () => {
+    void load();
+  });
+  const [uploadTier, setUploadTier] = useState<UploadTier | "auto">("auto");
   const upload = async (list: FileList | null) => {
     if (!list?.length) return;
     setBusy(true);
+    setErr("");
     try {
-      for (const f of Array.from(list)) await api.upload(f, target);
-      await load();
-    } catch (e) {
-      setErr((e as Error).message);
+      await uploader.upload(list, uploadTier === "auto" ? undefined : uploadTier);
     } finally {
       setBusy(false);
     }
@@ -774,10 +779,41 @@ export function FilePanel({ sessions }: { sessions: SessionMeta[] }) {
           />
           {busy ? "上传中…" : target ? `上传到「${target}」` : "选择文件上传"}
         </label>
+        <select
+          className="field upload-tier"
+          value={uploadTier}
+          onChange={(e) => setUploadTier(e.target.value as UploadTier | "auto")}
+          disabled={busy}
+          title="上传方式：轻量适合小文件，均衡适合大多数文件，专业适合超大文件与不稳定网络"
+        >
+          <option value="auto">上传方式：自动</option>
+          <option value="lite">轻量（单次直传）</option>
+          <option value="balanced">均衡（分片并发）</option>
+          <option value="pro">专业（分片+续传）</option>
+        </select>
         <button className="btn-ghost" onClick={mkdir} disabled={busy}>
           新建文件夹
         </button>
       </div>
+      {uploader.items.length > 0 && (
+        <ul className="rows upload-progress-list">
+          {uploader.items.map(item => (
+            <li key={item.name} className={`upload-item ${item.status}`}>
+              <span className="upload-item-name">{item.name}</span>
+              <span className="upload-item-state">
+                {item.status === "uploading"
+                  ? `${percentOf(item)}%`
+                  : item.status === "done"
+                    ? "已上传"
+                    : `失败：${item.error ?? "未知原因"}`}
+              </span>
+              <span className="upload-item-bar">
+                <i style={{ width: `${item.status === "done" ? 100 : percentOf(item)}%` }} />
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
       <ul className="rows">
         {tree.map((n) => renderNode(n, 0))}
         {!tree.length && (

@@ -7,3 +7,29 @@
 .entity-group > .entity-note {
   margin: 0 14px 12px 64px;
 }
+
+/* 上传进度：每份文件一行，条状指示走到哪 */
+.upload-tier { max-width: 190px; }
+.upload-progress-list { margin: 8px 0; }
+.upload-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "name state" "bar bar";
+  gap: 4px 10px;
+  align-items: center;
+  padding: 8px 2px;
+  border-bottom: 1px solid var(--yuzhe-line-soft, #ebedf0);
+}
+.upload-item-name { grid-area: name; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-item-state { grid-area: state; font-size: 12px; color: var(--yuzhe-ink-dim, #666); }
+.upload-item.failed .upload-item-state { color: var(--yuzhe-ink-strong, #1d2129); }
+.upload-item-bar {
+  grid-area: bar;
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--yuzhe-bg-soft, #f7f8fa);
+  overflow: hidden;
+}
+.upload-item-bar i { display: block; height: 100%; background: var(--yuzhe-black, #000); transition: width 0.2s ease; }
+.upload-item.done .upload-item-bar i { background: var(--yuzhe-line-strong, #323232); }

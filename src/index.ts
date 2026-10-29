@@ -1,5 +1,13 @@
 import { sessionConflictResponse } from "./shared/sessionConflict";
 import { fail, readJsonObject } from "./shared/httpInput";
+import {
+  handleUploadAbort,
+  handleUploadFinish,
+  handleUploadPart,
+  handleUploadRaw,
+  handleUploadStatus,
+  type UploadScope,
+} from "./uploadHandlers";
 // Worker 入口：鉴权 → 路由 → routeAgentRequest → 静态资源回退；Agent 本体在 ./agent/cowork.ts。
 
 import { routeAgentRequest } from "agents";
@@ -434,6 +442,28 @@ async function uploadKeyFor(
   }
   const room = await agentNameForToken(env, "user", authToken(req));
   return scopedKey(room, base, ext, folder);
+}
+
+/**
+ * 上传通道的落点与权限上下文。
+ *
+ * 管理员：整只桶（scope 为空串），落桶根。
+ * 持卡来客：scope 是自己房间的前缀集合，落自己房间前缀。
+ * 公开空间另需 permPublic —— 没开就拒，不静默降级成私有。
+ */
+async function uploadScopeFor(
+  req: Request,
+  env: Env,
+  role: Role,
+): Promise<UploadScope | null> {
+  if (role === "admin") {
+    // 管理员本来就能往公开空间放东西（与 handleUpload 的老判定一致）
+    return { scope: [""], roomPrefix: null, allowPublic: true };
+  }
+  if (!(await cardAllows(req, env, "permFiles"))) return null;
+  const room = await agentNameFor(req, env, role);
+  const allowPublic = await cardAllows(req, env, "permPublic");
+  return { scope: roomKeyPrefixes(room), roomPrefix: room, allowPublic };
 }
 
 /**
@@ -1280,7 +1310,9 @@ async function handleApi(
     p.startsWith("/api/notes") && (await cardAllows(req, env, "permNotes"));
   const permFiles =
     m === "POST" &&
-    (p === "/api/upload" || p === "/api/attach") &&
+    (p === "/api/upload" ||
+      p.startsWith("/api/upload/") ||
+      p === "/api/attach") &&
     (await cardAllows(req, env, "permFiles"));
   // 云盘文件管理（列表 / 建文件夹 / 移动 / 删除）：同一把 permFiles。
   // 管理员天生放行；放行的是「进来」，动的范围仍由 fileScopeFor 限自己那间
@@ -1351,6 +1383,23 @@ async function handleApi(
     });
 
   if (p === "/api/upload" && m === "POST") return handleUpload(req, env);
+  // 上传新通道：原始流直通 / 分片 / 合并 / 续传查询。
+  // 与老入口共用同一把 permFiles 与同一套落点规则，只是传输方式不同。
+  if (p.startsWith("/api/upload/")) {
+    const scope = await uploadScopeFor(req, env, role);
+    if (scope === null) return forbidden();
+    if (p === "/api/upload/raw" && m === "POST")
+      return handleUploadRaw(req, env, url, scope);
+    if (p === "/api/upload/part" && m === "POST")
+      return handleUploadPart(req, env, url, scope);
+    if (p === "/api/upload/finish" && m === "POST")
+      return handleUploadFinish(req, env, url, scope);
+    if (p === "/api/upload/status" && m === "GET")
+      return handleUploadStatus(req, env, url, scope);
+    if (p === "/api/upload/abort" && m === "POST")
+      return handleUploadAbort(req, env, url, scope);
+    return methodNotAllowed();
+  }
   // 附件分析分两步（先 upload 再拿 key 来 attach）：前端能先显示「正在读」的转圈，
   // 读一份 PDF 要好几秒，那几秒界面不能是死的
   if (p === "/api/attach" && m === "POST") return handleAttach(req, env);

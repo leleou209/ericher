@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { api } from "../lib/api";
+import { uploadFile } from "../lib/upload";
 import type { Attached } from "../lib/attachments";
 import { AttachmentQueue } from "../lib/attachmentQueue";
 import type { ComposerState } from "./useComposerDraft";
@@ -15,7 +16,10 @@ export function useAttachmentDraft(enabled: boolean, scope: string, notice: (mes
     reading: (name) => setReading({ scope, name }),
     add: attachment => store.setPending(scope, previous => [...previous, attachment]),
     notice: message => noticeRef.current(message),
-    upload: (file, signal) => api.upload(file, "", signal),
+    // 大文件走分档通道：Worker 端不再解析整包 multipart，
+    // 分片并发还能在弱网下只重试失败的那几片。
+    upload: (file, signal) =>
+      uploadFile(file, { signal }).then(result => ({ key: result.key })),
     analyze: (key, file, inline, signal) => api.attach(key, file.name, inline, signal),
   }), [scope, store]);
   const setPending = useCallback((value: SetStateAction<Attached[]>) => {
