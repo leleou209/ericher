@@ -2,7 +2,7 @@
 
 跑在 Cloudflare Workers 上的单人 AI 助手兼接待台：管理员可安排任务，也可开放来客接待；不同来客的对话、记忆和私有文件按房间隔离。
 
-基于 Cloudflare Agents SDK + Durable Objects + React，支持 PWA 与移动端。当前 **v0.1.7.1**；变更见 [CHANGELOG.md](CHANGELOG.md)，完整用法见[在线使用手册](https://erich.116671.xyz/guide)。
+基于 Cloudflare Agents SDK + Durable Objects + React，支持 PWA 与移动端。当前 **v0.1.8**；变更见 [CHANGELOG.md](CHANGELOG.md)，完整用法见[在线使用手册](https://erich.116671.xyz/guide)。
 
 **适用场景**：在自己的域名下部署一个个人/家庭助手，在 Cloudflare 免费额度内运行；需要搜索、微知识库、绘画、TTS、多来客隔离，但不想被平台套餐绑定。不适合作为面向大量陌生访客的客服 SaaS。
 
