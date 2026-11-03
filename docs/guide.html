@@ -132,7 +132,7 @@ pre code{background:none;padding:0;font-size:13px;line-height:1.7;word-break:nor
   <article class="ep-doc">
     <h1>ericher 使用手册</h1>
     <p class="ep-lede">这份手册只回答三件事：怎么把它跑起来；每个组件在什么时候初始化、数据放在哪；按自己的需求怎么改。命令和入口都按当前仓库可执行，不写“未来会有”。</p>
-    <p class="ep-meta">适用 0.1.7.1 · 98 个测试文件 / 1453 例 · 零外部请求</p>
+    <p class="ep-meta">适用 0.1.7.1 · 99 个测试文件 / 1508 例 · 零外部请求</p>
 
     <details class="ep-mobile-toc"><summary>目录</summary>
       <a href="#quick">1. 五分钟试用</a><a href="#deploy">2. 部署与初始化</a>
@@ -279,7 +279,7 @@ npm run deploy</code></pre>
       <h3 id="chat">3.2 对话、模型与上下文</h3>
       <p><b>初始化：</b>每个房间的 DO 第一次醒来时建会话表与默认状态；模型配置优先读面板里的运行时条目，没有才回落到 <code>API_ENDPOINT/API_KEY/API_MODEL</code> 三件套。一次对话的历史、工具调用与 token 计数都在 DO 里。</p>
       <ul>
-        <li><b>模型配置：</b>“设置 → 模型配置 → 模型配置”。支持 <code>anthropic</code>、<code>openai-chat</code>、<code>openai-responses</code>；普通与深度思考可指派不同配置。</li>
+        <li><b>模型配置：</b>“设置 → 模型配置 → 模型配置”。支持 <code>anthropic</code>、<code>openai-chat</code>、<code>openai-responses</code>；普通与深度思考可指派不同配置。思考强度在「模型条目」里调（默认 / 关闭 / 低 / 中 / 高 / 最高，Anthropic 预算档还能手填 token 预算）；请求里用哪套字段表达由「供应商」的「思考参数写法」决定，默认「自动」按接口格式猜，猜不准或厂商不认就选「不下发」。留「默认」等于一个字都不发，跟厂商自带行为一致。</li>
         <li><b>密钥：</b>面板只存 secret 变量名，运行时再从环境取；不要把 key 粘进页面或矩阵 HTML。</li>
         <li><b>上下文：</b>“设置 → 对话 → 回复风格 / 上下文记忆”控制语气与记忆注入；会话记录可导出/清理。</li>
         <li><b>工作守则：</b>“设置 → 工作守则”里的人格里写“怎么做事”，不是营销文案；改完用一轮真实对话验收。</li>

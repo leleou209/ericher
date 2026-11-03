@@ -11,8 +11,10 @@
 // AI Gateway 只属于旧链：目录条目不带网关概念，baseUrl 里用户自己可以填网关地址。
 
 import { createAnthropic } from "@ai-sdk/anthropic";
+import type { JSONObject } from "@ai-sdk/provider";
 import type { LanguageModel } from "ai";
 import { openAIModelWithReasoning as withReasoningContent } from "./agent/reasoningBridge";
+import { thinkingProviderOptions } from "./agent/thinking";
 import { mimoAnthropicBase } from "./mimo";
 import {
   toMaxOutput,
@@ -95,6 +97,14 @@ export interface ResolvedModel {
   /** 最大上下文（token）。条目设了用条目的，没设回落默认档 */
   contextWindow: number;
   maintModel: LanguageModel | null;
+  /**
+   * 这一轮的思考参数（AI SDK 的 providerOptions）；null = 一个字都不发。
+   *
+   * 为什么放在这里一次算好：档位与写法都住在目录里，只有解析模型这一刻两边都在手上。
+   * 调用处（onChatMessage）只管原样交给 streamText —— 问候语、压缩、维护这些闲活
+   * 不传它，就自然保持厂商默认，不会因为主线配了高强度思考而连夜里整理也跟着多想。
+   */
+  providerOptions: Record<string, JSONObject> | null;
 }
 
 /** 从 env 里按变量名取 secret；不是字符串一律当没配 */
@@ -166,15 +176,25 @@ export async function resolveModel(
             provider.maintModel || entry.model,
           )
         : model;
+      const maxOutput = toMaxOutput(entry.maxOutput);
       return {
         model,
-        maxOutput: toMaxOutput(entry.maxOutput),
+        maxOutput,
         format: provider.format,
         contextWindow:
           entry.contextWindow > 0
             ? entry.contextWindow
             : DEFAULT_CONTEXT_WINDOW,
         maintModel,
+        // 档位（条目）与写法（供应商）在这里合成一份 providerOptions；
+        // 条目没设就是 null，跟以前一样什么都不发
+        providerOptions: thinkingProviderOptions(
+          provider.format,
+          provider.thinkingDialect,
+          entry.thinking,
+          entry.thinkingBudget,
+          maxOutput,
+        ),
       };
     }
     // 只提醒一行：目录配置了但这台机器没那把钥匙，是迁移期最常见的状态
@@ -191,5 +211,7 @@ export async function resolveModel(
     format: "anthropic",
     contextWindow: DEFAULT_CONTEXT_WINDOW,
     maintModel: maintenanceModel(env),
+    // 旧链没有目录条目，也就没有思考档可配：维持厂商默认
+    providerOptions: null,
   };
 }

@@ -77,6 +77,8 @@ const provider = (over: Partial<ModelProvider> = {}): ModelProvider => ({
   keySecret: "DEEPSEEK_KEY",
   maintKeySecret: "",
   maintModel: "",
+  // 写法与档位都由 catalog() 的 over 兜：默认这一份是「什么都没配」的存量状态
+  thinkingDialect: "auto",
   created: "2026-01-01T00:00:00.000Z",
   ...over,
 });
@@ -87,6 +89,8 @@ const entry = (over: Partial<ModelEntry> = {}): ModelEntry => ({
   model: "deepseek-v4-pro",
   maxOutput: 131072,
   contextWindow: 0,
+  thinking: "",
+  thinkingBudget: 0,
   active: true,
   created: "2026-01-01T00:00:00.000Z",
   ...over,
@@ -224,6 +228,91 @@ describe("resolveModel：三种格式", () => {
       catalog({}, { contextWindow: 0 }),
     );
     expect(unset?.contextWindow).toBe(DEFAULT_CONTEXT_WINDOW);
+  });
+});
+
+/**
+ * 思考强度：档位（条目）与写法（供应商）在这里合成 providerOptions。
+ * 这一层只验「算出来是什么」；真正落到请求体是 reasoningBridge 的事（见 bridge 测试）。
+ */
+describe("resolveModel：思考强度", () => {
+  it("条目没设档位：null —— 跟厂商默认走，存量条目行为不变", async () => {
+    const r = await resolveModel(env({ DEEPSEEK_KEY: "sk-1" }), async () =>
+      catalog(),
+    );
+    expect(r?.providerOptions).toBeNull();
+  });
+
+  it("anthropic 线：档位折成 thinking.budgetTokens，走 AI SDK 的 anthropic 键", async () => {
+    const r = await resolveModel(env({ DEEPSEEK_KEY: "sk-1" }), async () =>
+      catalog({ thinkingDialect: "auto" }, { thinking: "high" }),
+    );
+    expect(r?.providerOptions).toEqual({
+      anthropic: { thinking: { type: "enabled", budgetTokens: 16384 } },
+    });
+  });
+
+  it("自定义预算优先：条目填了 thinkingBudget 就用它", async () => {
+    const r = await resolveModel(env({ DEEPSEEK_KEY: "sk-1" }), async () =>
+      catalog({}, { thinking: "low", thinkingBudget: 2048 }),
+    );
+    expect(r?.providerOptions).toEqual({
+      anthropic: { thinking: { type: "enabled", budgetTokens: 2048 } },
+    });
+  });
+
+  it("关闭思考：thinking.disabled —— 两种 anthropic 写法都认这一句", async () => {
+    const r = await resolveModel(env({ DEEPSEEK_KEY: "sk-1" }), async () =>
+      catalog({}, { thinking: "off" }),
+    );
+    expect(r?.providerOptions).toEqual({
+      anthropic: { thinking: { type: "disabled" } },
+    });
+  });
+
+  it("推理档写法：折成 effort，不塞 budget", async () => {
+    const r = await resolveModel(env({ ANTHROPIC_KEY: "sk-a" }), async () =>
+      catalog(
+        {
+          format: "anthropic",
+          keySecret: "ANTHROPIC_KEY",
+          thinkingDialect: "anthropic-effort",
+        },
+        { thinking: "medium" },
+      ),
+    );
+    expect(r?.providerOptions).toEqual({ anthropic: { effort: "medium" } });
+  });
+
+  it("OpenAI 线：只给桥一句指令（哪个写法、什么强度）", async () => {
+    const r = await resolveModel(env({ OPENAI_KEY: "sk-2" }), async () =>
+      catalog(
+        { format: "openai-chat", keySecret: "OPENAI_KEY" },
+        { thinking: "low" },
+      ),
+    );
+    expect(r?.providerOptions).toEqual({
+      ericher: { dialect: "reasoning-effort", level: "low" },
+    });
+  });
+
+  it("写法选「不下发」：null，哪怕档位配了", async () => {
+    const r = await resolveModel(env({ DEEPSEEK_KEY: "sk-1" }), async () =>
+      catalog({ thinkingDialect: "none" }, { thinking: "high" }),
+    );
+    expect(r?.providerOptions).toBeNull();
+  });
+
+  it("输出上限窄到开不了思考：null（开只会换一条 400）", async () => {
+    const r = await resolveModel(env({ DEEPSEEK_KEY: "sk-1" }), async () =>
+      catalog({}, { thinking: "high", maxOutput: 1024 }),
+    );
+    expect(r?.providerOptions).toBeNull();
+  });
+
+  it("旧链：没有目录条目就没有思考档，null", async () => {
+    const r = await resolveModel(env({ API_KEY: "k" }), async () => null);
+    expect(r?.providerOptions).toBeNull();
   });
 });
 

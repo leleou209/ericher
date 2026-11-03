@@ -4,10 +4,20 @@
 // 顺手碰坏「纯空格算不算填了」「1.5 该往哪收」这类边界。抽成不依赖 React 的函数才拿得住回归。
 // 这里只有规则，不碰接口、不碰 DOM —— 提交口径仍由面板走 lib/api。
 
-import { MODEL_FORMAT_LABEL } from "./presets";
-import type { ModelEntry, ModelFormat, ModelProvider } from "./types";
+import {
+  MODEL_FORMAT_LABEL,
+  THINKING_LEVEL_LABEL,
+  thinkingDialectShort,
+} from "./presets";
+import type {
+  ModelEntry,
+  ModelFormat,
+  ModelProvider,
+  ThinkingDialect,
+  ThinkingLevel,
+} from "./types";
 
-/** 供应商弹页的草稿：前六格对齐 ModelProvider，后两格只在新增时顺手挂首个模型 */
+/** 供应商弹页的草稿：前七格对齐 ModelProvider，后两格只在新增时顺手挂首个模型 */
 export interface ProviderFormDraft {
   name: string;
   format: ModelFormat;
@@ -15,6 +25,7 @@ export interface ProviderFormDraft {
   keySecret: string;
   maintKeySecret: string;
   maintModel: string;
+  thinkingDialect: ThinkingDialect;
   firstModel: string;
   firstMax: string;
 }
@@ -91,29 +102,62 @@ export const parseContextWindow = (rawK: string): number | undefined => {
   return t ? toTokens(Number(t) * 1000) : undefined;
 };
 
+/**
+ * 思考预算（token）：留空 / 不像数字 / 0 / 负数 一律当「没填」，后端按强度档位换算。
+ * 上限与四舍五入直接沿用 parseMaxOutput —— 两格都是 token，没理由两套规矩。
+ */
+export const parseThinkingBudget = (raw: string): number | undefined =>
+  parseMaxOutput(raw);
+
 /** token 数画成 K：200000 → 200K */
 export const tokensToK = (n: number): string => `${Math.round(n / 1000)}K`;
 
 /**
- * 条目 → 草稿：两个数字格回写成界面口径（上下文折成 K）。
+ * 条目 → 草稿：数字格回写成界面口径（上下文折成 K），思考预算原样。
  * 0 回写成空串而不是 "0" —— 0 在这里的意思就是「没设」，填成 0 会让人以为设过。
+ * thinking 这类老接口缺字段时按默认档兜底，别让下拉出现 undefined。
  */
 export const entryFormOf = (
-  e: Pick<ModelEntry, "model" | "maxOutput" | "contextWindow">,
-): { model: string; maxOutput: string; contextWindow: string } => ({
+  e: Pick<
+    ModelEntry,
+    "model" | "maxOutput" | "contextWindow" | "thinking" | "thinkingBudget"
+  >,
+): {
+  model: string;
+  maxOutput: string;
+  contextWindow: string;
+  thinking: ThinkingLevel;
+  thinkingBudget: string;
+} => ({
   model: e.model,
   maxOutput: e.maxOutput ? String(e.maxOutput) : "",
   contextWindow: e.contextWindow
     ? String(Math.round(e.contextWindow / 1000))
     : "",
+  thinking: e.thinking || "",
+  thinkingBudget: e.thinkingBudget ? String(e.thinkingBudget) : "",
 });
 
 /**
- * 供应商行摘要：一行看清接的哪一家、用哪把 Key、挂了几个模型、维护走谁。
+ * 预算 token 只有 anthropic 线才用得着：写法上 auto 会落到预算档、anthropic 是明写的预算档；
+ * 换成 openai 线时后端一律回落到 reasoning_effort，预算发不出去 —— 所以还要看接口格式。
+ * 条目弹页据此决定显不显示预算那一格。
+ */
+export const usesThinkingBudget = (
+  dialect: ThinkingDialect,
+  format: ModelFormat,
+): boolean =>
+  format === "anthropic" && (dialect === "auto" || dialect === "anthropic");
+
+/**
+ * 供应商行摘要：一行看清接的哪一家、用哪把 Key、挂了几个模型、维护走谁、思考怎么写。
  * 地址放最后 —— 它是这行里最长的东西，窄屏被省略号切掉的应该是它，不是模型数。
  */
 export const providerSummary = (
-  p: Pick<ModelProvider, "format" | "baseUrl" | "keySecret" | "maintModel">,
+  p: Pick<
+    ModelProvider,
+    "format" | "baseUrl" | "keySecret" | "maintModel" | "thinkingDialect"
+  >,
   entryCount: number,
 ): string => {
   const parts = [
@@ -123,14 +167,23 @@ export const providerSummary = (
     entryCount ? `${entryCount} 个模型` : "还没挂模型",
   ];
   if (p.maintModel) parts.push(`维护 ${p.maintModel}`);
+  // auto 是常态、也是唯一不用人操心的档，摘要里不占位置
+  if (p.thinkingDialect && p.thinkingDialect !== "auto")
+    parts.push(`思考写法 ${thinkingDialectShort(p.thinkingDialect)}`);
   parts.push(p.baseUrl);
   return parts.join(" · ");
 };
 
-/** 条目行摘要：没设的那两格照后端口径说「默认」 */
+/** 条目行摘要：没设的格子照后端口径说「默认」 */
 export const entrySummary = (
-  e: Pick<ModelEntry, "maxOutput" | "contextWindow">,
-): string =>
-  `输出上限 ${e.maxOutput || "默认"} · 上下文 ${
-    e.contextWindow ? tokensToK(e.contextWindow) : "默认"
-  }`;
+  e: Pick<ModelEntry, "maxOutput" | "contextWindow" | "thinking">,
+): string => {
+  const parts = [
+    `输出上限 ${e.maxOutput || "默认"}`,
+    `上下文 ${e.contextWindow ? tokensToK(e.contextWindow) : "默认"}`,
+  ];
+  // 没设思考档就不提 —— 大多数条目都是默认，每行都写「思考 默认」只是噪音
+  if (e.thinking)
+    parts.push(`思考 ${THINKING_LEVEL_LABEL[e.thinking] || e.thinking}`);
+  return parts.join(" · ");
+};

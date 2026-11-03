@@ -12,12 +12,43 @@ import type {
   LanguageModelV3Usage,
 } from "@ai-sdk/provider";
 import type { ModelFormat } from "./modelConfigs";
+import {
+  bridgeThinkingOf,
+  injectThinking,
+  type BridgeThinking,
+} from "./thinking";
 
 /** 哨兵：包住改写进 content 的思维链分片。NUL 在正常模型输出里不会出现 */
 const SENTINEL = "\u0000";
 
 /** reasoning part 的 id：一次调用里所有思维链分片合到同一个 part */
 const REASONING_ID = "reasoning_content";
+
+/**
+ * 出站请求体就地补上思考参数。
+ *
+ * 为什么要在 fetch 层做：AI SDK 的 openai provider 只认自家 schema，
+ * 「thinking: {type}」「enable_thinking」这类各家私有字段会被 zod strip 掉，
+ * providerOptions 里带了也发不出去。这一层本来就在逐行改请求与响应流，
+ * 多改一个字段不多事，也不依赖任何一家的 SDK 参数表。
+ *
+ * 体不是 JSON（理论上不会发生）就原样发：宁可少一段思考参数，不能把请求打挂。
+ */
+function withThinking(
+  init: RequestInit | undefined,
+  thinking: BridgeThinking,
+  isResponses: boolean,
+): RequestInit | undefined {
+  const original = init?.body;
+  if (typeof original !== "string") return init;
+  try {
+    const body = JSON.parse(original) as Record<string, unknown>;
+    injectThinking(body, isResponses, thinking);
+    return { ...init, body: JSON.stringify(body) };
+  } catch {
+    return init;
+  }
+}
 
 /** 每次调用现场建 provider：fetch 是 provider 级配置（AI SDK 6 的调用选项里没有它） */
 
@@ -119,11 +150,17 @@ export function openAIModelWithReasoning(
     modelId: config.modelId,
     supportedUrls: Promise.resolve({}),
     doStream: async (options: LanguageModelV3CallOptions) => {
+      // 思考参数随调用走，不烘进模型：同一条目录条目，主对话要按配的档位思考，
+      // 后台小活（起标题、夜间整理）不传 providerOptions，就自然保持厂商默认。
+      const thinking = bridgeThinkingOf(options.providerOptions);
       const openai = createOpenAI({
         apiKey: config.apiKey,
         baseURL: config.baseURL,
         fetch: async (input, init) => {
-          const res = await fetch(input, init);
+          const res = await fetch(
+            input,
+            thinking ? withThinking(init, thinking, isResponses) : init,
+          );
           if (!res.body) return res;
           const rewriter = new ReasoningRewriter(isResponses);
           const body = res.body.pipeThrough(

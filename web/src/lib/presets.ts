@@ -4,7 +4,13 @@
 // 拉不到时 note 里的推荐型号就是兜底的参考值。
 // 预设是给人起头用的参考值，不进接口：官网怎么写这里就怎么写，改起来也一目了然。
 
-import type { DrawFormat, ModelFormat, TtsProtocol } from "./types";
+import type {
+  DrawFormat,
+  ModelFormat,
+  ThinkingDialect,
+  ThinkingLevel,
+  TtsProtocol,
+} from "./types";
 
 interface VendorPreset {
   key: string;
@@ -148,6 +154,68 @@ export const MODEL_FORMAT_LABEL: Record<ModelFormat, string> = {
   anthropic: "Anthropic 格式",
   "openai-chat": "OpenAI Chat 格式",
   "openai-responses": "OpenAI Responses 格式",
+};
+
+// ── 思考参数 ──────────────────────────────────────────
+// 「怎么写」（供应商一级）与「多强」（模型条目一级）分两层：接口决定前者，模型决定后者。
+// 标签里带字段名是有意的 —— 这一格选的就是请求里会多出什么，看着字段名选才不容易选错。
+
+/** 思考参数写法的菜单顺序：自动在最前（多数情况选它），不下发放最后（真的不想发时才选） */
+export const THINKING_DIALECTS = [
+  "auto",
+  "anthropic",
+  "anthropic-effort",
+  "reasoning-effort",
+  "thinking-object",
+  "enable-thinking",
+  "none",
+] as const;
+
+export const THINKING_DIALECT_LABEL: Record<ThinkingDialect, string> = {
+  auto: "自动（按接口格式）",
+  anthropic: "Anthropic 预算档（thinking.budget_tokens）",
+  "anthropic-effort": "Anthropic 推理档（output_config.effort）",
+  "reasoning-effort": "OpenAI 推理档（reasoning_effort）",
+  "thinking-object": "开关式 thinking（thinking.type）",
+  "enable-thinking": "开关式 enable_thinking",
+  none: "不下发",
+};
+
+/** 每一档一句人话：选完就地告诉人「这样发出去长什么样、哪家认」 */
+export const THINKING_DIALECT_HINT: Record<ThinkingDialect, string> = {
+  auto: "按这一家的接口格式自己挑：Anthropic 线用预算档，OpenAI 线用 reasoning_effort。",
+  anthropic:
+    "请求里写 thinking.budget_tokens。按预算算强度的模型（Claude 系）只认这个。",
+  "anthropic-effort":
+    "请求里写 output_config.effort。新一点的 Anthropic 兼容网关按这个分档，不带 token 预算。",
+  "reasoning-effort":
+    "请求里写 reasoning_effort。OpenAI 及多数兼容网关都认这一套。",
+  "thinking-object":
+    "请求里写 thinking: { type: enabled | disabled }。只认开关、不认档位的接口用这个。",
+  "enable-thinking":
+    "请求里写 enable_thinking: true | false。国内几家兼容网关常见这种写法。",
+  none: "什么思考参数都不发，完全按这家自己的默认来 —— 想关掉思考又不想被档位管时选它。",
+};
+
+/** 思考强度的菜单顺序：默认在最前（跟厂商），往下逐级加强 */
+export const THINKING_LEVELS = ["", "off", "low", "medium", "high", "max"] as const;
+
+export const THINKING_LEVEL_LABEL: Record<ThinkingLevel, string> = {
+  "": "默认（跟厂商）",
+  off: "关闭",
+  low: "低",
+  medium: "中",
+  high: "高",
+  max: "最高",
+};
+
+/**
+ * 摘要里用的短名：下拉标签括号里那截是「实际发哪个字段」，一行摘要塞不下。
+ * 表里查不到（后端加了新写法）就原样显示，不在这儿漏成空白。
+ */
+export const thinkingDialectShort = (dialect: ThinkingDialect | string): string => {
+  const label = THINKING_DIALECT_LABEL[dialect as ThinkingDialect];
+  return label ? label.replace(/（.*）$/, "") : String(dialect);
 };
 
 export const TTS_PROTOCOL_LABEL: Record<TtsProtocol, string> = {

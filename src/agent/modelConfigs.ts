@@ -3,6 +3,12 @@
 // 红线：keySecret 只存 Worker secret 变量名，key 本体只在 secrets 绝不落库——两张表可整表回显。
 
 import type { SqlTag } from "./state";
+import {
+  toThinkingBudget,
+  toThinkingDialect,
+  toThinkingLevel,
+} from "./thinking";
+import type { ThinkingDialect, ThinkingLevel } from "./thinking";
 
 /** 三种接口格式，对应 providers.ts 里三条建模路径 */
 export type ModelFormat = "anthropic" | "openai-chat" | "openai-responses";
@@ -26,6 +32,8 @@ export interface ModelProvider {
   maintKeySecret: string;
   /** 维护模型用哪个模型名；空 = 复用当前生效的主线模型 */
   maintModel: string;
+  /** 思考参数怎么写；auto = 按接口格式挑默认写法 */
+  thinkingDialect: ThinkingDialect;
   created: string;
 }
 
@@ -39,6 +47,10 @@ export interface ModelEntry {
    * 最大上下文（token）；0 = 没设，回落到默认档。界面拿它显示上下文占用，超过靠压缩接住。
    */
   contextWindow: number;
+  /** 思考强度；"" = 没设，一个字都不发（跟厂商默认走） */
+  thinking: ThinkingLevel;
+  /** anthropic 预算档的 token；0 = 按档位换算 */
+  thinkingBudget: number;
   active: boolean;
   created: string;
 }
@@ -57,6 +69,7 @@ interface ProviderRow {
   key_secret: string;
   maint_key_secret: string;
   maint_model: string;
+  thinking_dialect: string;
   created: string;
 }
 
@@ -66,6 +79,8 @@ interface EntryRow {
   model: string;
   max_output: number;
   context_window: number | null;
+  thinking: string;
+  thinking_budget: number | null;
   active: number | boolean;
   created: string;
 }
@@ -77,6 +92,8 @@ export interface ModelProviderInput {
   keySecret: string;
   maintKeySecret?: string;
   maintModel?: string;
+  /** 思考参数怎么写；缺省 auto（按接口格式挑默认写法） */
+  thinkingDialect?: string;
   /** 新建供应商时顺手挂的首个模型；空就只建供应商，模型之后再加 */
   firstModel?: string;
   maxOutput?: number;
@@ -90,12 +107,17 @@ export interface ModelProviderPatch {
   keySecret?: string;
   maintKeySecret?: string;
   maintModel?: string;
+  thinkingDialect?: string;
 }
 
 export interface ModelEntryPatch {
   model?: string;
   maxOutput?: number;
   contextWindow?: number;
+  /** 思考强度；给了就按 toThinkingLevel 归一，"" = 显式清成没设 */
+  thinking?: string;
+  /** anthropic 预算档 token；0 = 显式清成按档位换算 */
+  thinkingBudget?: number;
   active?: boolean;
 }
 
@@ -113,6 +135,7 @@ function rowToProvider(r: ProviderRow): ModelProvider {
     keySecret: r.key_secret,
     maintKeySecret: r.maint_key_secret,
     maintModel: r.maint_model,
+    thinkingDialect: toThinkingDialect(r.thinking_dialect),
     created: r.created,
   };
 }
@@ -124,6 +147,8 @@ function rowToEntry(r: EntryRow): ModelEntry {
     model: r.model,
     maxOutput: Number(r.max_output),
     contextWindow: toContextWindow(r.context_window),
+    thinking: toThinkingLevel(r.thinking),
+    thinkingBudget: toThinkingBudget(r.thinking_budget),
     active: toBool(r.active),
     created: r.created,
   };
@@ -178,19 +203,24 @@ function migrateLegacyConfigs(sql: SqlTag): void {
            maint_key_secret, maint_model, active, created FROM model_configs`;
   for (const row of legacy) {
     const providerId = crypto.randomUUID().slice(0, 8);
+    // 老表里没有思考配置：新供应商按 auto（挑默认写法）、新条目按「没设」落，
+    // 搬完的行为跟老版本一字不差，想开思考再去面板上点。
     sql`INSERT INTO model_providers (id, name, format, base_url, key_secret,
-              maint_key_secret, maint_model, created)
+              maint_key_secret, maint_model, thinking_dialect, created)
         VALUES (${providerId}, ${row.name}, ${row.format}, ${row.base_url},
                 ${row.key_secret}, ${row.maint_key_secret}, ${row.maint_model},
-                ${row.created})`;
-    sql`INSERT INTO model_entries (id, provider_id, model, max_output, context_window, active, created)
+                ${"auto"}, ${row.created})`;
+    sql`INSERT INTO model_entries (id, provider_id, model, max_output, context_window,
+              thinking, thinking_budget, active, created)
         VALUES (${row.id}, ${providerId}, ${row.model},
                 ${toMaxOutput(row.max_output)}, ${0},
+                ${""}, ${0},
                 ${toBool(row.active) ? 1 : 0}, ${row.created})`;
   }
   // 历史脏数据兜底：active 理论上最多一条，真有多条就留最早那笔
   const actives = sql<EntryRow>`
-    SELECT id, provider_id, model, max_output, active, created
+    SELECT id, provider_id, model, max_output, context_window,
+           thinking, thinking_budget, active, created
     FROM model_entries WHERE active = 1 ORDER BY created`;
   for (const row of actives.slice(1))
     sql`UPDATE model_entries SET active = 0 WHERE id = ${row.id}`;
@@ -206,19 +236,40 @@ export function ensureModelCatalogSchema(sql: SqlTag): void {
        key_secret       TEXT NOT NULL,
        maint_key_secret TEXT DEFAULT '',
        maint_model      TEXT DEFAULT '',
+       thinking_dialect TEXT DEFAULT 'auto',
        created          TEXT
      )`;
   sql`CREATE TABLE IF NOT EXISTS model_entries (
-       id          TEXT PRIMARY KEY,
-       provider_id TEXT NOT NULL,
-       model       TEXT NOT NULL,
-       max_output  INTEGER DEFAULT 32768,
-       active      INTEGER DEFAULT 0,
-       created     TEXT
+       id              TEXT PRIMARY KEY,
+       provider_id     TEXT NOT NULL,
+       model           TEXT NOT NULL,
+       max_output      INTEGER DEFAULT 32768,
+       context_window  INTEGER DEFAULT 0,
+       thinking        TEXT DEFAULT '',
+       thinking_budget INTEGER DEFAULT 0,
+       active          INTEGER DEFAULT 0,
+       created         TEXT
      )`;
-  // 老表补列：create table if not exists 不会给已存在的表加列（0 = 未设，用默认档）
+  // 老表补列：create table if not exists 不会给已存在的表加列，老库得逐列 ALTER。
+  // 漏补一列不会报错，只会读出 undefined —— 被归一成默认值，面板上存了等于没存。
+  // 默认值就是「没设」：context 0 = 用默认档，思考 dialect auto、level ""、budget 0。
   try {
     sql`ALTER TABLE model_entries ADD COLUMN context_window INTEGER DEFAULT 0`;
+  } catch {
+    // 列已存在
+  }
+  try {
+    sql`ALTER TABLE model_providers ADD COLUMN thinking_dialect TEXT DEFAULT 'auto'`;
+  } catch {
+    // 列已存在
+  }
+  try {
+    sql`ALTER TABLE model_entries ADD COLUMN thinking TEXT DEFAULT ''`;
+  } catch {
+    // 列已存在
+  }
+  try {
+    sql`ALTER TABLE model_entries ADD COLUMN thinking_budget INTEGER DEFAULT 0`;
   } catch {
     // 列已存在
   }
@@ -230,7 +281,7 @@ export function ensureModelCatalogSchema(sql: SqlTag): void {
 function providerById(sql: SqlTag, id: string): ModelProvider | null {
   const rows = sql<ProviderRow>`
     SELECT id, name, format, base_url, key_secret,
-           maint_key_secret, maint_model, created
+           maint_key_secret, maint_model, thinking_dialect, created
     FROM model_providers WHERE id = ${id}`;
   return rows.length ? rowToProvider(rows[0]) : null;
 }
@@ -240,7 +291,7 @@ export function listModelProviders(sql: SqlTag): ModelProvider[] {
   ensureModelCatalogSchema(sql);
   return sql<ProviderRow>`
     SELECT id, name, format, base_url, key_secret,
-           maint_key_secret, maint_model, created
+           maint_key_secret, maint_model, thinking_dialect, created
     FROM model_providers ORDER BY created`.map(rowToProvider);
 }
 
@@ -267,14 +318,15 @@ export function createModelProvider(
     keySecret,
     maintKeySecret: (input.maintKeySecret || "").trim().slice(0, 80),
     maintModel: (input.maintModel || "").trim().slice(0, 120),
+    thinkingDialect: toThinkingDialect(input.thinkingDialect),
     created: new Date().toISOString(),
   };
   sql`INSERT INTO model_providers (id, name, format, base_url, key_secret,
-            maint_key_secret, maint_model, created)
+            maint_key_secret, maint_model, thinking_dialect, created)
       VALUES (${provider.id}, ${provider.name}, ${provider.format},
               ${provider.baseUrl}, ${provider.keySecret},
               ${provider.maintKeySecret}, ${provider.maintModel},
-              ${provider.created})`;
+              ${provider.thinkingDialect}, ${provider.created})`;
   const firstModel = (input.firstModel || "").trim().slice(0, 120);
   const entry = firstModel
     ? createModelEntry(sql, {
@@ -326,6 +378,11 @@ export function updateModelProvider(
           patch.maintModel === undefined
             ? cur.maintModel
             : String(patch.maintModel).trim().slice(0, 120)
+        },
+        thinking_dialect = ${
+          patch.thinkingDialect === undefined
+            ? cur.thinkingDialect
+            : toThinkingDialect(patch.thinkingDialect)
         }
       WHERE id = ${id}`;
   return providerById(sql, id);
@@ -340,7 +397,8 @@ export function removeModelProvider(sql: SqlTag, id: string): boolean {
     SELECT id FROM model_providers WHERE id = ${id}`;
   if (!rows.length) return false;
   const hadActive = sql<EntryRow>`
-    SELECT id, provider_id, model, max_output, active, created
+    SELECT id, provider_id, model, max_output, context_window,
+           thinking, thinking_budget, active, created
     FROM model_entries WHERE provider_id = ${id} AND active = 1`.some((r) =>
     toBool(r.active),
   );
@@ -354,7 +412,8 @@ export function removeModelProvider(sql: SqlTag, id: string): boolean {
 
 function entryById(sql: SqlTag, id: string): ModelEntry | null {
   const rows = sql<EntryRow>`
-    SELECT id, provider_id, model, max_output, context_window, active, created
+    SELECT id, provider_id, model, max_output, context_window,
+           thinking, thinking_budget, active, created
     FROM model_entries WHERE id = ${id}`;
   return rows.length ? rowToEntry(rows[0]) : null;
 }
@@ -363,7 +422,8 @@ function entryById(sql: SqlTag, id: string): ModelEntry | null {
 export function listModelEntries(sql: SqlTag): ModelEntry[] {
   ensureModelCatalogSchema(sql);
   return sql<EntryRow>`
-    SELECT id, provider_id, model, max_output, context_window, active, created
+    SELECT id, provider_id, model, max_output, context_window,
+           thinking, thinking_budget, active, created
     FROM model_entries ORDER BY created`.map(rowToEntry);
 }
 
@@ -371,7 +431,8 @@ export function listModelEntries(sql: SqlTag): ModelEntry[] {
 export function getActiveModelEntry(sql: SqlTag): ModelEntry | null {
   ensureModelCatalogSchema(sql);
   const rows = sql<EntryRow>`
-    SELECT id, provider_id, model, max_output, context_window, active, created
+    SELECT id, provider_id, model, max_output, context_window,
+           thinking, thinking_budget, active, created
     FROM model_entries WHERE active = 1 ORDER BY created`;
   return rows.length ? rowToEntry(rows[0]) : null;
 }
@@ -392,6 +453,10 @@ export function createModelEntry(
     model: string;
     maxOutput?: number;
     contextWindow?: number;
+    /** 思考强度；缺省 ""（一个字都不发） */
+    thinking?: string;
+    /** anthropic 预算档 token；缺省 0（按档位换算） */
+    thinkingBudget?: number;
   },
 ): ModelEntry {
   ensureModelCatalogSchema(sql);
@@ -406,12 +471,16 @@ export function createModelEntry(
     model,
     max_output: toMaxOutput(input.maxOutput),
     context_window: toContextWindow(input.contextWindow),
+    thinking: toThinkingLevel(input.thinking),
+    thinking_budget: toThinkingBudget(input.thinkingBudget),
     active: noActive ? 1 : 0,
     created: new Date().toISOString(),
   };
-  sql`INSERT INTO model_entries (id, provider_id, model, max_output, context_window, active, created)
+  sql`INSERT INTO model_entries (id, provider_id, model, max_output, context_window,
+            thinking, thinking_budget, active, created)
       VALUES (${row.id}, ${row.provider_id}, ${row.model}, ${row.max_output},
-              ${row.context_window}, ${row.active}, ${row.created})`;
+              ${row.context_window}, ${row.thinking}, ${row.thinking_budget},
+              ${row.active}, ${row.created})`;
   return rowToEntry(row);
 }
 
@@ -441,6 +510,14 @@ export function updateModelEntry(
       patch.contextWindow === undefined
         ? cur.contextWindow
         : toContextWindow(patch.contextWindow),
+    thinking:
+      patch.thinking === undefined
+        ? cur.thinking
+        : toThinkingLevel(patch.thinking),
+    thinkingBudget:
+      patch.thinkingBudget === undefined
+        ? cur.thinkingBudget
+        : toThinkingBudget(patch.thinkingBudget),
     active: patch.active === undefined ? cur.active : patch.active,
   };
   // 「设为生效」是全库唯一的语义：先全清再置一，跟 activateModelEntry 一把尺。
@@ -449,6 +526,7 @@ export function updateModelEntry(
   if (patch.active === true) sql`UPDATE model_entries SET active = 0`;
   sql`UPDATE model_entries SET model = ${next.model},
         max_output = ${next.maxOutput}, context_window = ${next.contextWindow},
+        thinking = ${next.thinking}, thinking_budget = ${next.thinkingBudget},
         active = ${next.active ? 1 : 0}
       WHERE id = ${id}`;
   return entryById(sql, id);

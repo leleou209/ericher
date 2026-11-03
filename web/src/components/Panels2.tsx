@@ -13,6 +13,11 @@ import { api } from "../lib/api";
 import { speak, stopSpeaking } from "../lib/speech";
 import {
   MODEL_FORMAT_LABEL,
+  THINKING_DIALECTS,
+  THINKING_DIALECT_HINT,
+  THINKING_DIALECT_LABEL,
+  THINKING_LEVELS,
+  THINKING_LEVEL_LABEL,
   TTS_DEFAULTS,
   TTS_PROTOCOL_LABEL,
   TTS_VOICE_PRESETS,
@@ -36,8 +41,10 @@ import {
   looksLikeRawKey,
   parseContextWindow,
   parseMaxOutput,
+  parseThinkingBudget,
   providerMissingFields,
   providerSummary,
+  usesThinkingBudget,
   type ProviderFormDraft,
 } from "../lib/modelCatalogForm";
 import {
@@ -89,6 +96,8 @@ import {
   type SessionMeta,
   type Shelf,
   type Summary,
+  type ThinkingDialect,
+  type ThinkingLevel,
   type ToolCatalog,
   type ToolGroupDef,
   type TtsConfig,
@@ -2452,7 +2461,7 @@ export function GuestPermsPanel() {
 // ── 模型配置 ──────────────────────────────────────────
 
 /**
- * 供应商表单草稿（新增/编辑共用）。供应商级管接哪一家，模型名归各家底下的条目。
+ * 供应商表单草稿（新增/编辑共用）。供应商级管接哪一家、思考参数怎么写，模型名归各家底下的条目。
  */
 interface ProviderDraft {
   name: string;
@@ -2461,14 +2470,20 @@ interface ProviderDraft {
   keySecret: string;
   maintKeySecret: string;
   maintModel: string;
+  /** 请求里用哪套字段表达思考强度；"auto" = 按接口格式自己挑 */
+  thinkingDialect: ThinkingDialect;
 }
 
-/** 模型条目草稿：给某家供应商挂模型时用。两个数字输入框里都是字符串 */
+/** 模型条目草稿：给某家供应商挂模型时用。数字输入框里都是字符串 */
 interface EntryDraft {
   model: string;
   maxOutput: string;
   /** 最大上下文，以 K 计（界面口径）；存库时折回 token */
   contextWindow: string;
+  /** 思考强度；空串 = 默认（跟厂商），不是「关闭」 */
+  thinking: ThinkingLevel;
+  /** 思考预算（token）；空串 = 没填，按档位换算 */
+  thinkingBudget: string;
 }
 
 /** 厂商下拉里「空白」那一项的值；"" 留给还没选过的初始态 */
@@ -2498,6 +2513,8 @@ const blankProviderDraft = (): ProviderDraft => ({
   keySecret: "",
   maintKeySecret: "",
   maintModel: "",
+  // 新供应商默认「自动」：写法由接口格式推断，最不容易选错
+  thinkingDialect: "auto",
 });
 
 const providerDraftOf = (p: ModelProvider): ProviderDraft => ({
@@ -2507,6 +2524,8 @@ const providerDraftOf = (p: ModelProvider): ProviderDraft => ({
   keySecret: p.keySecret,
   maintKeySecret: p.maintKeySecret,
   maintModel: p.maintModel,
+  // 老后端还没有这一格时按自动档回写，别让下拉出现 undefined
+  thinkingDialect: p.thinkingDialect || "auto",
 });
 
 /** 提交前折成请求体：空串的字段不传，「留空 = 用本家 / 复用主线」的语义交给后端 */
@@ -2517,12 +2536,15 @@ const providerPayloadOf = (d: ProviderDraft) => ({
   keySecret: d.keySecret.trim(),
   maintKeySecret: d.maintKeySecret.trim() || undefined,
   maintModel: d.maintModel.trim() || undefined,
+  thinkingDialect: d.thinkingDialect,
 });
 
 const blankEntryDraft = (): EntryDraft => ({
   model: "",
   maxOutput: "",
   contextWindow: "",
+  thinking: "",
+  thinkingBudget: "",
 });
 
 /**
@@ -2649,7 +2671,8 @@ export function ModelConfigsPanel() {
       });
       return;
     }
-    // 厂商只带出「接哪一家」的部分；首个模型名不预填，拉取列表后点选
+    // 厂商只带出「接哪一家」的部分；首个模型名不预填，拉取列表后点选。
+    // 思考写法也不预设：同一个厂牌换条线产物就不一样，留给「自动」按接口推断最稳
     providerForm.setDraft({
       name: v.label,
       format: v.format,
@@ -2657,6 +2680,7 @@ export function ModelConfigsPanel() {
       keySecret: v.keySecret,
       maintKeySecret: "",
       maintModel: "",
+      thinkingDialect: "auto",
       firstModel: "",
       firstMax: String(v.maxOutput),
     });
@@ -2767,6 +2791,9 @@ export function ModelConfigsPanel() {
         model: entryForm.draft.model.trim(),
         maxOutput: parseMaxOutput(entryForm.draft.maxOutput),
         contextWindow: parseContextWindow(entryForm.draft.contextWindow),
+        thinking: entryForm.draft.thinking,
+        // 留空 = 显式清零（0 就是「按档位换算」），不是不动：PATCH 里 undefined 会被后端当成保持原值
+        thinkingBudget: parseThinkingBudget(entryForm.draft.thinkingBudget) ?? 0,
       };
       if (entryDialog.entryId)
         await api.modelEntryPatch({ id: entryDialog.entryId, ...body });
@@ -2858,7 +2885,7 @@ export function ModelConfigsPanel() {
     <div className="panel-body">
       <p className="meta">
         一家供应商就是一套接模型的钥匙串，底下想挂几个模型就挂几个。这里只管「有哪些模型可选」；普通和深度两种模式各用哪个，在设置
-        → 回复风格里指派，指派完下一轮对话生效。
+        → 回复风格里指派，指派完下一轮对话生效。思考怎么下发分两层配：写法在供应商里（跟着接口走），强度在模型条目里（跟着模型走）。
       </p>
 
       <h3 className="sect">供应商（{providers.length}）</h3>
@@ -3015,6 +3042,30 @@ export function ModelConfigsPanel() {
                 )}
               </select>
             </FormRow>
+            <FormRow
+              label="思考参数写法"
+              hint="决定请求里用哪套字段表达思考强度；不确定就留「自动」"
+            >
+              <select
+                className="field"
+                value={providerForm.draft.thinkingDialect}
+                onChange={(e) =>
+                  patchProvider({
+                    thinkingDialect: e.target.value as ThinkingDialect,
+                  })
+                }
+                aria-label="思考参数写法"
+              >
+                {THINKING_DIALECTS.map((d) => (
+                  <option key={d} value={d}>
+                    {THINKING_DIALECT_LABEL[d]}
+                  </option>
+                ))}
+              </select>
+            </FormRow>
+            <EntityNote>
+              {THINKING_DIALECT_HINT[providerForm.draft.thinkingDialect]}
+            </EntityNote>
             <FormRow label="接口地址">
               <input
                 className="field"
@@ -3145,7 +3196,7 @@ export function ModelConfigsPanel() {
               ? `编辑模型「${editingEntry.model}」`
               : `给「${entryProvider.name}」添加模型`
           }
-          subtitle="点下面的清单挑一个模型名，或者直接手填；两个额度格都可以留空。"
+          subtitle="点下面的清单挑一个模型名，或者直接手填；额度与思考格都可以留空。"
           busy={savingEntry}
           error={entryErr}
           dirty={entryForm.dirty(entryForm.draft)}
@@ -3216,6 +3267,50 @@ export function ModelConfigsPanel() {
                 }
               />
             </FormRow>
+          </FormSection>
+
+          <FormSection title="思考">
+            <FormRow label="思考强度" hint="要多想；默认 = 跟厂商自己那一档，最省心">
+              <select
+                className="field"
+                value={entryForm.draft.thinking}
+                onChange={(e) =>
+                  entryForm.setDraft((prev) => ({
+                    ...prev,
+                    thinking: e.target.value as ThinkingLevel,
+                  }))
+                }
+                aria-label="思考强度"
+              >
+                {THINKING_LEVELS.map((l) => (
+                  <option key={l} value={l}>
+                    {THINKING_LEVEL_LABEL[l]}
+                  </option>
+                ))}
+              </select>
+            </FormRow>
+            {/* 只有 anthropic 线 + 预算档真用得上这一格：openai 线后端会回落到 reasoning_effort，填了也是白发 */}
+            {usesThinkingBudget(
+              entryProvider.thinkingDialect,
+              entryProvider.format,
+            ) && (
+              <FormRow
+                label="思考预算"
+                hint="token，留空 = 按档位换算；只有 Anthropic 预算档用得上"
+              >
+                <input
+                  className="field"
+                  placeholder="思考预算（token，可空）"
+                  value={entryForm.draft.thinkingBudget}
+                  onChange={(e) =>
+                    entryForm.setDraft((prev) => ({
+                      ...prev,
+                      thinkingBudget: e.target.value,
+                    }))
+                  }
+                />
+              </FormRow>
+            )}
           </FormSection>
         </FormDialog>
       )}

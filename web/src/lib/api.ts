@@ -29,6 +29,8 @@ import type {
   Shelf,
   TagGate,
   TagStat,
+  ThinkingDialect,
+  ThinkingLevel,
   ToolCatalog,
   TtsConfig,
   TtsProtocol,
@@ -629,6 +631,8 @@ export const api = {
     keySecret: string;
     maintKeySecret?: string;
     maintModel?: string;
+    /** 思考参数写法；不给就按后端默认 "auto" 落库 */
+    thinkingDialect?: ThinkingDialect;
     firstModel?: string;
     maxOutput?: number;
   }) =>
@@ -653,6 +657,8 @@ export const api = {
     model: string;
     maxOutput?: number;
     contextWindow?: number;
+    thinking?: ThinkingLevel;
+    thinkingBudget?: number;
   }) =>
     bizOk<ModelEntry>(
       await req<unknown>("/api/model-configs/entries", json("POST", input)),
@@ -661,7 +667,10 @@ export const api = {
   /** 含 { id, active: true } = 指派为普通模式的模型（回复风格页的指派就走这里） */
   modelEntryPatch: async (
     input: Partial<
-      Pick<ModelEntry, "model" | "maxOutput" | "contextWindow" | "active">
+      Pick<
+        ModelEntry,
+        "model" | "maxOutput" | "contextWindow" | "thinking" | "thinkingBudget" | "active"
+      >
     > & {
       id: string;
     },

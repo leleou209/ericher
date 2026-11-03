@@ -1752,6 +1752,10 @@ async function handleApi(
                 : undefined,
             maintModel:
               typeof body.maintModel === "string" ? body.maintModel : undefined,
+            thinkingDialect:
+              typeof body.thinkingDialect === "string"
+                ? body.thinkingDialect
+                : undefined,
             firstModel:
               typeof body.firstModel === "string" ? body.firstModel : undefined,
             maxOutput:
@@ -1780,6 +1784,7 @@ async function handleApi(
             keySecret: str("keySecret"),
             maintKeySecret: str("maintKeySecret"),
             maintModel: str("maintModel"),
+            thinkingDialect: str("thinkingDialect"),
           }),
         ),
       );
@@ -1815,6 +1820,12 @@ async function handleApi(
               typeof body.contextWindow === "number"
                 ? body.contextWindow
                 : undefined,
+            thinking:
+              typeof body.thinking === "string" ? body.thinking : undefined,
+            thinkingBudget:
+              typeof body.thinkingBudget === "number"
+                ? body.thinkingBudget
+                : undefined,
           }),
         ),
       );
@@ -1837,6 +1848,12 @@ async function handleApi(
             contextWindow:
               typeof body.contextWindow === "number"
                 ? body.contextWindow
+                : undefined,
+            thinking:
+              typeof body.thinking === "string" ? body.thinking : undefined,
+            thinkingBudget:
+              typeof body.thinkingBudget === "number"
+                ? body.thinkingBudget
                 : undefined,
             active: typeof body.active === "boolean" ? body.active : undefined,
           }),

@@ -153,3 +153,86 @@ describe("思考流桥（openAIModelWithReasoning）", () => {
     expect(out.some((e) => e.type === "reasoning-start")).toBe(false);
   });
 });
+
+/**
+ * 思考参数落地：providerOptions 里那句指令要真写进出站请求体。
+ *
+ * 为什么必须在这一层验：AI SDK 的 openai provider 只认自家 schema，
+ * thinking / enable_thinking 这类私有字段会被 strip 掉 —— 只有拦住真发出去的
+ * 那一次 fetch，才证明它们没在半路被吞。
+ */
+describe("思考参数写进请求体", () => {
+  /** 拦住桥发出去的那一次请求，把请求体解析回来；响应随便给一条能收尾的流 */
+  async function requestBodyOf(
+    format: "openai-chat" | "openai-responses",
+    providerOptions?: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const model = openAIModelWithReasoning({
+      apiKey: "k",
+      baseURL: "https://fake.test/v1",
+      format,
+      modelId: "m",
+    });
+    const seen: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: RequestInit) => {
+        seen.push(
+          JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        );
+        return sseResponse(
+          'data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n',
+        );
+      }),
+    );
+    const res = await (
+      model as unknown as {
+        doStream: (
+          o: LanguageModelV3CallOptions,
+        ) => Promise<{ stream: ReadableStream<LanguageModelV3StreamPart> }>;
+      }
+    ).doStream({
+      prompt: [],
+      ...(providerOptions ? { providerOptions } : {}),
+    } as unknown as LanguageModelV3CallOptions);
+    // 只关心请求体：流读不读得完无所谓，取消掉别让定时器挂着
+    await res.stream.getReader().cancel();
+    return seen[0] ?? {};
+  }
+
+  it("reasoning-effort：chat 线是顶层 reasoning_effort", async () => {
+    const body = await requestBodyOf("openai-chat", {
+      ericher: { dialect: "reasoning-effort", level: "high" },
+    });
+    expect(body.reasoning_effort).toBe("high");
+  });
+
+  it("reasoning-effort：responses 线是嵌套的 reasoning.effort", async () => {
+    const body = await requestBodyOf("openai-responses", {
+      ericher: { dialect: "reasoning-effort", level: "max" },
+    });
+    expect(body.reasoning).toEqual({ effort: "xhigh" });
+  });
+
+  it("thinking-object：DeepSeek/GLM 那种 thinking.type 开关", async () => {
+    const body = await requestBodyOf("openai-chat", {
+      ericher: { dialect: "thinking-object", level: "off" },
+    });
+    expect(body.thinking).toEqual({ type: "disabled" });
+  });
+
+  it("enable-thinking：Qwen 那种布尔开关", async () => {
+    const body = await requestBodyOf("openai-chat", {
+      ericher: { dialect: "enable-thinking", level: "medium" },
+    });
+    expect(body.enable_thinking).toBe(true);
+  });
+
+  it("没传 providerOptions：一个思考字段都不多发（存量行为不变）", async () => {
+    const body = await requestBodyOf("openai-chat");
+    expect(body).not.toHaveProperty("reasoning_effort");
+    expect(body).not.toHaveProperty("thinking");
+    expect(body).not.toHaveProperty("enable_thinking");
+    expect(body).not.toHaveProperty("reasoning");
+  });
+});

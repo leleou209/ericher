@@ -9,6 +9,9 @@
  * - 首个条目自动生效（不然建完还得手动点一下，是段没人需要的死循环）；
  * - 老单表（model_configs）惰性迁移：一行拆成一家供应商 + 一条条目，
  *   条目 id 沿用老配置 id（深度思考槽位的指向不能断）。
+ * - 思考配置：供应商的 thinkingDialect（参数怎么写）与条目的 thinking / thinkingBudget
+ *   （强度多高、anthropic 预算）存得进读得回、脏值归一成默认；老表迁出来是
+ *   auto / "" / 0，行为跟升级前一字不差。
  *
  * 表用最小假 SQL 引擎，只认得 modelConfigs.ts 会发的那几条语句。
  *
@@ -43,6 +46,7 @@ interface PRow {
   key_secret: string;
   maint_key_secret: string;
   maint_model: string;
+  thinking_dialect: string;
   created: string;
 }
 
@@ -52,6 +56,8 @@ interface ERow {
   model: string;
   max_output: number;
   context_window: number;
+  thinking: string;
+  thinking_budget: number;
   active: number;
   created: string;
 }
@@ -96,8 +102,10 @@ function fakeDb(legacy: LRow[] = []) {
       return [] as T[];
     }
 
-    // 老表补列（context_window）：真库上列已存在会抛错被吞，假库直接当成功
+    // 老表补列（context_window / thinking / thinking_dialect）：真库上列已存在会抛错被吞，
+    // 假库直接当成功 —— 这里只需要它别打断后续语句
     if (sql.startsWith("alter table model_entries")) return [] as T[];
+    if (sql.startsWith("alter table model_providers")) return [] as T[];
 
     if (
       sql.startsWith("select id, name, format, base_url, key_secret, model")
@@ -114,8 +122,10 @@ function fakeDb(legacy: LRow[] = []) {
         key_secret,
         maint_key_secret,
         maint_model,
+        thinking_dialect,
         created,
       ] = values as [
+        string,
         string,
         string,
         string,
@@ -133,6 +143,7 @@ function fakeDb(legacy: LRow[] = []) {
         key_secret,
         maint_key_secret,
         maint_model,
+        thinking_dialect,
         created,
       });
       return [] as T[];
@@ -145,15 +156,29 @@ function fakeDb(legacy: LRow[] = []) {
         model,
         max_output,
         context_window,
+        thinking,
+        thinking_budget,
         active,
         created,
-      ] = values as [string, string, string, number, number, number, string];
+      ] = values as [
+        string,
+        string,
+        string,
+        number,
+        number,
+        string,
+        number,
+        number,
+        string,
+      ];
       entries.push({
         id,
         provider_id,
         model,
         max_output: Number(max_output),
         context_window: Number(context_window),
+        thinking,
+        thinking_budget: Number(thinking_budget),
         active: Number(active),
         created,
       });
@@ -174,19 +199,23 @@ function fakeDb(legacy: LRow[] = []) {
     }
 
     if (sql.startsWith("update model_entries set")) {
-      const [model, max_output, context_window, active, id] = values as [
-        string,
-        number,
-        number,
-        number,
-        string,
-      ];
+      const [
+        model,
+        max_output,
+        context_window,
+        thinking,
+        thinking_budget,
+        active,
+        id,
+      ] = values as [string, number, number, string, number, number, string];
       const row = entries.find((r) => r.id === id);
       if (!row) throw new Error("假库：update 没找到行");
       Object.assign(row, {
         model,
         max_output: Number(max_output),
         context_window: Number(context_window),
+        thinking,
+        thinking_budget: Number(thinking_budget),
         active: Number(active),
       });
       return [] as T[];
@@ -207,8 +236,18 @@ function fakeDb(legacy: LRow[] = []) {
         key_secret,
         maint_key_secret,
         maint_model,
+        thinking_dialect,
         id,
-      ] = values as [string, string, string, string, string, string, string];
+      ] = values as [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ];
       const row = providers.find((r) => r.id === id);
       if (!row) throw new Error("假库：update 没找到行");
       Object.assign(row, {
@@ -218,6 +257,7 @@ function fakeDb(legacy: LRow[] = []) {
         key_secret,
         maint_key_secret,
         maint_model,
+        thinking_dialect,
       });
       return [] as T[];
     }
@@ -336,6 +376,56 @@ describe("供应商增删改查", () => {
     const { db } = fakeDb();
     expect(updateModelProvider(db, "nope", { name: "x" })).toBeNull();
     expect(removeModelProvider(db, "nope")).toBe(false);
+  });
+
+  it("思考写法：新建默认 auto，显式传能存回，改缺省不动", () => {
+    const { db } = fakeDb();
+    // 没给 = 跟格式挑默认写法，存量行为不变
+    expect(createModelProvider(db, ok).provider.thinkingDialect).toBe("auto");
+    const { provider } = createModelProvider(db, {
+      ...ok,
+      name: "GLM",
+      thinkingDialect: "thinking-object",
+    });
+    expect(provider.thinkingDialect).toBe("thinking-object");
+    expect(listModelProviders(db).map((x) => x.thinkingDialect)).toEqual([
+      "auto",
+      "thinking-object",
+    ]);
+    // 缺省不动：只改名称，写法保持原样（漏写这一列就会被静默重置成 auto）
+    expect(
+      updateModelProvider(db, provider.id, { name: "GLM 2" })?.thinkingDialect,
+    ).toBe("thinking-object");
+    // 给了就换
+    expect(
+      updateModelProvider(db, provider.id, { thinkingDialect: "anthropic" })
+        ?.thinkingDialect,
+    ).toBe("anthropic");
+  });
+
+  it("思考写法脏值一律回 auto：认不出的字符串、数字、手改的旧值", () => {
+    const { db } = fakeDb();
+    expect(
+      createModelProvider(db, { ...ok, thinkingDialect: "LOUD" }).provider
+        .thinkingDialect,
+    ).toBe("auto");
+    expect(
+      createModelProvider(db, {
+        ...ok,
+        name: "数字",
+        thinkingDialect: 123 as unknown as string,
+      }).provider.thinkingDialect,
+    ).toBe("auto");
+    const { provider } = createModelProvider(db, ok);
+    expect(
+      updateModelProvider(db, provider.id, { thinkingDialect: "LOUD" })
+        ?.thinkingDialect,
+    ).toBe("auto");
+    expect(
+      updateModelProvider(db, provider.id, {
+        thinkingDialect: 123 as unknown as string,
+      })?.thinkingDialect,
+    ).toBe("auto");
   });
 
   it("删一家连同名下条目；名下有生效条目时最新的一条顶上", () => {
@@ -468,6 +558,96 @@ describe("模型条目增删改查", () => {
     expect(toContextWindow(undefined)).toBe(0);
     expect(toContextWindow("128000")).toBe(128_000);
   });
+
+  it("思考强度与预算：建了读得回、patch 能改、缺省不动", () => {
+    const { db } = fakeDb();
+    const { provider } = createModelProvider(db, { ...ok, firstModel: "m-1" });
+    // 首条没给：落 "" 与 0（= 没设，一个字都不发）
+    const e1 = listModelEntries(db)[0];
+    expect(e1.thinking).toBe("");
+    expect(e1.thinkingBudget).toBe(0);
+
+    const e2 = createModelEntry(db, {
+      providerId: provider.id,
+      model: "m-2",
+      thinking: "high",
+      thinkingBudget: 8192,
+    });
+    expect(e2.thinking).toBe("high");
+    expect(e2.thinkingBudget).toBe(8192);
+    expect(listModelEntries(db).find((x) => x.id === e2.id)).toMatchObject({
+      thinking: "high",
+      thinkingBudget: 8192,
+    });
+
+    // 缺省不动：只改模型名，思考和预算都保持原样
+    const same = updateModelEntry(db, e2.id, { model: "m-2b" });
+    expect(same?.thinking).toBe("high");
+    expect(same?.thinkingBudget).toBe(8192);
+    // 给了就换
+    const changed = updateModelEntry(db, e2.id, {
+      thinking: "max",
+      thinkingBudget: 32768,
+    });
+    expect(changed?.thinking).toBe("max");
+    expect(changed?.thinkingBudget).toBe(32768);
+    // "" 与 0 是「清成没设」的合法值，不是脏值
+    const cleared = updateModelEntry(db, e2.id, {
+      thinking: "",
+      thinkingBudget: 0,
+    });
+    expect(cleared?.thinking).toBe("");
+    expect(cleared?.thinkingBudget).toBe(0);
+  });
+
+  it("思考脏值归一：档位认不出就当没设，预算只认正整数", () => {
+    const { db } = fakeDb();
+    const { provider } = createModelProvider(db, ok);
+    // 带尾空格 / 大小写不对 / 根本不是字符串：宁可不发，也不要发厂商看不懂的值
+    const badLevels = ["high ", "LOUD", 123 as unknown as string];
+    for (const [i, level] of badLevels.entries()) {
+      const e = createModelEntry(db, {
+        providerId: provider.id,
+        model: `level-${i}`,
+        thinking: level,
+      });
+      expect(e.thinking).toBe("");
+    }
+    const e = createModelEntry(db, {
+      providerId: provider.id,
+      model: "m-1",
+      thinking: "high",
+    });
+    // 改的时候同样归一：存不进去的值不该留下来
+    expect(updateModelEntry(db, e.id, { thinking: "LOUD" })?.thinking).toBe("");
+    expect(updateModelEntry(db, e.id, { thinking: "high " })?.thinking).toBe("");
+
+    // 预算只认正整数：0 / 负数 / 小数 / 非数字 / null 都表示「没填，按档位换算」
+    const badBudgets = [
+      -1,
+      1.5,
+      "abc" as unknown as number,
+      null as unknown as number,
+    ];
+    for (const [i, budget] of badBudgets.entries()) {
+      const row = createModelEntry(db, {
+        providerId: provider.id,
+        model: `budget-${i}`,
+        thinkingBudget: budget,
+      });
+      expect(row.thinkingBudget).toBe(0);
+    }
+    const withBudget = createModelEntry(db, {
+      providerId: provider.id,
+      model: "m-2",
+      thinkingBudget: 4096,
+    });
+    expect(withBudget.thinkingBudget).toBe(4096);
+    expect(
+      updateModelEntry(db, withBudget.id, { thinkingBudget: -1 })
+        ?.thinkingBudget,
+    ).toBe(0);
+  });
 });
 
 describe("生效一组（条目 + 供应商）", () => {
@@ -536,6 +716,8 @@ describe("老单表惰性迁移", () => {
       keySecret: "DEEPSEEK_KEY",
       maintKeySecret: "SK_MAINT",
       maintModel: "deepseek-flash",
+      // 老表没有思考配置：新供应商按 auto 落，行为跟升级前一致
+      thinkingDialect: "auto",
     });
     const entries = listModelEntries(db);
     expect(entries).toHaveLength(1);
@@ -545,6 +727,9 @@ describe("老单表惰性迁移", () => {
     expect(entries[0].model).toBe("deepseek-v4-pro");
     expect(entries[0].maxOutput).toBe(16384);
     expect(entries[0].active).toBe(true);
+    // 思考强度/预算也按「没设」落：存量条目继续跟厂商默认走
+    expect(entries[0].thinking).toBe("");
+    expect(entries[0].thinkingBudget).toBe(0);
     // 迁移只跑一次：老表改名后下一次启动不再触发
     expect(getCatalogById(db, "abcd1234")).not.toBeNull();
     ensureModelCatalogSchema(db);

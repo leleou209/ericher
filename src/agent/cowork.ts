@@ -3007,6 +3007,9 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
       // 输出上限跟生效配置走，没配回 32K：兼容层不认识第三方模型名会兜底 4096，
       // 长思考加正文不够用，流「正常结束」但话被掐断
       maxOutputTokens: resolved.maxOutput,
+      // 思考强度：档位（条目）与写法（供应商）在解析模型时已折成 providerOptions；
+      // 条目没设就是 undefined —— 一个字都不发，跟厂商默认走
+      providerOptions: resolved.providerOptions ?? undefined,
     });
 
     // 监听挂在流建起之后：streamText 同步就拒（配置/校验错）时，不会留下没人摘的 abort 监听
@@ -4759,6 +4762,10 @@ export class CoworkAgent extends AIChatAgent<Env, ChatState> {
     model: string;
     maxOutput?: number;
     contextWindow?: number;
+    /** 思考强度；缺省 ""（一个字都不发，跟厂商默认走） */
+    thinking?: string;
+    /** anthropic 预算档的 token；缺省 0（按档位换算） */
+    thinkingBudget?: number;
   }): Promise<ModelEntry> {
     if (!this.isOwnerRoom) throw new Error("模型配置只在主人那间维护");
     this.ensureModelConfigs();

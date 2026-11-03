@@ -32,6 +32,7 @@ import {
   FormSection,
   useDraft,
 } from "./FormDialog";
+import { THINKING_LEVEL_LABEL } from "../lib/presets";
 import { Icon, type IconName } from "./Icons";
 import { LoadingBoundary } from "./LoadingBoundary";
 import { AppearancePanel, type AppearancePage } from "./ThemePanel";
@@ -402,7 +403,9 @@ function StyleAssign({
   const { providers, entries } = catalog;
   const labelOf = (e: ModelEntry) => {
     const p = providers.find((x) => x.id === e.providerId);
-    return `${p ? p.name : "未知供应商"}（${e.model}）`;
+    // 同一家底下可能挂着只差思考档的两条（「关掉思考」和「最高」各一条）：标签里带上强度才分得清
+    const thinking = e.thinking ? ` · 思考 ${THINKING_LEVEL_LABEL[e.thinking]}` : "";
+    return `${p ? p.name : "未知供应商"}（${e.model}）${thinking}`;
   };
   const active = entries.find((e) => e.active) || null;
 

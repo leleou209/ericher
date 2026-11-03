@@ -658,6 +658,36 @@ export interface ToolCatalog {
 /** 模型服务的接口格式。同一家的 baseUrl 换个路径就能换格式（各家的备注见 presets.ts） */
 export type ModelFormat = "anthropic" | "openai-chat" | "openai-responses";
 
+/**
+ * 供应商一级的「思考参数写法」：决定请求里用哪套字段表达思考强度。
+ *
+ * 为什么要单列一格：同样的意思各家叫法不同 —— Anthropic 线要预算 token，
+ * OpenAI 线要 reasoning_effort，有的兼容网关只认开/关。接口格式只能说明「报文长什么样」，
+ * 说明不了「思考怎么写」，所以两者分开配。
+ */
+export type ThinkingDialect =
+  /** 自动：anthropic 线用预算档，OpenAI 线用 reasoning_effort */
+  | "auto"
+  /** Anthropic 预算档：thinking.budget_tokens */
+  | "anthropic"
+  /** Anthropic 推理档：output_config.effort */
+  | "anthropic-effort"
+  /** OpenAI 系：reasoning_effort */
+  | "reasoning-effort"
+  /** 开关式：thinking: { type: enabled | disabled } */
+  | "thinking-object"
+  /** 开关式：enable_thinking: true | false */
+  | "enable-thinking"
+  /** 不下发：请求里完全不提思考 */
+  | "none";
+
+/**
+ * 模型条目一级的「思考强度」：要多想 —— 和「怎么写」是两件事。
+ * 写法跟着供应商走（接口决定），强度跟着模型走（同一家底下有的模型根本不想）。
+ * 空串 = 默认（跟厂商自己那一档），不是「关闭」。
+ */
+export type ThinkingLevel = "" | "off" | "low" | "medium" | "high" | "max";
+
 /** 读音服务的接法。决定这一条怎么发请求、参数叫什么名字 */
 export type TtsProtocol = "mimo-chat" | "doubao" | "glm-speech" | "minimax";
 
@@ -674,6 +704,8 @@ export interface ModelProvider {
   maintKeySecret: string;
   /** 维护性调用专用的小模型；空 = 复用当前生效的主线模型 */
   maintModel: string;
+  /** 请求里用哪套字段表达思考强度（见 ThinkingDialect）；"auto" = 按接口格式自己挑 */
+  thinkingDialect: ThinkingDialect;
   created: string;
 }
 
@@ -686,6 +718,10 @@ export interface ModelEntry {
   maxOutput: number;
   /** 最大上下文（token）；0 = 用默认档。聊天头部用它对比 lastUsage 算窗口占用 */
   contextWindow: number;
+  /** 思考强度；空串 = 默认（跟厂商），不是「关闭」 */
+  thinking: ThinkingLevel;
+  /** 思考预算（token）；0 = 没填，按强度档位换算（只有 Anthropic 预算档用得上） */
+  thinkingBudget: number;
   active: boolean;
   created: string;
 }
